@@ -76,6 +76,128 @@ pub fn run_control_only() -> Result<(), Error> {
     rt.block_on(control_only_main(cfg))
 }
 
+/// Services-only mode: control plane + supervisor (running the real
+/// services declared in config), but no early mounts, no netlink
+/// network bring-up, no WAN DHCP, no firewall install. Intermediate
+/// between `--control-only` (supervisor empty) and full `--init`
+/// (supervisor + netlink + firewall + PID 1 duties). Used during
+/// bring-up to exercise the supervisor on a stock OpenWrt device:
+/// procd/netifd/fw4 stay in charge of the network, oxwrtctl only
+/// runs the declared services.
+///
+/// Prerequisite on the host: `/dev/pts` already mounted (procd does
+/// this in its initramfs), cgroup v2 controllers usable (likewise).
+/// When we later promote this binary to PID 1, early_mounts() sets
+/// those up — but as a side binary we rely on the host's.
+pub fn run_services_only() -> Result<(), Error> {
+    let config_path = std::env::var("OXWRT_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+    let cfg = Config::load(&config_path)?;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .worker_threads(2)
+        .build()
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+
+    rt.block_on(services_only_main(cfg))
+}
+
+async fn services_only_main(cfg: Config) -> Result<(), Error> {
+    tracing::info!(
+        hostname = %cfg.hostname,
+        services = cfg.services.len(),
+        "oxwrtctl: services-only mode"
+    );
+
+    // cgroup controller enable is idempotent and cheap — even if procd
+    // already did it, re-enabling the subset we need (memory/cpu/pids)
+    // costs a few writes to /sys/fs/cgroup/cgroup.subtree_control. If
+    // the write fails (e.g. kernel doesn't support v2) we continue
+    // degraded; per-service memory_max etc. just won't be enforced.
+    if let Err(e) = crate::container::enable_cgroup_controllers() {
+        tracing::warn!(error = %e, "enable_cgroup_controllers failed");
+    }
+
+    // No WAN DHCP, no host veths, no firewall install. The supervisor
+    // runs against the services verbatim — this mode is specifically
+    // for services that use `net_mode = "host"` and don't require
+    // isolated netns setup. An isolated service here would start
+    // without its veth, which the container pre_exec will flag.
+    let wan_lease: control::SharedLease = Arc::new(std::sync::RwLock::new(None));
+    let supervisor = Supervisor::from_config(&cfg.services);
+    let logd = Logd::new();
+    let firewall_dump: Vec<String> = Vec::new();
+    // Note: services-only still uses the control-only flag on
+    // ControlState — reload should not reinstall the firewall or
+    // reconcile netlink here either. What's different from
+    // --control-only is just that the supervisor is populated.
+    let state = ControlState::new_control_only(
+        cfg.clone(),
+        supervisor,
+        logd.clone(),
+        firewall_dump,
+        wan_lease,
+    );
+
+    let listen_addrs = parse_listen_addrs(&cfg.control.listen);
+    if listen_addrs.is_empty() {
+        return Err(Error::Runtime(
+            "no valid control listen addresses in config".to_string(),
+        ));
+    }
+    tracing::info!(?listen_addrs, "starting sQUIC control plane");
+
+    let server = Arc::new(Server::load(
+        Path::new(SIGNING_KEY_PATH),
+        &cfg.control.authorized_keys,
+        state.clone(),
+    )?);
+    let server_task = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server.listen(&listen_addrs).await {
+                tracing::error!(error = %e, "control server exited");
+            }
+        })
+    };
+
+    // Supervisor tick loop — same cadence as --init. Services start on
+    // the first tick after spawn; crashed services respawn per their
+    // backoff schedule.
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if let Ok(mut sup) = state.supervisor.lock() {
+                    sup.tick(&logd);
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("oxwrtctl: SIGINT → shutdown");
+                break;
+            }
+            _ = term.recv() => {
+                tracing::info!("oxwrtctl: SIGTERM → shutdown");
+                break;
+            }
+        }
+    }
+
+    if let Ok(mut sup) = state.supervisor.lock() {
+        sup.shutdown();
+    }
+    server_task.abort();
+    Ok(())
+}
+
 async fn control_only_main(cfg: Config) -> Result<(), Error> {
     tracing::info!(
         hostname = %cfg.hostname,
