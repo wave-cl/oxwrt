@@ -1,0 +1,14 @@
+#!/bin/sh
+# Enable oxwrtctl on first boot after flash.
+#
+# /etc/uci-defaults/* scripts run exactly once at first boot — procd
+# deletes them afterward. This is the canonical OpenWrt pattern for
+# "baked into the image but needs a boot-time action to take effect."
+#
+# We can't ship /etc/rc.d/S95oxwrtctl directly because the imagebuilder
+# overlay doesn't preserve symlinks reliably across filesystem hops.
+# `/etc/init.d/oxwrtctl enable` creates the symlink at first boot.
+
+/etc/init.d/oxwrtctl enable
+
+exit 0

@@ -53,7 +53,7 @@ name = "lan"
 type = "lan"
 bridge = "br-lan"
 members = ["lan1", "lan2", "lan3", "lan4", "lan5"]
-address = "10.10.10.1"
+address = "192.168.1.1"
 prefix = 24
 
 # --- Guest ---
@@ -352,5 +352,5 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 # if `allow_control_plane = true` on that zone.
 
 [control]
-listen = ["[::1]:51820", "192.168.8.1:51820"]
+listen = ["[::1]:51820", "192.168.1.1:51820"]
 authorized_keys = "/etc/oxwrt/authorized_keys"
