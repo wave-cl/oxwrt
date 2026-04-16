@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, new_connection};
 
-use crate::config::{Action, Config, Lan, PortSpec, Proto, Service, Wan};
+use crate::config::{Action, Config, Network, PortSpec, Proto, Service, WanConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -57,8 +57,16 @@ impl Net {
 
     pub async fn bring_up(&self, cfg: &Config) -> Result<(), Error> {
         self.up_link("lo").await?;
-        self.setup_lan(&cfg.lan).await?;
-        self.setup_wan(&cfg.wan).await?;
+        for net in &cfg.networks {
+            match net {
+                Network::Lan { .. } => self.setup_lan(net).await?,
+                Network::Wan { .. } => self.setup_wan(net).await?,
+                Network::Simple { .. } => {
+                    // Simple networks are bridges created by the platform;
+                    // no additional setup needed at boot.
+                }
+            }
+        }
         Ok(())
     }
 
@@ -90,15 +98,18 @@ impl Net {
         }
     }
 
-    async fn setup_lan(&self, lan: &Lan) -> Result<(), Error> {
-        if matches!(self.link_index(&lan.bridge).await, Err(Error::LinkNotFound(_))) {
+    async fn setup_lan(&self, net: &Network) -> Result<(), Error> {
+        let Network::Lan { bridge, members, address, prefix, .. } = net else {
+            return Ok(());
+        };
+        if matches!(self.link_index(bridge).await, Err(Error::LinkNotFound(_))) {
             self.handle
                 .link()
-                .add(LinkBridge::new(&lan.bridge).build())
+                .add(LinkBridge::new(bridge).build())
                 .execute()
                 .await?;
         }
-        let bridge_idx = self.link_index(&lan.bridge).await?;
+        let bridge_idx = self.link_index(bridge).await?;
 
         self.handle
             .link()
@@ -109,20 +120,20 @@ impl Net {
         let addr_res = self
             .handle
             .address()
-            .add(bridge_idx, IpAddr::V4(lan.address), lan.prefix)
+            .add(bridge_idx, IpAddr::V4(*address), *prefix)
             .execute()
             .await;
         if let Err(e) = addr_res {
             if !is_exists(&e) {
                 return Err(e.into());
             }
-            tracing::debug!(bridge = %lan.bridge, "lan address already present");
+            tracing::debug!(%bridge, "lan address already present");
         }
 
         // Enslave LAN members to the bridge. Missing members are warned and
         // skipped — hardware may lack a given port, or the config may refer
         // to an interface that's renamed by the board-files.
-        for member in &lan.members {
+        for member in members {
             let member_idx = match self.link_index(member).await {
                 Ok(idx) => idx,
                 Err(Error::LinkNotFound(_)) => {
@@ -145,11 +156,9 @@ impl Net {
         Ok(())
     }
 
-    async fn setup_wan(&self, wan: &Wan) -> Result<(), Error> {
-        let iface = match wan {
-            Wan::Dhcp { iface } => iface,
-            Wan::Static { iface, .. } => iface,
-            Wan::Pppoe { iface, .. } => iface,
+    async fn setup_wan(&self, net: &Network) -> Result<(), Error> {
+        let Network::Wan { iface, wan, .. } = net else {
+            return Ok(());
         };
         self.up_link(iface).await?;
 
@@ -159,8 +168,7 @@ impl Net {
         // static-WAN router actually comes up with the operator's
         // configured IP without needing a reload. EEXIST on address / route
         // is tolerated so re-running this is idempotent.
-        if let Wan::Static {
-            iface,
+        if let WanConfig::Static {
             address,
             prefix,
             gateway,
@@ -463,7 +471,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // Per-service automatic forward rules: LAN → service veth,
     // service veth → WAN, service → depends_on peers. These are
     // implicit from service topology, not explicit firewall rules.
-    let wan_iface = wan_iface_name(&cfg.wan);
+    let wan_iface = cfg.primary_wan().map(|n| n.iface());
+    let lan_iface = cfg.lan().map(|n| n.iface());
     for svc in &cfg.services {
         if svc.veth.is_none() {
             continue;
@@ -471,24 +480,28 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         let veth_host = veth_host_name(svc);
 
         // LAN → service
-        Rule::new(&forward)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .iiface(&cfg.lan.bridge)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .oiface(&veth_host)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .accept()
-            .add_to_batch(&mut batch);
+        if let Some(lan_if) = lan_iface {
+            Rule::new(&forward)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .iiface(lan_if)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .oiface(&veth_host)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .accept()
+                .add_to_batch(&mut batch);
+        }
 
         // Service → WAN
-        Rule::new(&forward)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .iiface(&veth_host)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .oiface(wan_iface)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .accept()
-            .add_to_batch(&mut batch);
+        if let Some(wan_if) = wan_iface {
+            Rule::new(&forward)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .iiface(&veth_host)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .oiface(wan_if)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .accept()
+                .add_to_batch(&mut batch);
+        }
 
         // Service → depends_on peers
         for dep_name in &svc.depends_on {
@@ -570,10 +583,16 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .with_policy(NfChainPolicy::Accept)
             .add_to_batch(&mut dnat_batch);
 
-        // Collect all router IPs for DNAT matching: LAN + each network.
-        let mut listen_addrs: Vec<Ipv4Addr> = vec![cfg.lan.address];
+        // Collect all router IPs for DNAT matching: every network that
+        // has a local address (LAN + Simple variants).
+        let mut listen_addrs: Vec<Ipv4Addr> = Vec::new();
         for net in &cfg.networks {
-            listen_addrs.push(net.address);
+            match net {
+                Network::Lan { address, .. } | Network::Simple { address, .. } => {
+                    listen_addrs.push(*address);
+                }
+                Network::Wan { .. } => {}
+            }
         }
 
         for rule in &dnat_rules {
@@ -624,7 +643,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
 /// can inspect the active ruleset over the control plane.
 pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     let mut out = Vec::new();
-    let wan_iface = wan_iface_name(&cfg.wan);
+    let wan_iface = cfg.primary_wan().map(|n| n.iface()).unwrap_or("(no-wan)");
 
     out.push("table inet oxwrt {".to_string());
 
@@ -714,6 +733,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     }
 
     // Per-service implicit forward rules.
+    let lan_iface = cfg.lan().map(|n| n.iface()).unwrap_or("(no-lan)");
     for svc in &cfg.services {
         if svc.veth.is_none() {
             continue;
@@ -721,7 +741,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
         let veth = veth_host_name(svc);
         out.push(format!(
             "    iif \"{}\" oif \"{}\" accept   # lan→svc {}",
-            cfg.lan.bridge, veth, svc.name
+            lan_iface, veth, svc.name
         ));
         out.push(format!(
             "    iif \"{}\" oif \"{}\" accept   # svc {}→wan",
@@ -781,30 +801,22 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
 }
 
 /// Resolve a zone name to the set of interface names it covers.
-/// "lan" → cfg.lan.bridge, "wan" → wan iface, named networks → their iface.
+/// Uses the unified `cfg.network(name)` helper to look up any network.
 fn zone_ifaces(cfg: &Config, zone_name: &str) -> Vec<String> {
     // First check if a firewall zone with this name exists; if so,
     // resolve its `networks` list.
     if let Some(zone) = cfg.firewall.zones.iter().find(|z| z.name == zone_name) {
         let mut ifaces = Vec::new();
         for net_name in &zone.networks {
-            if net_name == "lan" {
-                ifaces.push(cfg.lan.bridge.clone());
-            } else if net_name == "wan" {
-                ifaces.push(wan_iface_name(&cfg.wan).to_string());
-            } else if let Some(net) = cfg.networks.iter().find(|n| &n.name == net_name) {
-                ifaces.push(net.iface.clone());
+            if let Some(net) = cfg.network(net_name) {
+                ifaces.push(net.iface().to_string());
             }
         }
         return ifaces;
     }
     // Fallback: direct name lookup.
-    if zone_name == "lan" {
-        vec![cfg.lan.bridge.clone()]
-    } else if zone_name == "wan" {
-        vec![wan_iface_name(&cfg.wan).to_string()]
-    } else if let Some(net) = cfg.networks.iter().find(|n| n.name == zone_name) {
-        vec![net.iface.clone()]
+    if let Some(net) = cfg.network(zone_name) {
+        vec![net.iface().to_string()]
     } else {
         Vec::new()
     }
@@ -837,17 +849,6 @@ fn parse_dnat_target(s: &str) -> Option<(Ipv4Addr, u16)> {
     let ip = ip_str.parse::<Ipv4Addr>().ok()?;
     let port = port_str.parse::<u16>().ok()?;
     Some((ip, port))
-}
-
-/// Extract the WAN interface name from any `Wan` variant. All three
-/// variants carry an `iface` field; this is just a pattern match that
-/// borrows it.
-fn wan_iface_name(wan: &Wan) -> &str {
-    match wan {
-        Wan::Dhcp { iface }
-        | Wan::Static { iface, .. }
-        | Wan::Pppoe { iface, .. } => iface,
-    }
 }
 
 /// Convention for the host-side end of a service's veth pair, defined

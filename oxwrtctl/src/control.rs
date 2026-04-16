@@ -239,11 +239,15 @@ pub fn default_config_text(control: &crate::config::Control) -> String {
         r#"# oxwrt.toml — written by `oxwrtctl reset`. Edit freely.
 hostname = "oxwrt"
 
-[wan]
-mode = "dhcp"
+[[networks]]
+name = "wan"
+type = "wan"
 iface = "eth0"
+mode = "dhcp"
 
-[lan]
+[[networks]]
+name = "lan"
+type = "lan"
 bridge = "br-lan"
 members = ["eth1", "eth2"]
 address = "192.168.8.1"
@@ -352,9 +356,9 @@ mod tests {
         let cfg: Config = toml::from_str(&text).expect("default config must parse");
         assert_eq!(cfg.control.listen, control.listen);
         assert_eq!(cfg.control.authorized_keys, control.authorized_keys);
-        assert_eq!(cfg.lan.bridge, "br-lan");
+        assert_eq!(cfg.lan().unwrap().iface(), "br-lan");
         assert!(cfg.services.is_empty());
-        assert!(cfg.networks.is_empty());
+        assert_eq!(cfg.networks.len(), 2); // wan + lan
     }
 
     /// Listen string must be quoted exactly once — this guards against

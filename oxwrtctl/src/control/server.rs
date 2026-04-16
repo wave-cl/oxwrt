@@ -244,7 +244,7 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
 }
 
 fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
-    use crate::config::{self, Wan};
+    use crate::config::{self, Network, WanConfig};
     use std::net::Ipv4Addr;
     use std::path::Path;
 
@@ -270,48 +270,58 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
                 Some(value.to_string())
             };
         }
-        "lan.address" => match value.parse::<Ipv4Addr>() {
-            Ok(a) => new_cfg.lan.address = a,
-            Err(e) => {
-                return Response::Err {
-                    message: format!("invalid ipv4 address: {e}"),
-                };
-            }
-        },
-        "lan.prefix" => match value.parse::<u8>() {
-            Ok(p) if p <= 32 => new_cfg.lan.prefix = p,
-            _ => {
-                return Response::Err {
-                    message: "lan.prefix must be 0..=32".to_string(),
-                };
-            }
-        },
+        "lan.address" => {
+            let addr = match value.parse::<Ipv4Addr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid ipv4 address: {e}"),
+                    };
+                }
+            };
+            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
+                return Response::Err { message: "no lan network configured".to_string() };
+            };
+            if let Network::Lan { address, .. } = lan { *address = addr; }
+        }
+        "lan.prefix" => {
+            let p = match value.parse::<u8>() {
+                Ok(p) if p <= 32 => p,
+                _ => {
+                    return Response::Err {
+                        message: "lan.prefix must be 0..=32".to_string(),
+                    };
+                }
+            };
+            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
+                return Response::Err { message: "no lan network configured".to_string() };
+            };
+            if let Network::Lan { prefix, .. } = lan { *prefix = p; }
+        }
         "lan.bridge" => {
             if value.is_empty() || value.len() >= 16 {
                 return Response::Err {
                     message: "lan.bridge must be 1..15 chars".to_string(),
                 };
             }
-            new_cfg.lan.bridge = value.to_string();
+            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
+                return Response::Err { message: "no lan network configured".to_string() };
+            };
+            if let Network::Lan { bridge, .. } = lan { *bridge = value.to_string(); }
         }
         "wan.mode" => {
-            // Switching WAN mode replaces the entire Wan variant.
+            // Switching WAN mode replaces the WanConfig inside the Wan variant.
             // The iface is carried over from the current config.
-            let iface = match &new_cfg.wan {
-                Wan::Dhcp { iface }
-                | Wan::Static { iface, .. }
-                | Wan::Pppoe { iface, .. } => iface.clone(),
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
             };
+            let Network::Wan { wan, .. } = wan_net else { unreachable!() };
             match value {
                 "dhcp" => {
-                    new_cfg.wan = Wan::Dhcp { iface };
+                    *wan = WanConfig::Dhcp;
                 }
                 "static" => {
-                    // Default to a placeholder address — operator must
-                    // follow up with `set wan.address/prefix/gateway`
-                    // before `reload` to get a working static config.
-                    new_cfg.wan = Wan::Static {
-                        iface,
+                    *wan = WanConfig::Static {
                         address: Ipv4Addr::new(0, 0, 0, 0),
                         prefix: 24,
                         gateway: Ipv4Addr::new(0, 0, 0, 0),
@@ -319,8 +329,7 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
                     };
                 }
                 "pppoe" => {
-                    new_cfg.wan = Wan::Pppoe {
-                        iface,
+                    *wan = WanConfig::Pppoe {
                         username: String::new(),
                         password: String::new(),
                     };
@@ -334,81 +343,113 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
                 }
             }
         }
-        "wan.iface" => match &mut new_cfg.wan {
-            Wan::Dhcp { iface } | Wan::Static { iface, .. } | Wan::Pppoe { iface, .. } => {
-                *iface = value.to_string();
+        "wan.iface" => {
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            if let Network::Wan { iface, .. } = wan_net { *iface = value.to_string(); }
+        }
+        "wan.address" => {
+            let addr = match value.parse::<Ipv4Addr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid ipv4 address: {e}"),
+                    };
+                }
+            };
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            match wan_net {
+                Network::Wan { wan: WanConfig::Static { address, .. }, .. } => *address = addr,
+                _ => {
+                    return Response::Err {
+                        message: "wan.address only valid when wan.mode = \"static\"".to_string(),
+                    };
+                }
             }
-        },
-        "wan.address" => match (value.parse::<Ipv4Addr>(), &mut new_cfg.wan) {
-            (Ok(a), Wan::Static { address, .. }) => {
-                *address = a;
+        }
+        "wan.prefix" => {
+            let p = match value.parse::<u8>() {
+                Ok(p) if p <= 32 => p,
+                Ok(_) => {
+                    return Response::Err {
+                        message: "wan.prefix must be 0..=32".to_string(),
+                    };
+                }
+                Err(_) => {
+                    return Response::Err {
+                        message: "wan.prefix must be 0..=32".to_string(),
+                    };
+                }
+            };
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            match wan_net {
+                Network::Wan { wan: WanConfig::Static { prefix, .. }, .. } => *prefix = p,
+                _ => {
+                    return Response::Err {
+                        message: "wan.prefix only valid when wan.mode = \"static\"".to_string(),
+                    };
+                }
             }
-            (Ok(_), _) => {
-                return Response::Err {
-                    message: "wan.address only valid when wan.mode = \"static\"".to_string(),
-                };
+        }
+        "wan.gateway" => {
+            let addr = match value.parse::<Ipv4Addr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid ipv4 address: {e}"),
+                    };
+                }
+            };
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            match wan_net {
+                Network::Wan { wan: WanConfig::Static { gateway, .. }, .. } => *gateway = addr,
+                _ => {
+                    return Response::Err {
+                        message: "wan.gateway only valid when wan.mode = \"static\"".to_string(),
+                    };
+                }
             }
-            (Err(e), _) => {
-                return Response::Err {
-                    message: format!("invalid ipv4 address: {e}"),
-                };
+        }
+        "wan.username" => {
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            match wan_net {
+                Network::Wan { wan: WanConfig::Pppoe { username, .. }, .. } => *username = value.to_string(),
+                _ => {
+                    return Response::Err {
+                        message: "wan.username only valid when wan.mode = \"pppoe\"".to_string(),
+                    };
+                }
             }
-        },
-        "wan.prefix" => match (value.parse::<u8>(), &mut new_cfg.wan) {
-            (Ok(p), Wan::Static { prefix, .. }) if p <= 32 => {
-                *prefix = p;
+        }
+        "wan.password" => {
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            match wan_net {
+                Network::Wan { wan: WanConfig::Pppoe { password, .. }, .. } => *password = value.to_string(),
+                _ => {
+                    return Response::Err {
+                        message: "wan.password only valid when wan.mode = \"pppoe\"".to_string(),
+                    };
+                }
             }
-            (Ok(_), Wan::Static { .. }) => {
-                return Response::Err {
-                    message: "wan.prefix must be 0..=32".to_string(),
-                };
-            }
-            (Ok(_), _) => {
-                return Response::Err {
-                    message: "wan.prefix only valid when wan.mode = \"static\"".to_string(),
-                };
-            }
-            (Err(_), _) => {
-                return Response::Err {
-                    message: "wan.prefix must be 0..=32".to_string(),
-                };
-            }
-        },
-        "wan.gateway" => match (value.parse::<Ipv4Addr>(), &mut new_cfg.wan) {
-            (Ok(a), Wan::Static { gateway, .. }) => {
-                *gateway = a;
-            }
-            (Ok(_), _) => {
-                return Response::Err {
-                    message: "wan.gateway only valid when wan.mode = \"static\"".to_string(),
-                };
-            }
-            (Err(e), _) => {
-                return Response::Err {
-                    message: format!("invalid ipv4 address: {e}"),
-                };
-            }
-        },
-        "wan.username" => match &mut new_cfg.wan {
-            Wan::Pppoe { username, .. } => *username = value.to_string(),
-            _ => {
-                return Response::Err {
-                    message: "wan.username only valid when wan.mode = \"pppoe\"".to_string(),
-                };
-            }
-        },
-        "wan.password" => match &mut new_cfg.wan {
-            Wan::Pppoe { password, .. } => *password = value.to_string(),
-            _ => {
-                return Response::Err {
-                    message: "wan.password only valid when wan.mode = \"pppoe\"".to_string(),
-                };
-            }
-        },
+        }
         "wan.dns" => {
             // Comma-separated list of IP addresses, e.g. "1.1.1.1,9.9.9.9".
             // Only valid in static mode (DHCP mode gets DNS from the lease).
-            let Wan::Static { dns, .. } = &mut new_cfg.wan else {
+            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
+                return Response::Err { message: "no wan network configured".to_string() };
+            };
+            let Network::Wan { wan: WanConfig::Static { dns, .. }, .. } = wan_net else {
                 return Response::Err {
                     message: "wan.dns only valid when wan.mode = \"static\"".to_string(),
                 };
@@ -510,6 +551,10 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
 /// Navigate the `toml_edit` document to the right field and replace its
 /// value, preserving comments and formatting. Returns a human-readable
 /// error message on unknown keys or unexpected document shapes.
+///
+/// With the unified `[[networks]]` format, `lan.*` and `wan.*` keys must
+/// find the right entry in the `[[networks]]` array-of-tables by matching
+/// the `name` field.
 fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -> Result<(), String> {
     use toml_edit::{Item, value as tv};
 
@@ -519,8 +564,6 @@ fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -
         }
         "timezone" => {
             if value.is_empty() {
-                // Removing rather than writing an empty string, so the
-                // field stays `Option<String> = None` after reload.
                 if let Some(tbl) = doc.as_table_mut().get_mut("timezone") {
                     *tbl = Item::None;
                 }
@@ -529,42 +572,36 @@ fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -
             }
         }
         "lan.bridge" => {
-            let lan = doc
-                .get_mut("lan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [lan] table".to_string())?;
+            let lan = find_network_table(doc, "lan")?;
             lan["bridge"] = tv(value);
         }
         "lan.address" => {
-            let lan = doc
-                .get_mut("lan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [lan] table".to_string())?;
+            let lan = find_network_table(doc, "lan")?;
             lan["address"] = tv(value);
         }
         "lan.prefix" => {
-            // Already validated as 0..=32 above, safe to unwrap.
             let n: i64 = value.parse::<u8>().unwrap() as i64;
-            let lan = doc
-                .get_mut("lan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [lan] table".to_string())?;
+            let lan = find_network_table(doc, "lan")?;
             lan["prefix"] = tv(n);
         }
         "wan.mode" => {
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
-            // Preserve iface, rewrite the rest of the table for the new mode.
+            let wan = find_network_table(doc, "wan")?;
+            // Preserve name, type, iface; rewrite mode-specific fields.
             let iface = wan
                 .get("iface")
                 .and_then(|v| v.as_str())
                 .unwrap_or("eth0")
                 .to_string();
+            let name = wan
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("wan")
+                .to_string();
             wan.clear();
-            wan.insert("mode", tv(value));
+            wan.insert("name", tv(&name));
+            wan.insert("type", tv("wan"));
             wan.insert("iface", tv(&iface));
+            wan.insert("mode", tv(value));
             match value {
                 "static" => {
                     wan.insert("address", tv("0.0.0.0"));
@@ -581,42 +618,26 @@ fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -
             }
         }
         "wan.iface" => {
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
+            let wan = find_network_table(doc, "wan")?;
             wan["iface"] = tv(value);
         }
         "wan.address" | "wan.gateway" => {
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
+            let wan = find_network_table(doc, "wan")?;
             let field = key.strip_prefix("wan.").unwrap();
             wan[field] = tv(value);
         }
         "wan.prefix" => {
-            // Already validated as 0..=32 above, safe to unwrap.
             let n: i64 = value.parse::<u8>().unwrap() as i64;
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
+            let wan = find_network_table(doc, "wan")?;
             wan["prefix"] = tv(n);
         }
         "wan.username" | "wan.password" => {
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
+            let wan = find_network_table(doc, "wan")?;
             let field = key.strip_prefix("wan.").unwrap();
             wan[field] = tv(value);
         }
         "wan.dns" => {
-            let wan = doc
-                .get_mut("wan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [wan] table".to_string())?;
+            let wan = find_network_table(doc, "wan")?;
             let mut arr = toml_edit::Array::new();
             for part in value.split(',') {
                 let trimmed = part.trim();
@@ -629,6 +650,26 @@ fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -
         _ => return Err(format!("BUG: unexpected key in apply_set_to_toml: {key}")),
     }
     Ok(())
+}
+
+/// Find the `[[networks]]` entry with the given `name` and return a
+/// mutable reference to its table. Used by `apply_set_to_toml` to
+/// surgically edit WAN/LAN fields in the TOML array-of-tables.
+fn find_network_table<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+) -> Result<&'a mut toml_edit::Table, String> {
+    let networks = doc
+        .get_mut("networks")
+        .and_then(|i| i.as_array_of_tables_mut())
+        .ok_or_else(|| "on-disk config has no [[networks]] array".to_string())?;
+    // Find the index of the entry with the matching name first, then
+    // return a mutable reference via iter_mut().
+    let idx = networks
+        .iter()
+        .position(|tbl| tbl.get("name").and_then(|v| v.as_str()) == Some(name))
+        .ok_or_else(|| format!("no [[networks]] entry with name = {:?}", name))?;
+    Ok(networks.iter_mut().nth(idx).unwrap())
 }
 
 /// Factory reset: overwrite `/etc/oxwrt.toml` with a stock minimal
@@ -1312,38 +1353,41 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
     // Bridge rename is still refused — creating the new bridge and
     // moving ports is substantially more work than an address swap.
     let old_cfg = state.config_snapshot();
-    if old_cfg.lan.bridge != new_cfg.lan.bridge {
+    let old_lan_iface = old_cfg.lan().map(|n| n.iface().to_string());
+    let new_lan_iface = new_cfg.lan().map(|n| n.iface().to_string());
+    if old_lan_iface != new_lan_iface {
         return Response::Err {
             message: format!(
-                "reload: lan.bridge changed from {:?} to {:?}; bridge rename is not \
+                "reload: lan bridge changed from {:?} to {:?}; bridge rename is not \
                  supported over reload, reboot required",
-                old_cfg.lan.bridge, new_cfg.lan.bridge
+                old_lan_iface, new_lan_iface
             ),
         };
     }
-    if let Err(e) = reconcile_iface_address(
-        &new_cfg.lan.bridge,
-        new_cfg.lan.address,
-        new_cfg.lan.prefix,
-        "lan",
-    )
-    .await
-    {
-        return Response::Err {
-            message: format!("reload: lan address reconcile failed: {e}"),
-        };
+    if let Some(crate::config::Network::Lan { bridge, address, prefix, .. }) = new_cfg.lan() {
+        if let Err(e) = reconcile_iface_address(
+            bridge,
+            *address,
+            *prefix,
+            "lan",
+        )
+        .await
+        {
+            return Response::Err {
+                message: format!("reload: lan address reconcile failed: {e}"),
+            };
+        }
     }
 
     // WAN static mode: same reconcile against the WAN iface. DHCP mode
     // is handled by the renewal loop (which runs DISCOVER → REQUEST →
     // ACK and applies the lease independently of reload). Pppoe has
     // its own setup path and isn't reconciled here.
-    if let crate::config::Wan::Static {
+    if let Some(crate::config::Network::Wan {
         iface,
-        address,
-        prefix,
+        wan: crate::config::WanConfig::Static { address, prefix, .. },
         ..
-    } = &new_cfg.wan
+    }) = new_cfg.primary_wan()
     {
         if let Err(e) =
             reconcile_iface_address(iface, *address, *prefix, "wan").await
@@ -1758,46 +1802,60 @@ fn handle_fw_apply(confirm: bool, keep_settings: bool) -> Response {
 }
 
 fn handle_get(state: &ControlState, key: &str) -> Response {
-    use crate::config::Wan;
+    use crate::config::{Network, WanConfig};
     let cfg = state.config_snapshot();
     let value = match key {
         "hostname" => Some(cfg.hostname.clone()),
         "timezone" => cfg.timezone.clone(),
-        "lan.bridge" => Some(cfg.lan.bridge.clone()),
-        "lan.address" => Some(format!("{}/{}", cfg.lan.address, cfg.lan.prefix)),
-        "wan.mode" => Some(
-            match &cfg.wan {
-                Wan::Dhcp { .. } => "dhcp",
-                Wan::Static { .. } => "static",
-                Wan::Pppoe { .. } => "pppoe",
+        "lan.bridge" => cfg.lan().map(|n| n.iface().to_string()),
+        "lan.address" => cfg.lan().map(|n| {
+            if let Network::Lan { address, prefix, .. } = n {
+                format!("{address}/{prefix}")
+            } else {
+                unreachable!()
             }
-            .to_string(),
-        ),
-        "wan.iface" => Some(
-            match &cfg.wan {
-                Wan::Dhcp { iface }
-                | Wan::Static { iface, .. }
-                | Wan::Pppoe { iface, .. } => iface.clone(),
-            },
-        ),
-        "wan.address" => match &cfg.wan {
-            Wan::Static { address, prefix, .. } => Some(format!("{address}/{prefix}")),
-            _ => Some("(not static)".to_string()),
-        },
-        "wan.gateway" => match &cfg.wan {
-            Wan::Static { gateway, .. } => Some(gateway.to_string()),
-            _ => Some("(not static)".to_string()),
-        },
-        "wan.dns" => match &cfg.wan {
-            Wan::Static { dns, .. } => Some(
-                dns.iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-            _ => Some("(not static)".to_string()),
-        },
-        "lan.members" => Some(cfg.lan.members.join(",")),
+        }),
+        "wan.mode" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan, .. } = n {
+                match wan {
+                    WanConfig::Dhcp => "dhcp",
+                    WanConfig::Static { .. } => "static",
+                    WanConfig::Pppoe { .. } => "pppoe",
+                }
+                .to_string()
+            } else {
+                unreachable!()
+            }
+        }),
+        "wan.iface" => cfg.primary_wan().map(|n| n.iface().to_string()),
+        "wan.address" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan: WanConfig::Static { address, prefix, .. }, .. } = n {
+                format!("{address}/{prefix}")
+            } else {
+                "(not static)".to_string()
+            }
+        }),
+        "wan.gateway" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan: WanConfig::Static { gateway, .. }, .. } = n {
+                gateway.to_string()
+            } else {
+                "(not static)".to_string()
+            }
+        }),
+        "wan.dns" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan: WanConfig::Static { dns, .. }, .. } = n {
+                dns.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+            } else {
+                "(not static)".to_string()
+            }
+        }),
+        "lan.members" => cfg.lan().map(|n| {
+            if let Network::Lan { members, .. } = n {
+                members.join(",")
+            } else {
+                unreachable!()
+            }
+        }),
         "services" => Some(
             cfg.services
                 .iter()

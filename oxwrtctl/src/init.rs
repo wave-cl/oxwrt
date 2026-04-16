@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{self, Config, NetMode, Wan};
+use crate::config::{self, Config, NetMode, Network, WanConfig};
 use crate::container::Supervisor;
 use crate::control::{self, ControlState, server::Server};
 use crate::logd::Logd;
@@ -100,8 +100,10 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     let wan_lease: control::SharedLease =
         std::sync::Arc::new(std::sync::RwLock::new(None));
 
-    if let (Some(net), Wan::Dhcp { iface }) = (&net, &cfg.wan) {
-        let handle = net.handle().clone();
+    if let (Some(net_handle), Some(Network::Wan { iface, wan: WanConfig::Dhcp, .. })) =
+        (&net, cfg.primary_wan())
+    {
+        let handle = net_handle.handle().clone();
         match wan_dhcp::acquire(&handle, iface, Duration::from_secs(15)).await {
             Ok(lease) => {
                 if let Err(e) = wan_dhcp::apply_lease(&handle, iface, &lease).await {

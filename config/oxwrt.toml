@@ -12,53 +12,64 @@
 hostname = "slate7"
 timezone = "Europe/Berlin"
 
-# ---------------- WAN ----------------
+# ---------------- Networks ----------------
 #
+# All networks in one unified array. The `type` tag picks the variant:
+# "wan", "lan", or "simple". Firewall policy lives in [[firewall.zones]].
+
+# --- WAN ---
 # `mode` picks between "dhcp", "static", and "pppoe". This example uses
-# dhcp (the GL.iNet default); swap the block for one of the alternatives
+# dhcp (the GL.iNet default); swap the fields for one of the alternatives
 # below when you need a static IP or a PPPoE link.
 
-[wan]
-mode = "dhcp"
+[[networks]]
+name = "wan"
+type = "wan"
 iface = "eth0"
+mode = "dhcp"
 
-# [wan]                                # alternative: static IPv4 on eth0
-# mode = "static"
+# [[networks]]                         # alternative: static IPv4 on eth0
+# name = "wan"
+# type = "wan"
 # iface = "eth0"
+# mode = "static"
 # address = "203.0.113.42"
 # prefix = 24
 # gateway = "203.0.113.1"
 # dns = ["1.1.1.1", "9.9.9.9"]
 
-# [wan]                                # alternative: PPPoE (iface-only for now)
-# mode = "pppoe"
+# [[networks]]                         # alternative: PPPoE
+# name = "wan"
+# type = "wan"
 # iface = "eth0"
+# mode = "pppoe"
 # username = "user@isp"
 # password = "secret"
 
-# ---------------- LAN ----------------
-#
-# Topology only. Firewall policy for the trusted LAN is in [firewall.lan].
+# --- LAN ---
 
-[lan]
+[[networks]]
+name = "lan"
+type = "lan"
 bridge = "br-lan"
 members = ["eth1", "eth2"]
 address = "192.168.8.1"
 prefix = 24
 
-# ---------------- Networks ----------------
-#
-# Each [[networks]] is a separate L2 domain + subnet. Topology only —
-# firewall policy lives in [[firewall.zones]] below.
+# --- Guest ---
 
 [[networks]]
 name = "guest"
+type = "simple"
 iface = "br-guest"
 address = "10.99.0.1"
 prefix = 24
 
+# --- IoT ---
+
 [[networks]]
 name = "iot"
+type = "simple"
 iface = "br-iot"
 address = "10.20.0.1"
 prefix = 24

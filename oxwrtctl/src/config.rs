@@ -27,11 +27,8 @@ pub struct Config {
     pub hostname: String,
     #[serde(default)]
     pub timezone: Option<String>,
-    pub wan: Wan,
-    pub lan: Lan,
-    /// Additional networks (guest WiFi, IoT VLANs, DMZ, etc.).
+    /// All networks: WAN, LAN, and simple (guest/IoT) in a unified array.
     /// Topology only — firewall policy lives in `firewall.zones`.
-    #[serde(default)]
     pub networks: Vec<Network>,
     /// All firewall policy in one place: LAN zone + per-network zones.
     #[serde(default)]
@@ -46,14 +43,67 @@ pub struct Config {
     pub control: Control,
 }
 
-/// A single network: its own L2 domain + subnet. Topology only —
-/// firewall policy lives in `Firewall.zones`.
+/// A single network entry in the unified `[[networks]]` array. The `type`
+/// tag selects the variant: `"wan"`, `"lan"`, or `"simple"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Network {
-    pub name: String,
-    pub iface: String,
-    pub address: Ipv4Addr,
-    pub prefix: u8,
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Network {
+    Wan {
+        name: String,
+        iface: String,
+        #[serde(flatten)]
+        wan: WanConfig,
+    },
+    Lan {
+        name: String,
+        bridge: String,
+        #[serde(default)]
+        members: Vec<String>,
+        address: Ipv4Addr,
+        prefix: u8,
+    },
+    Simple {
+        name: String,
+        iface: String,
+        address: Ipv4Addr,
+        prefix: u8,
+    },
+}
+
+impl Network {
+    /// The user-visible name of this network (e.g. "wan", "lan", "guest").
+    pub fn name(&self) -> &str {
+        match self {
+            Network::Wan { name, .. }
+            | Network::Lan { name, .. }
+            | Network::Simple { name, .. } => name,
+        }
+    }
+
+    /// The kernel interface name: `iface` for WAN/Simple, `bridge` for LAN.
+    pub fn iface(&self) -> &str {
+        match self {
+            Network::Wan { iface, .. } | Network::Simple { iface, .. } => iface,
+            Network::Lan { bridge, .. } => bridge,
+        }
+    }
+}
+
+impl Config {
+    /// Find the first WAN network (for DHCP client, default route, etc.).
+    pub fn primary_wan(&self) -> Option<&Network> {
+        self.networks.iter().find(|n| matches!(n, Network::Wan { .. }))
+    }
+
+    /// Find the first LAN network.
+    pub fn lan(&self) -> Option<&Network> {
+        self.networks.iter().find(|n| matches!(n, Network::Lan { .. }))
+    }
+
+    /// Find a network by name.
+    pub fn network(&self, name: &str) -> Option<&Network> {
+        self.networks.iter().find(|n| n.name() == name)
+    }
 }
 
 /// All firewall policy in one place: zones define default policies per
@@ -139,30 +189,23 @@ fn default_true() -> bool {
 }
 
 
+/// WAN-mode configuration, flattened into the `Network::Wan` variant.
+/// The `mode` tag selects between DHCP, static, and PPPoE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
-pub enum Wan {
-    Dhcp { iface: String },
+pub enum WanConfig {
+    Dhcp,
     Static {
-        iface: String,
         address: Ipv4Addr,
         prefix: u8,
         gateway: Ipv4Addr,
+        #[serde(default)]
         dns: Vec<IpAddr>,
     },
     Pppoe {
-        iface: String,
         username: String,
         password: String,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Lan {
-    pub bridge: String,
-    pub members: Vec<String>,
-    pub address: Ipv4Addr,
-    pub prefix: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,9 +485,12 @@ mod tests {
         // assertions here without worrying about redundant coverage.
         assert_eq!(cfg.hostname, "slate7");
         assert_eq!(cfg.timezone.as_deref(), Some("Europe/Berlin"));
-        assert_eq!(cfg.lan.bridge, "br-lan");
-        assert_eq!(cfg.networks.len(), 2);
-        assert_eq!(cfg.networks[0].name, "guest");
+        // 4 networks: wan, lan, guest, iot
+        assert_eq!(cfg.networks.len(), 4);
+        assert!(cfg.primary_wan().is_some());
+        assert!(cfg.lan().is_some());
+        assert_eq!(cfg.lan().unwrap().iface(), "br-lan");
+        assert_eq!(cfg.network("guest").unwrap().name(), "guest");
         assert_eq!(cfg.firewall.zones.len(), 3);
         assert_eq!(cfg.firewall.zones[0].name, "lan");
         assert_eq!(cfg.firewall.zones[2].name, "wan");
@@ -479,14 +525,21 @@ mod tests {
     fn zone_and_rule_model_roundtrip() {
         let toml_text = r#"
 hostname = "rtr"
-[wan]
-mode = "dhcp"
+
+[[networks]]
+name = "wan"
+type = "wan"
 iface = "eth0"
-[lan]
+mode = "dhcp"
+
+[[networks]]
+name = "lan"
+type = "lan"
 bridge = "br-lan"
 members = ["eth1"]
 address = "192.168.1.1"
 prefix = 24
+
 [control]
 listen = ["[::1]:51820"]
 authorized_keys = "/etc/oxwrt/keys"
