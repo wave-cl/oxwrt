@@ -1,0 +1,16 @@
+# ntpd-rs configuration for oxwrt.
+#
+# NTP client (syncs from pool.ntp.org) and server (serves LAN clients).
+# This file is bind-mounted read-only into the ntp container at
+# /etc/ntp.toml.
+
+[source-defaults]
+poll-interval-limits = { min = 4, max = 10 }
+
+[[source]]
+mode = "pool"
+address = "pool.ntp.org"
+count = 4
+
+[[server]]
+listen = "0.0.0.0:1123"

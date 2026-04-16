@@ -1,0 +1,8 @@
+#!/bin/sh
+# Cross-compilation ar for Linux targets.
+#
+# `zig ar` in Zig 0.16 is broken: `cq` (and `rcs`) refuses to create a new
+# archive file, so ring's build script fails during the first-time archive
+# link. GNU ar from binutils handles this correctly and produces thin
+# archives compatible with Linux targets.
+exec /Users/c/homebrew/opt/binutils/bin/ar "$@"

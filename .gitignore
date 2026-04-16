@@ -1,0 +1,8 @@
+/target/
+/build/
+/openwrt/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

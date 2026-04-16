@@ -1,0 +1,20 @@
+# hickory-dns configuration for oxwrt.
+#
+# Forwarding resolver with local cache. Upstreams over DoT.
+# This file is bind-mounted read-only into the dns container at
+# /etc/named.toml.
+
+listen_addrs_ipv4 = ["0.0.0.0"]
+listen_port = 15353
+directory = "/var"
+
+[[zones]]
+zone = "."
+zone_type = "Forward"
+
+[[zones.stores]]
+type = "forward"
+name_servers = [
+  { socket_addr = "1.1.1.1:853", protocol = "tls", tls_dns_name = "cloudflare-dns.com" },
+  { socket_addr = "9.9.9.9:853", protocol = "tls", tls_dns_name = "dns.quad9.net" },
+]

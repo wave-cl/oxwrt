@@ -1,0 +1,213 @@
+# oxwrt example configuration.
+#
+# This file is parsed by `config::Config` (oxwrtctl/src/config.rs). Every
+# knob the firmware supports today appears somewhere below — use it as a
+# cookbook. Fields with defaults can be omitted; the commented-out lines
+# show the default value where relevant.
+#
+# A matching parse test (`config::tests::example_config_parses`) loads
+# this file at `cargo test` time, so any schema change that breaks the
+# example also breaks the build — which forces both to stay in sync.
+
+hostname = "slate7"
+timezone = "Europe/Berlin"
+
+# ---------------- WAN ----------------
+#
+# `mode` picks between "dhcp", "static", and "pppoe". This example uses
+# dhcp (the GL.iNet default); swap the block for one of the alternatives
+# below when you need a static IP or a PPPoE link.
+
+[wan]
+mode = "dhcp"
+iface = "eth0"
+
+# [wan]                                # alternative: static IPv4 on eth0
+# mode = "static"
+# iface = "eth0"
+# address = "203.0.113.42"
+# prefix = 24
+# gateway = "203.0.113.1"
+# dns = ["1.1.1.1", "9.9.9.9"]
+
+# [wan]                                # alternative: PPPoE (iface-only for now)
+# mode = "pppoe"
+# iface = "eth0"
+# username = "user@isp"
+# password = "secret"
+
+# ---------------- LAN ----------------
+#
+# The trusted LAN always allows the control plane (see
+# `allow_control_plane` below, default true — leaving it at false would
+# lock the operator out of their only management path if no other subnet
+# has it enabled). `allow_wan = true` routes LAN clients to the internet.
+
+[lan]
+bridge = "br-lan"
+members = ["eth1", "eth2"]
+address = "192.168.8.1"
+prefix = 24
+# allow_control_plane = true   # default
+# allow_wan = true             # default
+# allow_services = ["dns"]     # optional whitelist; None (default) = all services
+
+# ---------------- Isolated subnets ----------------
+#
+# Each `[[isolated_subnets]]` is a firewalled network with its own L2
+# domain. The default stance is "drop everything into the router" —
+# per-subnet flags explicitly punch holes. Cross-subnet forwards to the
+# trusted LAN are always blocked.
+#
+# `client_isolation = true` (default) adds an L3 `iif == oif` drop in
+# FORWARD; remember to also set `ap_isolate=1` on any hostapd config for
+# wireless subnets, and the bridge-port `isolated` flag on any bridge
+# port belonging to a wireless interface (these L2 layers aren't wired
+# yet in v0).
+
+[[isolated_subnets]]
+name = "guest"
+iface = "br-guest"
+address = "10.99.0.1"
+prefix = 24
+allow_dhcp = true            # punches UDP 67/68 in INPUT
+allow_dns = true             # punches UDP+TCP 53 in INPUT
+allow_wan = true             # guest clients reach the internet
+# allow_control_plane = false  # default
+# client_isolation = true      # default
+peers = ["iot"]              # guest → iot one-way (asymmetric by design)
+# allow_services = ["dns"]     # explicit whitelist; None (default) = port-matching logic
+
+[[isolated_subnets]]
+name = "iot"
+iface = "br-iot"
+address = "10.20.0.1"
+prefix = 24
+allow_dhcp = true
+allow_dns = true
+allow_wan = false            # IoT devices do NOT reach the internet
+input_allow = [              # additional INPUT punches beyond the flags
+  { proto = "udp", port = 5353 },  # mDNS advertisement receive
+  { proto = "both", port = 123 },  # NTP over both UDP and TCP
+]
+
+# ---------------- Radios ----------------
+#
+# Wireless is gated on the WiFi-AP decision (plan §5). These fields are
+# parsed but ignored until a hostapd integration (or a Rust AP daemon)
+# lands. Leaving one entry here so the schema stays exercised.
+
+[[radios]]
+phy = "phy0"
+ssid = "slate7-example"
+key = "change-me-before-deploying"
+channel = 36
+disabled = true              # kept off until the AP story is wired
+
+# ---------------- Services ----------------
+#
+# Each [[services]] is one statically-linked Rust or Go binary running
+# in its own mount/net/cgroup namespace. `rootfs` is a directory of
+# exactly one binary + whatever /etc/passwd bits it needs. Configuration
+# comes from env vars (preferred) or read-only bind mounts — see the
+# "Service configuration convention" in project memory.
+
+# --- hickory-dns: forwarding resolver + local cache ---
+[[services]]
+name = "dns"
+rootfs = "/usr/lib/oxwrt/services/dns/rootfs"
+entrypoint = ["/hickory-dns", "-c", "/etc/named.toml"]
+net_mode = "isolated"
+veth = { host_ip = "10.53.0.1", peer_ip = "10.53.0.2", prefix = 30 }
+expose = [{ lan_port = 53, service_port = 15353 }]
+memory_max = 67108864        # 64 MiB
+cpu_max = "50000 100000"     # 50% of one CPU
+pids_max = 32
+depends_on = []
+env = { RUST_LOG = "info" }
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/dns/named.toml"
+target = "/etc/named.toml"
+# readonly = true  # default
+
+# Hardening defaults are safe for hickory — the default retain list
+# (SETUID/SETGID/SETPCAP/NET_BIND_SERVICE) covers its bind(53) +
+# privilege drop to `nobody`. Uncomment to override:
+# [services.security]
+# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE"]
+# no_new_privs = true
+# seccomp = true
+# seccomp_allow = []
+# user_namespace = false   # opt-in; maps container uid 0 → host uid 65534 (nobody)
+# landlock = true
+
+# --- coredhcp: DHCPv4 server for the LAN + guest subnets ---
+[[services]]
+name = "dhcp"
+rootfs = "/usr/lib/oxwrt/services/dhcp/rootfs"
+entrypoint = ["/coredhcp", "-c", "/etc/coredhcp.yml"]
+# DHCP servers need raw-ish socket access to read/write the full Ethernet
+# frame, which means they live on the host netns.
+net_mode = "host"
+memory_max = 67108864
+pids_max = 32
+depends_on = ["dns"]         # coredhcp needs DNS to log hostnames
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/dhcp/coredhcp.yml"
+target = "/etc/coredhcp.yml"
+# readonly = true (default)
+
+[[services.binds]]
+source = "/var/lib/oxwrt/coredhcp/leases.txt"
+target = "/var/lib/coredhcp/leases.txt"
+readonly = false             # coredhcp needs to write lease state
+
+# coredhcp needs NET_RAW + NET_ADMIN for its raw sockets on top of the
+# default four caps. Landlock's writable-bind-mount rule automatically
+# covers /var/lib/coredhcp because of the readonly=false bind above.
+[services.security]
+caps = [
+  "SETUID",
+  "SETGID",
+  "SETPCAP",
+  "NET_BIND_SERVICE",
+  "NET_RAW",
+  "NET_ADMIN",
+]
+# no_new_privs = true   # default
+# seccomp = true        # default
+# landlock = true       # default
+
+# --- ntpd-rs: NTP client + server ---
+[[services]]
+name = "ntp"
+rootfs = "/usr/lib/oxwrt/services/ntp/rootfs"
+entrypoint = ["/ntp-daemon", "-c", "/etc/ntp.toml"]
+net_mode = "isolated"
+veth = { host_ip = "10.123.0.1", peer_ip = "10.123.0.2", prefix = 30 }
+expose = [{ lan_port = 123, service_port = 1123 }]
+memory_max = 33554432
+pids_max = 16
+depends_on = ["dns"]         # needs DNS to resolve pool.ntp.org
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/ntp/ntp.toml"
+target = "/etc/ntp.toml"
+
+# ntpd-rs that actually steps the clock needs SYS_TIME; the default
+# retain list doesn't include it, so override here.
+[services.security]
+caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
+
+# ---------------- Control plane ----------------
+#
+# Listen on [::1]:51820 (loopback) AND on the LAN bridge IP so the
+# operator can reach it from their laptop without ssh. Adding an
+# isolated subnet's router IP (e.g. "10.99.0.1:51820") would also work
+# if `allow_control_plane = true` on that subnet.
+
+[control]
+listen = ["[::1]:51820", "192.168.8.1:51820"]
+authorized_keys = "/etc/oxwrt/authorized_keys"

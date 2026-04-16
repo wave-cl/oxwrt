@@ -1,0 +1,11 @@
+[env]
+# Override cargo-zigbuild's broken ar shim with a direct `zig ar` wrapper.
+# See .cargo/bin/zig-ar for why.
+AR_aarch64_unknown_linux_musl = { value = ".cargo/bin/zig-ar", relative = true, force = true }
+AR_x86_64_unknown_linux_musl  = { value = ".cargo/bin/zig-ar", relative = true, force = true }
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
