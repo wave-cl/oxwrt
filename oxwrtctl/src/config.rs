@@ -483,7 +483,7 @@ mod tests {
         // A handful of spot checks that double as documentation:
         // future field additions can extend the example TOML AND the
         // assertions here without worrying about redundant coverage.
-        assert_eq!(cfg.hostname, "slate7");
+        assert_eq!(cfg.hostname, "flint2");
         assert_eq!(cfg.timezone.as_deref(), Some("Europe/Berlin"));
         // 4 networks: wan, lan, guest, iot
         assert_eq!(cfg.networks.len(), 4);

@@ -9,7 +9,7 @@
 # this file at `cargo test` time, so any schema change that breaks the
 # example also breaks the build — which forces both to stay in sync.
 
-hostname = "slate7"
+hostname = "flint2"
 timezone = "Europe/Berlin"
 
 # ---------------- Networks ----------------
@@ -25,13 +25,13 @@ timezone = "Europe/Berlin"
 [[networks]]
 name = "wan"
 type = "wan"
-iface = "eth0"
+iface = "eth1"
 mode = "dhcp"
 
-# [[networks]]                         # alternative: static IPv4 on eth0
+# [[networks]]                         # alternative: static IPv4 on eth1
 # name = "wan"
 # type = "wan"
-# iface = "eth0"
+# iface = "eth1"
 # mode = "static"
 # address = "203.0.113.42"
 # prefix = 24
@@ -41,7 +41,7 @@ mode = "dhcp"
 # [[networks]]                         # alternative: PPPoE
 # name = "wan"
 # type = "wan"
-# iface = "eth0"
+# iface = "eth1"
 # mode = "pppoe"
 # username = "user@isp"
 # password = "secret"
@@ -52,8 +52,8 @@ mode = "dhcp"
 name = "lan"
 type = "lan"
 bridge = "br-lan"
-members = ["eth1", "eth2"]
-address = "192.168.8.1"
+members = ["lan1", "lan2", "lan3", "lan4", "lan5"]
+address = "10.10.10.1"
 prefix = 24
 
 # --- Guest ---
@@ -219,6 +219,12 @@ action = "accept"
 
 [[radios]]
 phy = "phy0"
+band = "2g"
+channel = 1
+disabled = true                  # kept off until the AP story is wired
+
+[[radios]]
+phy = "phy1"
 band = "5g"
 channel = 36
 disabled = true                  # kept off until the AP story is wired

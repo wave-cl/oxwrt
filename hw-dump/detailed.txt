@@ -1,0 +1,154 @@
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1504 qdisc mq state UP qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+3: eth1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state DOWN qlen 1000
+    link/ether 94:83:c4:ca:5c:78 brd ff:ff:ff:ff:ff:ff
+4: lan2@eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-lan state UP qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+5: lan3@eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue master br-lan state LOWERLAYERDOWN qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+6: lan4@eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue master br-lan state LOWERLAYERDOWN qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+7: lan5@eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue master br-lan state LOWERLAYERDOWN qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+8: lan1@eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue master br-lan state LOWERLAYERDOWN qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+10: br-lan: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP qlen 1000
+    link/ether 94:83:c4:ca:5c:7a brd ff:ff:ff:ff:ff:ff
+---PARTITIONS---
+major minor  #blocks  name
+
+   7        0    7583168 loop0
+ 179        0    7634944 mmcblk0
+ 179        1        512 mmcblk0p1
+ 179        2       2048 mmcblk0p2
+ 179        3       2048 mmcblk0p3
+ 179        4       2048 mmcblk0p4
+ 179        5       2048 mmcblk0p5
+ 179        6      32768 mmcblk0p6
+ 179        7    7589376 mmcblk0p7
+ 179        8       4096 mmcblk0boot0
+ 179       16       4096 mmcblk0boot1
+---MTD---
+dev:    size   erasesize  name
+---DF---
+Filesystem                Size      Used Available Use% Mounted on
+/dev/root                 6.3M      6.3M         0 100% /rom
+tmpfs                   493.2M    356.0K    492.8M   0% /tmp
+/dev/loop0                7.2G    413.6M      6.8G   6% /overlay
+overlayfs:/overlay        7.2G    413.6M      6.8G   6% /
+tmpfs                   512.0K         0    512.0K   0% /dev
+---LSMOD---
+authenc                12288  2 crypto_safexcel,authencesn
+authencesn             12288  0 
+cfg80211              315392  4 mt7915e,mt76_connac_lib,mt76,mac80211
+compat                 12288  2 mac80211,cfg80211
+crypto_safexcel        94208  0 
+des_generic            12288  0 
+geniv                  12288  1 seqiv
+gpio_button_hotplug    16384  0 
+leds_gpio              12288  0 
+libcrc32c              12288  1 nf_tables
+libdes                 20480  2 crypto_safexcel,des_generic
+mac80211              614400  3 mt7915e,mt76_connac_lib,mt76
+md5                    12288  1 crypto_safexcel
+mt76                   77824  2 mt7915e,mt76_connac_lib
+mt76_connac_lib        49152  1 mt7915e
+mt7915e               139264  0 
+nf_conntrack           90112  7 nft_redir,nft_nat,nft_masq,nft_flow_offload,nft_ct,nf_nat,nf_flow_table
+nf_defrag_ipv4         12288  1 nf_conntrack
+nf_defrag_ipv6         16384  1 nf_conntrack
+nf_flow_table          28672  2 nf_flow_table_inet,nft_flow_offload
+nf_flow_table_inet     12288  0 
+nf_log_syslog          16384  0 
+nf_nat                 40960  4 nft_redir,nft_nat,nft_masq,nft_chain_nat
+nf_reject_ipv4         12288  2 nft_reject_ipv4,nft_reject_inet
+nf_reject_ipv6         12288  2 nft_reject_ipv6,nft_reject_inet
+nf_tables             188416208 nft_fib_inet,nf_flow_table_inet,nft_reject_ipv6,nft_reject_ipv4,nft_reject_inet,nft_reject,nft_redir,nft_quota,nft_numgen,nft_nat,nft_masq,nft_log,nft_limit,nft_hash,nft_flow_offload,nft_fib_ipv6,nft_fib_ipv4,nft_fib,nft_ct,nft_chain_nat
+nfnetlink              16384  1 nf_tables
+nft_chain_nat          12288  2 
+nft_ct                 20480  4 
+nft_fib                12288  3 nft_fib_inet,nft_fib_ipv6,nft_fib_ipv4
+nft_fib_inet           12288  0 
+nft_fib_ipv4           12288  1 nft_fib_inet
+nft_fib_ipv6           12288  1 nft_fib_inet
+nft_flow_offload       12288  0 
+nft_hash               12288  0 
+nft_limit              12288  5 
+nft_log                12288  0 
+nft_masq               12288  1 
+nft_nat                12288  0 
+nft_numgen             12288  0 
+nft_quota              12288  0 
+nft_redir              12288  0 
+nft_reject             12288  3 nft_reject_ipv6,nft_reject_ipv4,nft_reject_inet
+nft_reject_inet        12288  2 
+nft_reject_ipv4        12288  0 
+nft_reject_ipv6        12288  0 
+ppp_async              16384  0 
+ppp_generic            40960  3 pppoe,ppp_async,pppox
+pppoe                  20480  0 
+pppox                  12288  1 pppoe
+seqiv                  12288  0 
+sha1_ce                12288  0 
+sha1_generic           12288  2 crypto_safexcel,sha1_ce
+sha512_arm64           16384  0 
+slhc                   12288  1 ppp_generic
+usb_common             12288  3 xhci_plat_hcd,xhci_hcd,usbcore
+usbcore               184320  4 xhci_plat_hcd,xhci_pci,xhci_mtk_hcd,xhci_hcd
+xhci_hcd              131072  3 xhci_plat_hcd,xhci_pci,xhci_mtk_hcd
+xhci_mtk_hcd           20480  0 
+xhci_pci               16384  0 
+xhci_plat_hcd          12288  0 
+---UCI NETWORK---
+network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1/8'
+network.globals=globals
+network.globals.dhcp_default_duid='0004c61173d4b1864ac49a1f7a25f525efe6'
+network.globals.ula_prefix='fd8f:d87e:e45f::/48'
+network.@device[0]=device
+network.@device[0].name='br-lan'
+network.@device[0].type='bridge'
+network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4' 'lan5'
+network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.lan.ip6assign='60'
+network.lan.multipath='off'
+network.lan.ipaddr='10.10.10.1/24'
+network.wan=interface
+network.wan.device='eth1'
+network.wan.proto='dhcp'
+network.wan6=interface
+network.wan6.device='eth1'
+network.wan6.proto='dhcpv6'
+---UCI WIRELESS---
+wireless.radio0=wifi-device
+wireless.radio0.type='mac80211'
+wireless.radio0.path='platform/soc/18000000.wifi'
+wireless.radio0.band='2g'
+wireless.radio0.channel='1'
+wireless.radio0.htmode='HE20'
+wireless.default_radio0=wifi-iface
+wireless.default_radio0.device='radio0'
+wireless.default_radio0.network='lan'
+wireless.default_radio0.mode='ap'
+wireless.default_radio0.ssid='OpenWrt'
+wireless.default_radio0.encryption='none'
+wireless.default_radio0.disabled='1'
+wireless.radio1=wifi-device
+wireless.radio1.type='mac80211'
+wireless.radio1.path='platform/soc/18000000.wifi+1'
+wireless.radio1.band='5g'
+wireless.radio1.channel='36'
+wireless.radio1.htmode='HE80'
+wireless.default_radio1=wifi-iface
+wireless.default_radio1.device='radio1'
+wireless.default_radio1.network='lan'
+wireless.default_radio1.mode='ap'
+wireless.default_radio1.ssid='OpenWrt'
+wireless.default_radio1.encryption='none'
+wireless.default_radio1.disabled='1'
