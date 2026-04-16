@@ -47,6 +47,13 @@ pub enum Request {
         collection: String,
         action: CrudAction,
     },
+    /// Dump the entire running config as TOML.
+    ConfigDump,
+    /// Replace the entire config with the provided TOML. Persists
+    /// atomically and swaps the in-memory config. Operator must
+    /// `reload` to apply. Use with care — no partial validation
+    /// beyond "does it parse as a valid Config?"
+    ConfigPush { toml: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -149,6 +149,20 @@ impl Server {
                 continue;
             }
 
+            // Config dump/push: full config as TOML.
+            if let Request::ConfigDump = &request {
+                let resp = handle_config_dump(&self.state);
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+            if let Request::ConfigPush { toml } = &request {
+                let resp = handle_config_push(&self.state, toml);
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+
             // Firmware apply: trigger sysupgrade + reboot.
             if let Request::FwApply { confirm, keep_settings } = &request {
                 let resp = handle_fw_apply(*confirm, *keep_settings);
@@ -250,6 +264,12 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::Collection { .. } => vec![Response::Err {
             message: "BUG: Collection should be handled upstream".to_string(),
+        }],
+        Request::ConfigDump => vec![Response::Err {
+            message: "BUG: ConfigDump should be handled upstream".to_string(),
+        }],
+        Request::ConfigPush { .. } => vec![Response::Err {
+            message: "BUG: ConfigPush should be handled upstream".to_string(),
         }],
     }
 }
@@ -1982,6 +2002,31 @@ fn json_merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
             base_obj.insert(k.clone(), v.clone());
         }
     }
+}
+
+/// Dump the entire running config as TOML.
+fn handle_config_dump(state: &ControlState) -> Response {
+    let cfg = state.config_snapshot();
+    match toml::to_string_pretty(&*cfg) {
+        Ok(text) => Response::Value { value: text },
+        Err(e) => Response::Err {
+            message: format!("serialize config: {e}"),
+        },
+    }
+}
+
+/// Replace the entire config with the provided TOML. Validates that it
+/// parses as a valid Config before persisting.
+fn handle_config_push(state: &ControlState, toml_text: &str) -> Response {
+    let new_cfg: crate::config::Config = match toml::from_str(toml_text) {
+        Ok(c) => c,
+        Err(e) => {
+            return Response::Err {
+                message: format!("invalid config: {e}"),
+            };
+        }
+    };
+    persist_and_swap(state, new_cfg, "config pushed (pending reload)")
 }
 
 /// Serialize config to TOML, atomic-write to disk, swap the in-memory Arc.

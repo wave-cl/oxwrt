@@ -234,6 +234,13 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             };
             Ok(Request::Collection { collection: cmd.to_string(), action })
         }
+        "config-dump" => Ok(Request::ConfigDump),
+        "config-push" => {
+            let path = args.first().ok_or("config-push: missing TOML file path")?;
+            let toml = std::fs::read_to_string(path)
+                .map_err(|e| format!("config-push: read {path}: {e}"))?;
+            Ok(Request::ConfigPush { toml })
+        }
         _ => Err(format!("unknown command: {cmd}")),
     }
 }
