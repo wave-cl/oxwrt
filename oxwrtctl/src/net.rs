@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, new_connection};
 
-use crate::config::{Config, Lan, Service, Wan};
+use crate::config::{Action, Config, Lan, PortSpec, Proto, Service, Wan};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -283,136 +283,27 @@ pub fn enable_ipv4_forwarding() -> Result<(), Error> {
     Ok(())
 }
 
-/// Install an unconditional IPv4 NAT postrouting MASQUERADE rule in its own
-/// `ip oxwrt-nat` table. Rewrites src for every packet egressing the outer
-/// netns so services in `Isolated` netns containers can reach upstream via
-/// whatever physical/bridge interface the outer netns holds. Idempotent —
-/// tears down any prior `oxwrt-nat` table before recreating.
-pub fn install_nat_masquerade() -> Result<(), Error> {
-    use rustables::expr::Masquerade;
-    use rustables::{
-        Batch, Chain, ChainPolicy, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule,
-        Table,
-    };
-
-    let mut batch = Batch::new();
-    let table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-nat");
-    batch.add(&table, MsgType::Add);
-    batch.add(&table, MsgType::Del);
-    batch.add(&table, MsgType::Add);
-
-    let postrouting = Chain::new(&table)
-        .with_name("postrouting")
-        .with_hook(Hook::new(HookClass::PostRouting, 100))
-        .with_type(ChainType::Nat)
-        .with_policy(ChainPolicy::Accept)
-        .add_to_batch(&mut batch);
-
-    Rule::new(&postrouting)
-        .map_err(|e| Error::Firewall(e.to_string()))?
-        .with_expr(Masquerade::default())
-        .add_to_batch(&mut batch);
-
-    batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
-    tracing::info!("nftables NAT MASQUERADE rule installed");
-    Ok(())
-}
-
-/// A single DNAT rule: packets destined to `listen_addr:listen_port` (TCP
-/// and UDP) are rewritten to `target_ip:target_port`. Used to expose an
-/// isolated-netns service on a conventional LAN-facing port while the
-/// container listens on an alternate one.
-#[derive(Debug, Clone)]
-pub struct DnatRule {
-    pub listen_addr: Ipv4Addr,
-    pub listen_port: u16,
-    pub target_ip: Ipv4Addr,
-    pub target_port: u16,
-}
-
-/// Install all DNAT rules as one atomic rustables batch into a dedicated
-/// `ip oxwrt-dnat` NAT table. Two chains are installed per rule so that
-/// both remote clients (prerouting hook) and the router's own local
-/// processes (output hook) trigger the rewrite. Idempotent: tears down any
-/// prior `oxwrt-dnat` table before recreating. No-op if `rules` is empty.
-pub fn install_dnat_rules(rules: &[DnatRule]) -> Result<(), Error> {
-    use rustables::expr::{Immediate, Nat, NatType, Register};
-    use rustables::{
-        Batch, Chain, ChainPolicy, ChainType, Hook, HookClass, MsgType, Protocol, ProtocolFamily,
-        Rule, Table,
-    };
-
-    if rules.is_empty() {
-        return Ok(());
-    }
-
-    let mut batch = Batch::new();
-    let table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-dnat");
-    batch.add(&table, MsgType::Add);
-    batch.add(&table, MsgType::Del);
-    batch.add(&table, MsgType::Add);
-
-    // PREROUTING catches packets arriving from elsewhere (LAN clients).
-    // OUTPUT catches packets originated by local processes on the router
-    // — DNAT in PREROUTING is never seen by the local path. We install
-    // matching rules into both so the router itself resolves via its own
-    // DNS service and regular LAN clients do the same.
-    //
-    // Priority -100 is the conventional "dstnat" priority in both chains.
-    let prerouting = Chain::new(&table)
-        .with_name("prerouting")
-        .with_hook(Hook::new(HookClass::PreRouting, -100))
-        .with_type(ChainType::Nat)
-        .with_policy(ChainPolicy::Accept)
-        .add_to_batch(&mut batch);
-
-    let output = Chain::new(&table)
-        .with_name("output")
-        .with_hook(Hook::new(HookClass::Out, -100))
-        .with_type(ChainType::Nat)
-        .with_policy(ChainPolicy::Accept)
-        .add_to_batch(&mut batch);
-
-    for dnat in rules {
-        for proto in [Protocol::TCP, Protocol::UDP] {
-            for chain in [&prerouting, &output] {
-                let ip_bytes = dnat.target_ip.octets().to_vec();
-                let port_bytes = dnat.target_port.to_be_bytes().to_vec();
-                let nat_expr = Nat::default()
-                    .with_nat_type(NatType::DNat)
-                    .with_family(ProtocolFamily::Ipv4)
-                    .with_ip_register(Register::Reg1)
-                    .with_port_register(Register::Reg2);
-
-                Rule::new(chain)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .daddr(IpAddr::V4(dnat.listen_addr))
-                    .dport(dnat.listen_port, proto)
-                    .with_expr(Immediate::new_data(ip_bytes, Register::Reg1))
-                    .with_expr(Immediate::new_data(port_bytes, Register::Reg2))
-                    .with_expr(nat_expr)
-                    .add_to_batch(&mut batch);
-            }
-        }
-    }
-
-    batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
-    tracing::info!(count = rules.len(), "nftables DNAT ruleset installed");
-    Ok(())
-}
-
-/// Install the baseline inet nftables ruleset. Synchronous: rustables's
-/// `Batch::send()` does one blocking netlink round-trip. Safe to call from
-/// an async context — the call finishes in microseconds.
+/// Install the complete nftables ruleset: inet filter (input/forward/
+/// output), NAT masquerade for zones with `masquerade = true`, and DNAT
+/// rules for `action = "dnat"` rules. Everything in one function —
+/// replaces the old `install_firewall` + `install_nat_masquerade` +
+/// `install_dnat_rules` trio.
+///
+/// Synchronous: rustables `Batch::send()` does one blocking netlink
+/// round-trip. Safe to call from an async context.
 pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
+    use rustables::expr::{Immediate, Masquerade, Nat, NatType, Register};
     use rustables::{
-        Batch, Chain, ChainPolicy, Hook, HookClass, MsgType, Protocol, ProtocolFamily, Rule, Table,
+        Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table,
     };
+    // Alias to avoid confusion with config::ChainPolicy.
+    use rustables::ChainPolicy as NfChainPolicy;
 
     let mut batch = Batch::new();
-    let table = Table::new(ProtocolFamily::Inet).with_name("oxwrt");
 
-    // Tear down any existing ruleset from a previous run, then recreate.
+    // ── 1. inet oxwrt: INPUT + FORWARD + OUTPUT filter ──────────────
+
+    let table = Table::new(ProtocolFamily::Inet).with_name("oxwrt");
     batch.add(&table, MsgType::Add);
     batch.add(&table, MsgType::Del);
     batch.add(&table, MsgType::Add);
@@ -420,31 +311,20 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     let input = Chain::new(&table)
         .with_name("input")
         .with_hook(Hook::new(HookClass::In, 0))
-        .with_policy(ChainPolicy::Drop)
+        .with_policy(NfChainPolicy::Drop)
         .add_to_batch(&mut batch);
     let forward = Chain::new(&table)
         .with_name("forward")
         .with_hook(Hook::new(HookClass::Forward, 0))
-        .with_policy(ChainPolicy::Drop)
+        .with_policy(NfChainPolicy::Drop)
         .add_to_batch(&mut batch);
     let _output = Chain::new(&table)
         .with_name("output")
         .with_hook(Hook::new(HookClass::Out, 0))
-        .with_policy(ChainPolicy::Accept)
+        .with_policy(NfChainPolicy::Accept)
         .add_to_batch(&mut batch);
 
-    // -------- INPUT chain --------
-
-    // INPUT: established/related → accept (return traffic for every
-    // outbound connection).
-    Rule::new(&input)
-        .map_err(|e| Error::Firewall(e.to_string()))?
-        .established()
-        .map_err(|e| Error::Firewall(e.to_string()))?
-        .accept()
-        .add_to_batch(&mut batch);
-
-    // INPUT: loopback → accept.
+    // INPUT/FORWARD: loopback accept (always).
     Rule::new(&input)
         .map_err(|e| Error::Firewall(e.to_string()))?
         .iiface("lo")
@@ -452,192 +332,155 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .accept()
         .add_to_batch(&mut batch);
 
-    // Parse the unique set of ports the control plane is listening on
-    // from `cfg.control.listen`, so the firewall rule stays in sync
-    // when the operator changes the listen address.
-    let control_ports = control_listen_ports(&cfg.control.listen);
-    if control_ports.is_empty() {
-        tracing::warn!(
-            "no parseable ports in cfg.control.listen — control plane will be unreachable"
-        );
-    }
-
-    // INPUT: sQUIC control plane from trusted LAN → accept (one rule
-    // per control listen port). Skipped only if the operator has
-    // explicitly disabled it on the trusted LAN, which is a footgun.
-    if cfg.firewall.lan.allow_control_plane {
-        for &port in &control_ports {
+    // Emit each config rule into the right chain.
+    for rule in &cfg.firewall.rules {
+        // ct_state rules go into both input + forward.
+        if !rule.ct_state.is_empty() {
+            // Only established/related is supported by rustables' `.established()`.
             Rule::new(&input)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&cfg.lan.bridge)
+                .established()
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .dport(port, Protocol::UDP)
                 .accept()
                 .add_to_batch(&mut batch);
-        }
-    } else {
-        tracing::warn!(
-            "lan.allow_control_plane = false — make sure another subnet has it enabled"
-        );
-    }
-
-    // INPUT: per-network zone explicit allows. Default stance is
-    // drop (the chain's default policy), so a network zone gets
-    // NOTHING into the router except what its zone policy punches through.
-    for zone in &cfg.firewall.zones {
-        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
-            tracing::warn!(zone = %zone.network, "firewall zone references unknown network; skipping");
+            Rule::new(&forward)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .established()
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .accept()
+                .add_to_batch(&mut batch);
             continue;
+        }
+
+        // DNAT rules are handled in the NAT table below.
+        if rule.action == Action::Dnat {
+            continue;
+        }
+
+        // Determine which chain this rule targets:
+        //   - src + dest → FORWARD (iif=src, oif=dest)
+        //   - src only, no dest → INPUT (iif=src)
+        //   - neither → both INPUT and FORWARD (global rule)
+        let src_ifaces = rule
+            .src
+            .as_deref()
+            .map(|z| zone_ifaces(cfg, z))
+            .unwrap_or_default();
+        let dest_ifaces = rule
+            .dest
+            .as_deref()
+            .map(|z| zone_ifaces(cfg, z))
+            .unwrap_or_default();
+
+        let protos = proto_to_nf_list(rule.proto);
+        let ports = port_spec_to_list(&rule.dest_port);
+        let is_icmp = rule.proto == Some(Proto::Icmp);
+
+        let emit_rule = |chain: &Chain, batch: &mut Batch, iif: Option<&str>, oif: Option<&str>| -> Result<(), Error> {
+            if is_icmp {
+                // ICMP rules: no port, just iif match + accept/drop.
+                let mut r = Rule::new(chain)
+                    .map_err(|e| Error::Firewall(e.to_string()))?;
+                if let Some(iif) = iif {
+                    r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
+                }
+                match rule.action {
+                    Action::Accept => r.accept().add_to_batch(batch),
+                    Action::Drop | Action::Reject => r.drop().add_to_batch(batch),
+                    Action::Dnat => unreachable!(),
+                };
+                return Ok(());
+            }
+            if ports.is_empty() && protos.is_empty() {
+                // No port, no proto — just iif/oif match.
+                let mut r = Rule::new(chain)
+                    .map_err(|e| Error::Firewall(e.to_string()))?;
+                if let Some(iif) = iif {
+                    r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
+                }
+                if let Some(oif) = oif {
+                    r = r.oiface(oif).map_err(|e| Error::Firewall(e.to_string()))?;
+                }
+                match rule.action {
+                    Action::Accept => r.accept().add_to_batch(batch),
+                    Action::Drop | Action::Reject => r.drop().add_to_batch(batch),
+                    Action::Dnat => unreachable!(),
+                };
+            } else if ports.is_empty() {
+                // Proto but no port — unusual, skip silently.
+            } else {
+                for &proto in &protos {
+                    for &port in &ports {
+                        let mut r = Rule::new(chain)
+                            .map_err(|e| Error::Firewall(e.to_string()))?;
+                        if let Some(iif) = iif {
+                            r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
+                        }
+                        if let Some(oif) = oif {
+                            r = r.oiface(oif).map_err(|e| Error::Firewall(e.to_string()))?;
+                        }
+                        r = r.dport(port, proto);
+                        match rule.action {
+                            Action::Accept => r.accept().add_to_batch(batch),
+                            Action::Drop | Action::Reject => r.drop().add_to_batch(batch),
+                            Action::Dnat => unreachable!(),
+                        };
+                    }
+                }
+            }
+            Ok(())
         };
-        if zone.allow_dhcp {
-            // DHCPv4 server listens on UDP/67; clients send from UDP/68.
-            // Both endpoints of the exchange need to be accepted because
-            // in the BROADCAST case the conntrack "established" rule
-            // may not match.
-            for port in [67u16, 68u16] {
-                Rule::new(&input)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&net.iface)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .dport(port, Protocol::UDP)
-                    .accept()
-                    .add_to_batch(&mut batch);
+
+        if rule.src.is_some() && rule.dest.is_some() {
+            // FORWARD rule: iif=src, oif=dest.
+            if src_ifaces.is_empty() || dest_ifaces.is_empty() {
+                tracing::warn!(rule = %rule.name, "zone has no resolvable ifaces; skipping");
+                continue;
             }
-            tracing::info!(subnet = %net.name, iface = %net.iface, "input: DHCP allow");
-        }
-        if zone.allow_dns {
-            // DNS over UDP and TCP on port 53. These reach the router
-            // IP on this subnet; the oxwrt-dnat table DNATs them to
-            // the DNS container.
-            Rule::new(&input)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .dport(53, Protocol::UDP)
-                .accept()
-                .add_to_batch(&mut batch);
-            Rule::new(&input)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .dport(53, Protocol::TCP)
-                .accept()
-                .add_to_batch(&mut batch);
-            tracing::info!(subnet = %net.name, iface = %net.iface, "input: DNS allow");
-        }
-        if zone.allow_control_plane {
-            for &port in &control_ports {
-                Rule::new(&input)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&net.iface)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .dport(port, Protocol::UDP)
-                    .accept()
-                    .add_to_batch(&mut batch);
+            for src_if in &src_ifaces {
+                for dest_if in &dest_ifaces {
+                    emit_rule(&forward, &mut batch, Some(src_if), Some(dest_if))?;
+                }
             }
-            tracing::info!(
-                subnet = %net.name,
-                iface = %net.iface,
-                ports = ?control_ports,
-                "input: control-plane allow"
-            );
-        }
-        // Arbitrary additional INPUT punches.
-        for rule_spec in &zone.input_allow {
-            for proto in port_proto_to_list(rule_spec.proto) {
-                Rule::new(&input)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&net.iface)
-                    .map_err(|e| Error::Firewall(e.to_string()))?
-                    .dport(rule_spec.port, proto)
-                    .accept()
-                    .add_to_batch(&mut batch);
+        } else if rule.src.is_some() {
+            // INPUT rule: iif=src.
+            if src_ifaces.is_empty() {
+                tracing::warn!(rule = %rule.name, "source zone has no resolvable ifaces; skipping");
+                continue;
             }
-            tracing::info!(
-                subnet = %net.name,
-                iface = %net.iface,
-                proto = ?rule_spec.proto,
-                port = rule_spec.port,
-                "input: custom allow"
-            );
+            for src_if in &src_ifaces {
+                emit_rule(&input, &mut batch, Some(src_if), None)?;
+            }
+        } else {
+            // Global rule (no src, no dest) — emit into both chains.
+            emit_rule(&input, &mut batch, None, None)?;
+            emit_rule(&forward, &mut batch, None, None)?;
         }
+
+        tracing::debug!(rule = %rule.name, "filter rule emitted");
     }
 
-    // -------- FORWARD chain --------
-    //
-    // Default policy is now `drop`. Every allowed forwarding path is
-    // an explicit accept rule, in this order:
-    //
-    //   1. ct state established/related → universal return path
-    //   2. trusted LAN → WAN                          (lan.allow_wan)
-    //   3. trusted LAN → each service-netns veth
-    //   4. each service-netns veth → WAN              (services egress)
-    //   5. each service → declared `depends_on` peer  (svc-to-svc)
-    //   6. per isolated subnet:
-    //        a. → WAN                                 (iso.allow_wan)
-    //        b. → each service whose `expose` port matches the
-    //             subnet's allow_dns / allow_dhcp flags
-    //        c. → itself                              (only if !client_isolation)
-    //
-    // Everything else (cross-subnet, untrusted-to-LAN, untrusted to
-    // a service the subnet hasn't been told to reach) falls through
-    // to the chain default policy and is dropped.
-
+    // Per-service automatic forward rules: LAN → service veth,
+    // service veth → WAN, service → depends_on peers. These are
+    // implicit from service topology, not explicit firewall rules.
     let wan_iface = wan_iface_name(&cfg.wan);
-
-    // 1. Universal return path.
-    Rule::new(&forward)
-        .map_err(|e| Error::Firewall(e.to_string()))?
-        .established()
-        .map_err(|e| Error::Firewall(e.to_string()))?
-        .accept()
-        .add_to_batch(&mut batch);
-
-    // 2. Trusted LAN → WAN.
-    if cfg.firewall.lan.allow_wan {
-        Rule::new(&forward)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .iiface(&cfg.lan.bridge)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .oiface(wan_iface)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .accept()
-            .add_to_batch(&mut batch);
-        tracing::info!(lan = %cfg.lan.bridge, wan = %wan_iface, "forward: lan→wan");
-    }
-
-    // 3 + 4 + 5: per-service forward rules.
     for svc in &cfg.services {
         if svc.veth.is_none() {
             continue;
         }
         let veth_host = veth_host_name(svc);
 
-        // 3. Trusted LAN → service-netns veth, gated by `firewall.lan.allow_services`.
-        //    None = all services reachable (historical behavior). Some(list)
-        //    = only the named services. The LAN never loses the ability
-        //    to reach a service via the established/related rule (1) once
-        //    the service initiates the conversation, but inbound new
-        //    connections from the LAN are gated here.
-        let lan_allowed = cfg
-            .firewall
-            .lan
-            .allow_services
-            .as_ref()
-            .map(|list| list.iter().any(|n| n == &svc.name))
-            .unwrap_or(true);
-        if lan_allowed {
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&cfg.lan.bridge)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(&veth_host)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .accept()
-                .add_to_batch(&mut batch);
-        }
+        // LAN → service
+        Rule::new(&forward)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .iiface(&cfg.lan.bridge)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .oiface(&veth_host)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .accept()
+            .add_to_batch(&mut batch);
 
-        // 4. Service → WAN.
+        // Service → WAN
         Rule::new(&forward)
             .map_err(|e| Error::Firewall(e.to_string()))?
             .iiface(&veth_host)
@@ -647,230 +490,192 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .accept()
             .add_to_batch(&mut batch);
 
-        // 5. Service → declared dependencies (e.g. ntpd → dns).
+        // Service → depends_on peers
         for dep_name in &svc.depends_on {
             if let Some(dep_svc) = cfg.services.iter().find(|s| &s.name == dep_name) {
                 if dep_svc.veth.is_none() {
                     continue;
                 }
-                let dep_host = veth_host_name(dep_svc);
                 Rule::new(&forward)
                     .map_err(|e| Error::Firewall(e.to_string()))?
                     .iiface(&veth_host)
                     .map_err(|e| Error::Firewall(e.to_string()))?
-                    .oiface(&dep_host)
+                    .oiface(&veth_host_name(dep_svc))
                     .map_err(|e| Error::Firewall(e.to_string()))?
                     .accept()
                     .add_to_batch(&mut batch);
-                tracing::info!(
-                    svc = %svc.name,
-                    dep = %dep_name,
-                    "forward: service-to-service dep"
-                );
             }
-        }
-        tracing::info!(svc = %svc.name, veth = %veth_host, "forward: lan↔svc + svc→wan");
-    }
-
-    // 6. Per-network zone forwarding rules.
-    for zone in &cfg.firewall.zones {
-        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
-            tracing::warn!(zone = %zone.network, "firewall zone references unknown network; skipping");
-            continue;
-        };
-
-        // 6a. → WAN.
-        if zone.allow_wan {
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(wan_iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .accept()
-                .add_to_batch(&mut batch);
-            tracing::info!(subnet = %net.name, wan = %wan_iface, "forward: iso→wan");
-        }
-
-        // 6b. → service-netns veths. Two modes:
-        //
-        //   - `allow_services = Some(list)`: explicit per-name whitelist,
-        //     ignores the implicit port matching entirely. Set to
-        //     `Some(vec![])` for "no services."
-        //
-        //   - `allow_services = None`: the implicit port-match logic
-        //     applies — `allow_dns` permits any service exposing port
-        //     53, `allow_dhcp` permits 67/68.
-        for svc in &cfg.services {
-            if svc.veth.is_none() {
-                continue;
-            }
-            let allowed = match &zone.allow_services {
-                Some(list) => list.iter().any(|n| n == &svc.name),
-                None => svc.expose.iter().any(|e| {
-                    (zone.allow_dns && e.lan_port == 53)
-                        || (zone.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
-                }),
-            };
-            if !allowed {
-                continue;
-            }
-            let veth_host = veth_host_name(svc);
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(&veth_host)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .accept()
-                .add_to_batch(&mut batch);
-            tracing::info!(
-                subnet = %net.name,
-                svc = %svc.name,
-                mode = if zone.allow_services.is_some() { "explicit" } else { "port-match" },
-                "forward: iso→svc"
-            );
-        }
-
-        // 6d. Per-peer forwarding: a zone can declare a list of
-        //     OTHER network names it's allowed to talk to. Each entry
-        //     emits a one-way `iif=this oif=peer` accept; the reverse
-        //     direction must be declared separately on the peer side.
-        //     A typo in `peers` produces a warn (not an error) so a
-        //     network rename doesn't take down the entire firewall install.
-        for peer_name in &zone.peers {
-            let Some(peer) = cfg.networks.iter().find(|p| &p.name == peer_name)
-            else {
-                tracing::warn!(
-                    subnet = %net.name,
-                    peer = %peer_name,
-                    "forward: peer not found in networks; skipping"
-                );
-                continue;
-            };
-            if peer.iface == net.iface {
-                // Same interface ⇒ this is the same as setting
-                // `client_isolation = false`. Skip the duplicate.
-                continue;
-            }
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(&peer.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .accept()
-                .add_to_batch(&mut batch);
-            tracing::info!(
-                subnet = %net.name,
-                peer = %peer.name,
-                "forward: iso→peer"
-            );
-        }
-
-        // 6c. Client isolation = false → emit explicit iif=net oif=net
-        //     accept. With the default-drop policy, leaving this off
-        //     already gives the operator client isolation for free
-        //     at the L3 layer.
-        if !zone.client_isolation {
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(&net.iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .accept()
-                .add_to_batch(&mut batch);
-            tracing::info!(
-                subnet = %net.name,
-                "forward: iso↔iso allowed (client_isolation=false)"
-            );
         }
     }
 
     batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
     tracing::info!(
-        networks = cfg.networks.len(),
         zones = cfg.firewall.zones.len(),
-        control_ports = ?control_ports,
-        "nftables ruleset installed"
+        rules = cfg.firewall.rules.len(),
+        "nftables inet filter installed"
     );
+
+    // ── 2. ip oxwrt-nat: MASQUERADE for zones with masquerade=true ──
+
+    let has_masq = cfg.firewall.zones.iter().any(|z| z.masquerade);
+    if has_masq {
+        let nat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-nat");
+        let mut nat_batch = Batch::new();
+        nat_batch.add(&nat_table, MsgType::Add);
+        nat_batch.add(&nat_table, MsgType::Del);
+        nat_batch.add(&nat_table, MsgType::Add);
+
+        let postrouting = Chain::new(&nat_table)
+            .with_name("postrouting")
+            .with_hook(Hook::new(HookClass::PostRouting, 100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut nat_batch);
+
+        Rule::new(&postrouting)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .with_expr(Masquerade::default())
+            .add_to_batch(&mut nat_batch);
+
+        nat_batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
+        tracing::info!("nftables NAT MASQUERADE installed");
+    }
+
+    // ── 3. ip oxwrt-dnat: DNAT rules ────────────────────────────────
+
+    let dnat_rules: Vec<&crate::config::Rule> = cfg
+        .firewall
+        .rules
+        .iter()
+        .filter(|r| r.action == Action::Dnat && r.dnat_target.is_some())
+        .collect();
+
+    if !dnat_rules.is_empty() {
+        let dnat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-dnat");
+        let mut dnat_batch = Batch::new();
+        dnat_batch.add(&dnat_table, MsgType::Add);
+        dnat_batch.add(&dnat_table, MsgType::Del);
+        dnat_batch.add(&dnat_table, MsgType::Add);
+
+        let prerouting = Chain::new(&dnat_table)
+            .with_name("prerouting")
+            .with_hook(Hook::new(HookClass::PreRouting, -100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut dnat_batch);
+        let dnat_output = Chain::new(&dnat_table)
+            .with_name("output")
+            .with_hook(Hook::new(HookClass::Out, -100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut dnat_batch);
+
+        // Collect all router IPs for DNAT matching: LAN + each network.
+        let mut listen_addrs: Vec<Ipv4Addr> = vec![cfg.lan.address];
+        for net in &cfg.networks {
+            listen_addrs.push(net.address);
+        }
+
+        for rule in &dnat_rules {
+            let target_str = rule.dnat_target.as_deref().unwrap();
+            let Some((target_ip, target_port)) = parse_dnat_target(target_str) else {
+                tracing::warn!(rule = %rule.name, target = %target_str, "invalid dnat_target; skipping");
+                continue;
+            };
+            let protos = proto_to_nf_list(rule.proto);
+            let ports = port_spec_to_list(&rule.dest_port);
+
+            for &proto in &protos {
+                for &port in &ports {
+                    for &listen_addr in &listen_addrs {
+                        for chain in [&prerouting, &dnat_output] {
+                            let ip_bytes = target_ip.octets().to_vec();
+                            let port_bytes = target_port.to_be_bytes().to_vec();
+                            let nat_expr = Nat::default()
+                                .with_nat_type(NatType::DNat)
+                                .with_family(ProtocolFamily::Ipv4)
+                                .with_ip_register(Register::Reg1)
+                                .with_port_register(Register::Reg2);
+
+                            Rule::new(chain)
+                                .map_err(|e| Error::Firewall(e.to_string()))?
+                                .daddr(IpAddr::V4(listen_addr))
+                                .dport(port, proto)
+                                .with_expr(Immediate::new_data(ip_bytes, Register::Reg1))
+                                .with_expr(Immediate::new_data(port_bytes, Register::Reg2))
+                                .with_expr(nat_expr)
+                                .add_to_batch(&mut dnat_batch);
+                        }
+                    }
+                }
+            }
+            tracing::info!(rule = %rule.name, target = %target_str, "DNAT rule emitted");
+        }
+
+        dnat_batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
+        tracing::info!(count = dnat_rules.len(), "nftables DNAT installed");
+    }
+
     Ok(())
 }
 
 /// Build a human-readable dump of the firewall rules `install_firewall`
-/// would emit for `cfg`. Mirrors the structure of `install_firewall` —
-/// kept as a parallel walker rather than threading description-pushes
-/// through every Rule emit site, which would clutter the kernel-install
-/// hot path. The risk of drift between the two functions is mitigated
-/// by `firewall_dump_matches_install_count` in tests below.
-///
-/// Used by the `Diag::firewall` RPC so an operator can inspect the
-/// active ruleset over the control plane without `nft list ruleset` —
-/// which doesn't exist in the firmware image (no shell, no nft binary).
-/// This dump is the rules WE INSTALLED, not a live kernel readout, but
-/// since nothing else can mutate the ruleset (no shell, no nft) the two
-/// stay in sync as long as `install_firewall` is the sole writer.
+/// would emit for `cfg`. Used by the `Diag::firewall` RPC so an operator
+/// can inspect the active ruleset over the control plane.
 pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     let mut out = Vec::new();
     let wan_iface = wan_iface_name(&cfg.wan);
-    let control_ports = control_listen_ports(&cfg.control.listen);
 
     out.push("table inet oxwrt {".to_string());
 
     // -------- INPUT --------
     out.push("  chain input {".to_string());
     out.push("    type filter hook input priority 0; policy drop;".to_string());
-    out.push("    ct state established,related accept".to_string());
     out.push("    iif \"lo\" accept".to_string());
-    if cfg.firewall.lan.allow_control_plane {
-        for &port in &control_ports {
-            out.push(format!(
-                "    iif \"{}\" udp dport {} accept   # lan control plane",
-                cfg.lan.bridge, port
-            ));
-        }
-    }
-    for zone in &cfg.firewall.zones {
-        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
+
+    for rule in &cfg.firewall.rules {
+        if !rule.ct_state.is_empty() {
+            out.push("    ct state established,related accept".to_string());
             continue;
-        };
-        if zone.allow_dhcp {
-            for port in [67u16, 68u16] {
-                out.push(format!(
-                    "    iif \"{}\" udp dport {} accept   # iso {} dhcp",
-                    net.iface, port, net.name
-                ));
-            }
         }
-        if zone.allow_dns {
-            out.push(format!(
-                "    iif \"{}\" udp dport 53 accept   # iso {} dns",
-                net.iface, net.name
-            ));
-            out.push(format!(
-                "    iif \"{}\" tcp dport 53 accept   # iso {} dns",
-                net.iface, net.name
-            ));
+        if rule.action == Action::Dnat {
+            continue;
         }
-        if zone.allow_control_plane {
-            for &port in &control_ports {
-                out.push(format!(
-                    "    iif \"{}\" udp dport {} accept   # iso {} control",
-                    net.iface, port, net.name
-                ));
-            }
-        }
-        for spec in &zone.input_allow {
-            for proto in port_proto_to_list(spec.proto) {
-                let pname = match proto {
-                    rustables::Protocol::TCP => "tcp",
-                    rustables::Protocol::UDP => "udp",
-                };
-                out.push(format!(
-                    "    iif \"{}\" {} dport {} accept   # iso {} custom",
-                    net.iface, pname, spec.port, net.name
-                ));
+        // INPUT rules: src only (no dest).
+        if rule.src.is_some() && rule.dest.is_none() {
+            let src_ifaces = zone_ifaces(cfg, rule.src.as_deref().unwrap());
+            let protos = proto_to_nf_list(rule.proto);
+            let ports = port_spec_to_list(&rule.dest_port);
+            let is_icmp = rule.proto == Some(Proto::Icmp);
+            let action_str = match rule.action {
+                Action::Accept => "accept",
+                Action::Drop => "drop",
+                Action::Reject => "reject",
+                Action::Dnat => unreachable!(),
+            };
+            for src_if in &src_ifaces {
+                if is_icmp {
+                    out.push(format!(
+                        "    iif \"{src_if}\" {action_str}   # {}", rule.name
+                    ));
+                } else if ports.is_empty() && protos.is_empty() {
+                    out.push(format!(
+                        "    iif \"{src_if}\" {action_str}   # {}", rule.name
+                    ));
+                } else {
+                    for proto in &protos {
+                        let pname = match proto {
+                            rustables::Protocol::TCP => "tcp",
+                            rustables::Protocol::UDP => "udp",
+                        };
+                        for &port in &ports {
+                            out.push(format!(
+                                "    iif \"{src_if}\" {pname} dport {port} {action_str}   # {}",
+                                rule.name
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -879,31 +684,45 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     // -------- FORWARD --------
     out.push("  chain forward {".to_string());
     out.push("    type filter hook forward priority 0; policy drop;".to_string());
-    out.push("    ct state established,related accept".to_string());
-    if cfg.firewall.lan.allow_wan {
-        out.push(format!(
-            "    iif \"{}\" oif \"{}\" accept   # lan→wan",
-            cfg.lan.bridge, wan_iface
-        ));
+
+    for rule in &cfg.firewall.rules {
+        if !rule.ct_state.is_empty() {
+            out.push("    ct state established,related accept".to_string());
+            continue;
+        }
+        if rule.action == Action::Dnat {
+            continue;
+        }
+        if rule.src.is_some() && rule.dest.is_some() {
+            let src_ifaces = zone_ifaces(cfg, rule.src.as_deref().unwrap());
+            let dest_ifaces = zone_ifaces(cfg, rule.dest.as_deref().unwrap());
+            let action_str = match rule.action {
+                Action::Accept => "accept",
+                Action::Drop => "drop",
+                Action::Reject => "reject",
+                Action::Dnat => unreachable!(),
+            };
+            for src_if in &src_ifaces {
+                for dest_if in &dest_ifaces {
+                    out.push(format!(
+                        "    iif \"{src_if}\" oif \"{dest_if}\" {action_str}   # {}",
+                        rule.name
+                    ));
+                }
+            }
+        }
     }
+
+    // Per-service implicit forward rules.
     for svc in &cfg.services {
         if svc.veth.is_none() {
             continue;
         }
         let veth = veth_host_name(svc);
-        let lan_allowed = cfg
-            .firewall
-            .lan
-            .allow_services
-            .as_ref()
-            .map(|list| list.iter().any(|n| n == &svc.name))
-            .unwrap_or(true);
-        if lan_allowed {
-            out.push(format!(
-                "    iif \"{}\" oif \"{}\" accept   # lan→svc {}",
-                cfg.lan.bridge, veth, svc.name
-            ));
-        }
+        out.push(format!(
+            "    iif \"{}\" oif \"{}\" accept   # lan→svc {}",
+            cfg.lan.bridge, veth, svc.name
+        ));
         out.push(format!(
             "    iif \"{}\" oif \"{}\" accept   # svc {}→wan",
             veth, wan_iface, svc.name
@@ -922,102 +741,102 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
             }
         }
     }
-    for zone in &cfg.firewall.zones {
-        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
-            continue;
-        };
-        if zone.allow_wan {
-            out.push(format!(
-                "    iif \"{}\" oif \"{}\" accept   # iso {}→wan",
-                net.iface, wan_iface, net.name
-            ));
-        }
-        for svc in &cfg.services {
-            if svc.veth.is_none() {
-                continue;
-            }
-            let allowed = match &zone.allow_services {
-                Some(list) => list.iter().any(|n| n == &svc.name),
-                None => svc.expose.iter().any(|e| {
-                    (zone.allow_dns && e.lan_port == 53)
-                        || (zone.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
-                }),
-            };
-            if !allowed {
-                continue;
-            }
-            out.push(format!(
-                "    iif \"{}\" oif \"{}\" accept   # iso {}→svc {}",
-                net.iface,
-                veth_host_name(svc),
-                net.name,
-                svc.name
-            ));
-        }
-        for peer_name in &zone.peers {
-            if let Some(peer) = cfg.networks.iter().find(|p| &p.name == peer_name) {
-                if peer.iface != net.iface {
-                    out.push(format!(
-                        "    iif \"{}\" oif \"{}\" accept   # iso {}→peer {}",
-                        net.iface, peer.iface, net.name, peer.name
-                    ));
-                }
-            }
-        }
-        if !zone.client_isolation {
-            out.push(format!(
-                "    iif \"{}\" oif \"{}\" accept   # iso {} client isolation off",
-                net.iface, net.iface, net.name
-            ));
-        }
-    }
     out.push("  }".to_string());
 
-    // OUTPUT chain is policy accept with no rules — note it explicitly
-    // so the operator doesn't think we forgot it.
     out.push("  chain output {".to_string());
     out.push("    type filter hook output priority 0; policy accept;".to_string());
     out.push("  }".to_string());
 
     out.push("}".to_string());
+
+    // DNAT dump
+    let dnat_rules: Vec<&crate::config::Rule> = cfg
+        .firewall
+        .rules
+        .iter()
+        .filter(|r| r.action == Action::Dnat && r.dnat_target.is_some())
+        .collect();
+    if !dnat_rules.is_empty() {
+        out.push("table ip oxwrt-dnat {".to_string());
+        for rule in &dnat_rules {
+            let target = rule.dnat_target.as_deref().unwrap();
+            let ports = port_spec_to_list(&rule.dest_port);
+            let protos_str = match rule.proto {
+                Some(Proto::Tcp) => "tcp",
+                Some(Proto::Udp) => "udp",
+                Some(Proto::Both) => "tcp+udp",
+                _ => "?",
+            };
+            for &port in &ports {
+                out.push(format!(
+                    "  {protos_str} dport {port} dnat to {target}   # {}",
+                    rule.name
+                ));
+            }
+        }
+        out.push("}".to_string());
+    }
+
     out
 }
 
-/// Extract the unique set of ports the control plane is listening on
-/// from `cfg.control.listen` strings. Tolerates malformed entries
-/// (logged at warn) so a typo in one entry doesn't take down the
-/// whole firewall install.
-fn control_listen_ports(listen: &[String]) -> Vec<u16> {
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    let mut ports: BTreeSet<u16> = BTreeSet::new();
-    for entry in listen {
-        match entry.parse::<SocketAddr>() {
-            Ok(addr) => {
-                ports.insert(addr.port());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    listen = %entry,
-                    error = %e,
-                    "control listen entry not parseable; skipping for firewall rule"
-                );
+/// Resolve a zone name to the set of interface names it covers.
+/// "lan" → cfg.lan.bridge, "wan" → wan iface, named networks → their iface.
+fn zone_ifaces(cfg: &Config, zone_name: &str) -> Vec<String> {
+    // First check if a firewall zone with this name exists; if so,
+    // resolve its `networks` list.
+    if let Some(zone) = cfg.firewall.zones.iter().find(|z| z.name == zone_name) {
+        let mut ifaces = Vec::new();
+        for net_name in &zone.networks {
+            if net_name == "lan" {
+                ifaces.push(cfg.lan.bridge.clone());
+            } else if net_name == "wan" {
+                ifaces.push(wan_iface_name(&cfg.wan).to_string());
+            } else if let Some(net) = cfg.networks.iter().find(|n| &n.name == net_name) {
+                ifaces.push(net.iface.clone());
             }
         }
+        return ifaces;
     }
-    ports.into_iter().collect()
+    // Fallback: direct name lookup.
+    if zone_name == "lan" {
+        vec![cfg.lan.bridge.clone()]
+    } else if zone_name == "wan" {
+        vec![wan_iface_name(&cfg.wan).to_string()]
+    } else if let Some(net) = cfg.networks.iter().find(|n| n.name == zone_name) {
+        vec![net.iface.clone()]
+    } else {
+        Vec::new()
+    }
 }
 
-/// Expand a `PortProto` to the underlying `rustables::Protocol`
-/// enum values. `Both` produces TCP and UDP; the rest produce one.
-fn port_proto_to_list(proto: crate::config::PortProto) -> Vec<rustables::Protocol> {
-    use crate::config::PortProto;
+/// Expand a `Proto` to `rustables::Protocol` values.
+fn proto_to_nf_list(proto: Option<Proto>) -> Vec<rustables::Protocol> {
     use rustables::Protocol;
     match proto {
-        PortProto::Udp => vec![Protocol::UDP],
-        PortProto::Tcp => vec![Protocol::TCP],
-        PortProto::Both => vec![Protocol::UDP, Protocol::TCP],
+        None => vec![],
+        Some(Proto::Tcp) => vec![Protocol::TCP],
+        Some(Proto::Udp) => vec![Protocol::UDP],
+        Some(Proto::Both) => vec![Protocol::UDP, Protocol::TCP],
+        Some(Proto::Icmp) => vec![], // ICMP handled separately
     }
+}
+
+/// Expand a `PortSpec` to a list of ports.
+fn port_spec_to_list(spec: &Option<PortSpec>) -> Vec<u16> {
+    match spec {
+        None => vec![],
+        Some(PortSpec::Single(p)) => vec![*p],
+        Some(PortSpec::List(ps)) => ps.clone(),
+    }
+}
+
+/// Parse a DNAT target string "ip:port" into (Ipv4Addr, u16).
+fn parse_dnat_target(s: &str) -> Option<(Ipv4Addr, u16)> {
+    let (ip_str, port_str) = s.rsplit_once(':')?;
+    let ip = ip_str.parse::<Ipv4Addr>().ok()?;
+    let port = port_str.parse::<u16>().ok()?;
+    Some((ip, port))
 }
 
 /// Extract the WAN interface name from any `Wan` variant. All three

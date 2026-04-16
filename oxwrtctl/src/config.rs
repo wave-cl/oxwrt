@@ -56,78 +56,88 @@ pub struct Network {
     pub prefix: u8,
 }
 
-/// All firewall policy in one place.
+/// All firewall policy in one place: zones define default policies per
+/// network, rules define explicit allows/drops/DNATs.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Firewall {
     #[serde(default)]
-    pub lan: LanPolicy,
+    pub zones: Vec<Zone>,
     #[serde(default)]
-    pub zones: Vec<ZonePolicy>,
+    pub rules: Vec<Rule>,
 }
 
-/// Firewall policy for the trusted LAN zone.
+/// A firewall zone: names a set of networks and declares default chain
+/// policies. The LAN is a zone like any other — no special struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LanPolicy {
-    #[serde(default = "default_true")]
-    pub allow_wan: bool,
-    #[serde(default = "default_true")]
-    pub allow_control_plane: bool,
+pub struct Zone {
+    pub name: String,
     #[serde(default)]
-    pub allow_services: Option<Vec<String>>,
+    pub networks: Vec<String>,
+    #[serde(default)]
+    pub default_input: ChainPolicy,
+    #[serde(default)]
+    pub default_forward: ChainPolicy,
+    #[serde(default)]
+    pub masquerade: bool,
 }
 
-impl Default for LanPolicy {
-    fn default() -> Self {
-        Self {
-            allow_wan: true,
-            allow_control_plane: true,
-            allow_services: None,
-        }
-    }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChainPolicy {
+    Accept,
+    #[default]
+    Drop,
 }
 
-/// Per-network firewall zone policy. `network` references a `Network.name`.
+/// A single firewall rule. Every firewall behavior is explicit — no
+/// `allow_dns = true` magic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ZonePolicy {
-    pub network: String,
+pub struct Rule {
+    pub name: String,
     #[serde(default)]
-    pub allow_wan: bool,
+    pub src: Option<String>,
     #[serde(default)]
-    pub allow_dhcp: bool,
+    pub dest: Option<String>,
     #[serde(default)]
-    pub allow_dns: bool,
+    pub proto: Option<Proto>,
     #[serde(default)]
-    pub allow_control_plane: bool,
-    #[serde(default = "default_true")]
-    pub client_isolation: bool,
+    pub dest_port: Option<PortSpec>,
     #[serde(default)]
-    pub peers: Vec<String>,
+    pub ct_state: Vec<String>,
+    pub action: Action,
     #[serde(default)]
-    pub allow_services: Option<Vec<String>>,
-    #[serde(default)]
-    pub input_allow: Vec<PortRule>,
+    pub dnat_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Proto {
+    Tcp,
+    Udp,
+    Both,
+    Icmp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PortSpec {
+    Single(u16),
+    List(Vec<u16>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    Accept,
+    Drop,
+    Reject,
+    Dnat,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// A single (protocol, port) firewall rule used in `ZonePolicy.input_allow`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortRule {
-    pub proto: PortProto,
-    pub port: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PortProto {
-    Udp,
-    Tcp,
-    /// Emit two rules — one TCP, one UDP. Convenient for protocols like
-    /// DNS that natively use both transports.
-    Both,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
@@ -207,8 +217,6 @@ pub struct Service {
     pub net_mode: NetMode,
     #[serde(default)]
     pub veth: Option<VethConfig>,
-    #[serde(default)]
-    pub expose: Vec<ExposePort>,
     #[serde(default)]
     pub memory_max: Option<u64>,
     #[serde(default)]
@@ -337,16 +345,6 @@ impl Default for SecurityProfile {
     }
 }
 
-/// Per-service DNAT entry. Installs `lan_port` → `<veth.peer_ip>:service_port`
-/// as a prerouting DNAT rule (for both TCP and UDP) on the LAN bridge, so
-/// clients on the LAN can reach the service on its conventional port even
-/// though the container listens on an alternate one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposePort {
-    pub lan_port: u16,
-    pub service_port: u16,
-}
-
 /// Veth pair configuration for an `Isolated`-mode service. The supervisor
 /// creates `veth-<svc>` in the host netns with `host_ip/prefix`, creates the
 /// peer `veth-<svc>-p` in the child's netns with `peer_ip/prefix`, and
@@ -447,11 +445,11 @@ mod tests {
         assert_eq!(cfg.lan.bridge, "br-lan");
         assert_eq!(cfg.networks.len(), 2);
         assert_eq!(cfg.networks[0].name, "guest");
-        assert_eq!(cfg.firewall.zones.len(), 2);
-        assert_eq!(cfg.firewall.zones[0].network, "guest");
-        assert_eq!(cfg.firewall.zones[0].peers, vec!["iot".to_string()]);
-        assert!(cfg.firewall.lan.allow_wan);
-        assert!(cfg.firewall.lan.allow_control_plane);
+        assert_eq!(cfg.firewall.zones.len(), 3);
+        assert_eq!(cfg.firewall.zones[0].name, "lan");
+        assert_eq!(cfg.firewall.zones[2].name, "wan");
+        assert!(cfg.firewall.zones[2].masquerade);
+        assert!(!cfg.firewall.rules.is_empty());
         assert_eq!(cfg.wifi.len(), 2);
         assert_eq!(cfg.wifi[0].ssid, "MyNetwork");
         assert_eq!(cfg.wifi[0].network, "lan");
@@ -473,12 +471,12 @@ mod tests {
         assert!(dhcp.binds.iter().any(|b| !b.readonly));
     }
 
-    /// Both `peers` and `allow_services` survive a TOML round trip and
-    /// distinguish "unset" from "empty list" the way the firewall code
-    /// expects: `allow_services = None` ⇒ implicit port-match logic,
-    /// `Some(vec![])` ⇒ explicit "no services."
+    /// Zone + rule model round-trips through TOML correctly: zones
+    /// declare defaults, rules declare explicit policy, DNAT rules
+    /// carry `dnat_target`, and `PortSpec::List` deserializes from
+    /// a TOML array.
     #[test]
-    fn zone_policy_peers_and_allow_services() {
+    fn zone_and_rule_model_roundtrip() {
         let toml_text = r#"
 hostname = "rtr"
 [wan]
@@ -493,37 +491,57 @@ prefix = 24
 listen = ["[::1]:51820"]
 authorized_keys = "/etc/oxwrt/keys"
 
-[firewall.lan]
-allow_services = ["dns"]
-
-[[networks]]
-name = "guest"
-iface = "br-guest"
-address = "192.168.10.1"
-prefix = 24
-
-[[networks]]
-name = "iot"
-iface = "br-iot"
-address = "192.168.20.1"
-prefix = 24
+[[firewall.zones]]
+name = "lan"
+networks = ["lan"]
+default_input = "accept"
+default_forward = "drop"
 
 [[firewall.zones]]
-network = "guest"
-allow_dns = true
-peers = ["iot"]
-allow_services = []
+name = "wan"
+networks = ["wan"]
+default_input = "drop"
+default_forward = "drop"
+masquerade = true
 
-[[firewall.zones]]
-network = "iot"
+[[firewall.rules]]
+name = "ct-established"
+action = "accept"
+ct_state = ["established", "related"]
+
+[[firewall.rules]]
+name = "guest-dhcp"
+src = "guest"
+proto = "udp"
+dest_port = [67, 68]
+action = "accept"
+
+[[firewall.rules]]
+name = "dns-dnat"
+proto = "both"
+dest_port = 53
+action = "dnat"
+dnat_target = "10.53.0.2:15353"
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("parse");
-        assert_eq!(cfg.firewall.lan.allow_services.as_deref(), Some(&["dns".to_string()][..]));
-        let guest = &cfg.firewall.zones[0];
-        assert_eq!(guest.peers, vec!["iot".to_string()]);
-        assert_eq!(guest.allow_services.as_deref(), Some(&[][..]));
-        let iot = &cfg.firewall.zones[1];
-        assert!(iot.peers.is_empty());
-        assert!(iot.allow_services.is_none());
+        assert_eq!(cfg.firewall.zones.len(), 2);
+        let lan = &cfg.firewall.zones[0];
+        assert_eq!(lan.name, "lan");
+        assert_eq!(lan.default_input, crate::config::ChainPolicy::Accept);
+        assert!(!lan.masquerade);
+        let wan = &cfg.firewall.zones[1];
+        assert_eq!(wan.name, "wan");
+        assert!(wan.masquerade);
+
+        assert_eq!(cfg.firewall.rules.len(), 3);
+        let ct = &cfg.firewall.rules[0];
+        assert_eq!(ct.ct_state, vec!["established", "related"]);
+        assert_eq!(ct.action, crate::config::Action::Accept);
+        let dhcp = &cfg.firewall.rules[1];
+        assert_eq!(dhcp.src.as_deref(), Some("guest"));
+        assert!(matches!(dhcp.dest_port, Some(crate::config::PortSpec::List(ref v)) if v == &[67, 68]));
+        let dnat = &cfg.firewall.rules[2];
+        assert_eq!(dnat.action, crate::config::Action::Dnat);
+        assert_eq!(dnat.dnat_target.as_deref(), Some("10.53.0.2:15353"));
     }
 }

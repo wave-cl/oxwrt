@@ -65,34 +65,141 @@ prefix = 24
 
 # ---------------- Firewall ----------------
 #
-# All firewall policy in one place. The LAN zone defaults to allowing
-# everything; per-network zones default to dropping everything and
-# require explicit allows.
-
-[firewall.lan]
-allow_wan = true                 # LAN clients reach the internet
-allow_control_plane = true       # sQUIC management reachable from LAN
-# allow_services = ["dns"]       # optional whitelist; None (default) = all services
+# All firewall policy in one place. Zones declare default chain policies;
+# rules declare explicit accepts/drops/DNATs. No boolean shortcuts —
+# every firewall behavior is an explicit rule.
 
 [[firewall.zones]]
-network = "guest"
-allow_wan = true                 # guest clients reach the internet
-allow_dhcp = true                # punches UDP 67/68 in INPUT
-allow_dns = true                 # punches UDP+TCP 53 in INPUT
-# allow_control_plane = false    # default
-# client_isolation = true        # default
-peers = ["iot"]                  # guest -> iot one-way (asymmetric by design)
-# allow_services = ["dns"]       # explicit whitelist; None (default) = port-matching logic
+name = "lan"
+networks = ["lan"]
+default_input = "accept"
+default_forward = "drop"
 
 [[firewall.zones]]
-network = "iot"
-allow_wan = false                # IoT devices do NOT reach the internet
-allow_dhcp = true
-allow_dns = true
-input_allow = [                  # additional INPUT punches beyond the flags
-  { proto = "udp", port = 5353 },    # mDNS advertisement receive
-  { proto = "both", port = 123 },    # NTP over both UDP and TCP
-]
+name = "guest"
+networks = ["guest"]
+default_input = "drop"
+default_forward = "drop"
+
+[[firewall.zones]]
+name = "wan"
+networks = ["wan"]
+default_input = "drop"
+default_forward = "drop"
+masquerade = true
+
+# Established/related — visible, not hidden in net.rs
+[[firewall.rules]]
+name = "ct-established"
+action = "accept"
+ct_state = ["established", "related"]
+
+# LAN → WAN (internet access for trusted LAN)
+[[firewall.rules]]
+name = "lan-internet"
+src = "lan"
+dest = "wan"
+action = "accept"
+
+# Guest → WAN (internet for guests)
+[[firewall.rules]]
+name = "guest-internet"
+src = "guest"
+dest = "wan"
+action = "accept"
+
+# Guest DNS (accept DNS queries from guest to router)
+[[firewall.rules]]
+name = "guest-dns"
+src = "guest"
+proto = "both"
+dest_port = 53
+action = "accept"
+
+# Guest DHCP
+[[firewall.rules]]
+name = "guest-dhcp"
+src = "guest"
+proto = "udp"
+dest_port = [67, 68]
+action = "accept"
+
+# Guest client isolation (iif == oif drop)
+[[firewall.rules]]
+name = "guest-isolation"
+src = "guest"
+dest = "guest"
+action = "drop"
+
+# Guest → IoT one-way peer
+[[firewall.rules]]
+name = "guest-to-iot"
+src = "guest"
+dest = "iot"
+action = "accept"
+
+# IoT DNS
+[[firewall.rules]]
+name = "iot-dns"
+src = "iot"
+proto = "both"
+dest_port = 53
+action = "accept"
+
+# IoT DHCP
+[[firewall.rules]]
+name = "iot-dhcp"
+src = "iot"
+proto = "udp"
+dest_port = [67, 68]
+action = "accept"
+
+# IoT mDNS
+[[firewall.rules]]
+name = "iot-mdns"
+src = "iot"
+proto = "udp"
+dest_port = 5353
+action = "accept"
+
+# IoT NTP
+[[firewall.rules]]
+name = "iot-ntp"
+src = "iot"
+proto = "both"
+dest_port = 123
+action = "accept"
+
+# DNAT: port 53 → DNS service container
+[[firewall.rules]]
+name = "dns-dnat"
+proto = "both"
+dest_port = 53
+action = "dnat"
+dnat_target = "10.53.0.2:15353"
+
+# DNAT: port 123 → NTP service container
+[[firewall.rules]]
+name = "ntp-dnat"
+proto = "both"
+dest_port = 123
+action = "dnat"
+dnat_target = "10.123.0.2:1123"
+
+# Control plane access from LAN
+[[firewall.rules]]
+name = "control-plane-lan"
+src = "lan"
+proto = "udp"
+dest_port = 51820
+action = "accept"
+
+# ICMP ping from LAN
+[[firewall.rules]]
+name = "lan-ping"
+src = "lan"
+proto = "icmp"
+action = "accept"
 
 # ---------------- Radios ----------------
 #
@@ -140,7 +247,6 @@ rootfs = "/usr/lib/oxwrt/services/dns/rootfs"
 entrypoint = ["/hickory-dns", "-c", "/etc/named.toml"]
 net_mode = "isolated"
 veth = { host_ip = "10.53.0.1", peer_ip = "10.53.0.2", prefix = 30 }
-expose = [{ lan_port = 53, service_port = 15353 }]
 memory_max = 67108864        # 64 MiB
 cpu_max = "50000 100000"     # 50% of one CPU
 pids_max = 32
@@ -208,7 +314,6 @@ rootfs = "/usr/lib/oxwrt/services/ntp/rootfs"
 entrypoint = ["/ntp-daemon", "-c", "/etc/ntp.toml"]
 net_mode = "isolated"
 veth = { host_ip = "10.123.0.1", peer_ip = "10.123.0.2", prefix = 30 }
-expose = [{ lan_port = 123, service_port = 1123 }]
 memory_max = 33554432
 pids_max = 16
 depends_on = ["dns"]         # needs DNS to resolve pool.ntp.org

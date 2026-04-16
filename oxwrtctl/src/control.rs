@@ -249,9 +249,29 @@ members = ["eth1", "eth2"]
 address = "192.168.8.1"
 prefix = 24
 
-[firewall.lan]
-allow_control_plane = true
-allow_wan = true
+[[firewall.zones]]
+name = "lan"
+networks = ["lan"]
+default_input = "accept"
+default_forward = "drop"
+
+[[firewall.zones]]
+name = "wan"
+networks = ["wan"]
+default_input = "drop"
+default_forward = "drop"
+masquerade = true
+
+[[firewall.rules]]
+name = "ct-established"
+action = "accept"
+ct_state = ["established", "related"]
+
+[[firewall.rules]]
+name = "lan-internet"
+src = "lan"
+dest = "wan"
+action = "accept"
 
 [control]
 listen = [

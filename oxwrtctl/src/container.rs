@@ -1649,7 +1649,6 @@ mod tests {
             env: Default::default(),
             net_mode: NetMode::Isolated,
             veth: None,
-            expose: vec![],
             memory_max: Some(32 * 1024 * 1024),
             cpu_max: None,
             pids_max: Some(16),

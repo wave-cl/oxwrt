@@ -430,21 +430,12 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
             }
             *dns = addrs;
         }
-        "lan.allow_wan" => match value {
-            "true" | "1" | "yes" => new_cfg.firewall.lan.allow_wan = true,
-            "false" | "0" | "no" => new_cfg.firewall.lan.allow_wan = false,
-            _ => {
-                return Response::Err {
-                    message: "lan.allow_wan must be true/false".to_string(),
-                };
-            }
-        },
         _ => {
             return Response::Err {
                 message: format!(
                     "key '{key}' is not writable. Writable keys: \
                      hostname, timezone, lan.bridge, lan.address, \
-                     lan.prefix, lan.allow_wan, wan.mode, wan.iface, \
+                     lan.prefix, wan.mode, wan.iface, \
                      wan.address, wan.prefix, wan.gateway, wan.dns"
                 ),
             };
@@ -634,25 +625,6 @@ fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -
                 }
             }
             wan["dns"] = Item::Value(toml_edit::Value::Array(arr));
-        }
-        "lan.allow_wan" => {
-            // Ensure [firewall] and [firewall.lan] tables exist.
-            if doc.get("firewall").is_none() {
-                doc["firewall"] = Item::Table(toml_edit::Table::new());
-            }
-            let fw = doc
-                .get_mut("firewall")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [firewall] table".to_string())?;
-            if fw.get("lan").is_none() {
-                fw["lan"] = Item::Table(toml_edit::Table::new());
-            }
-            let fw_lan = fw
-                .get_mut("lan")
-                .and_then(|i| i.as_table_mut())
-                .ok_or_else(|| "on-disk config has no [firewall.lan] table".to_string())?;
-            let b = matches!(value, "true" | "1" | "yes");
-            fw_lan["allow_wan"] = tv(b);
         }
         _ => return Err(format!("BUG: unexpected key in apply_set_to_toml: {key}")),
     }
@@ -1127,7 +1099,6 @@ async fn diag_exec(entry: &DiagBinary, args: &[String]) -> Result<String, String
         env: Default::default(),
         net_mode: NetMode::Host,
         veth: None,
-        expose: Vec::new(),
         memory_max: None,
         cpu_max: None,
         pids_max: None,
@@ -1826,8 +1797,6 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
             ),
             _ => Some("(not static)".to_string()),
         },
-        "lan.allow_wan" => Some(cfg.firewall.lan.allow_wan.to_string()),
-        "lan.allow_control_plane" => Some(cfg.firewall.lan.allow_control_plane.to_string()),
         "lan.members" => Some(cfg.lan.members.join(",")),
         "services" => Some(
             cfg.services

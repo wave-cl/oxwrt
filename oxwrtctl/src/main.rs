@@ -168,7 +168,6 @@ async fn smoke_async(args: Vec<String>) -> ExitCode {
         // pair. Real services use NetMode::Isolated.
         net_mode: config::NetMode::Host,
         veth: None,
-        expose: vec![],
         memory_max: None,
         cpu_max: None,
         pids_max: None,
@@ -350,11 +349,7 @@ async fn smoke_ns_async(args: Vec<String>) -> ExitCode {
         eprintln!("smoke-ns: enable_ipv4_forwarding: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = net::install_nat_masquerade() {
-        eprintln!("smoke-ns: install_nat_masquerade: {e}");
-        return ExitCode::FAILURE;
-    }
-    eprintln!("smoke-ns: ip_forward=1, MASQUERADE installed");
+    eprintln!("smoke-ns: ip_forward=1");
 
     let spec = config::Service {
         name: svc_name.clone(),
@@ -367,7 +362,6 @@ async fn smoke_ns_async(args: Vec<String>) -> ExitCode {
             peer_ip,
             prefix,
         }),
-        expose: vec![],
         memory_max: None,
         cpu_max: None,
         pids_max: None,

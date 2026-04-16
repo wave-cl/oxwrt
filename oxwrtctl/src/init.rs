@@ -167,50 +167,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             }
         }
     }
-    // Forwarding + MASQUERADE are needed whenever the router is going
-    // to forward anything between subnets — that's any deployment with
-    // either an isolated service (which needs to egress) OR an isolated
-    // subnet (whose clients reach WAN through us). Enable both
-    // unconditionally; both calls are idempotent and the cost on a
-    // pure-LAN deployment is two no-op writes.
+    // Forwarding is needed whenever the router forwards between subnets —
+    // any deployment with either an isolated service or an isolated subnet.
+    // Enable unconditionally; idempotent and no-op on a pure-LAN deployment.
     if isolated_services > 0 || !cfg.networks.is_empty() {
         if let Err(e) = net::enable_ipv4_forwarding() {
             tracing::error!(error = %e, "enable_ipv4_forwarding failed");
         }
-        if let Err(e) = net::install_nat_masquerade() {
-            tracing::error!(error = %e, "install_nat_masquerade failed");
-        }
-    }
-
-    // Collect per-service expose entries into DNAT rules and install them
-    // as a single atomic rustables batch. Each entry becomes DNAT rules
-    // (TCP+UDP × prerouting+output chains) matching daddr == router IP
-    // + the listen port, for **every** router IP: the trusted LAN IP
-    // plus one entry per isolated subnet's router IP. Clients on any
-    // subnet that has `allow_dns = true` can hit the exposed port on
-    // their own gateway address and get DNATed to the service.
-    let mut listen_addrs: Vec<std::net::Ipv4Addr> = vec![cfg.lan.address];
-    for net in &cfg.networks {
-        listen_addrs.push(net.address);
-    }
-    let mut dnat_rules: Vec<net::DnatRule> = Vec::new();
-    for svc in &cfg.services {
-        let Some(veth) = svc.veth.as_ref() else {
-            continue;
-        };
-        for e in &svc.expose {
-            for &listen_addr in &listen_addrs {
-                dnat_rules.push(net::DnatRule {
-                    listen_addr,
-                    listen_port: e.lan_port,
-                    target_ip: veth.peer_ip,
-                    target_port: e.service_port,
-                });
-            }
-        }
-    }
-    if let Err(e) = net::install_dnat_rules(&dnat_rules) {
-        tracing::error!(error = %e, "install_dnat_rules failed");
     }
 
     let supervisor = Supervisor::from_config(&cfg.services);
