@@ -1,0 +1,97 @@
+#!/bin/sh
+# Build the debug-ssh service rootfs at /usr/lib/oxwrt/services/debug-ssh/rootfs
+# on first boot.
+#
+# The "debug-ssh" service is an opt-in escape hatch for the PID-1
+# takeover path: once oxwrtctl replaces procd, there is no stock
+# dropbear and no shell, so a stuck control plane means a physical
+# power-cycle + rollback flash. Running dropbear under our own
+# supervisor on a second port keeps the SSH path available while
+# staying under the full container hardening pipeline (caps drop,
+# no_new_privs, pivot_root).
+#
+# The service is declared in oxwrt.toml but only spawns when oxwrtctl
+# runs in --services-only or --init mode. It has no effect in
+# --control-only mode (which is what /etc/init.d/oxwrtctl launches
+# by default during bring-up).
+#
+# Port 2222 rather than 22 — stock dropbear still owns 22 while
+# we're in side-binary mode. After PID-1 takeover this can move to 22.
+#
+# Runs before 98-oxwrt-diag-rootfs and 99-oxwrtctl (alphabetical) so
+# the rootfs exists before the supervisor tries to spawn against it.
+#
+# Like the diag rootfs provisioner, this is only for the
+# side-binary-on-stock-OpenWrt deployment. A production firmware
+# either omits this rootfs entirely (appliance mode, no SSH) or
+# ships a curated static-linked dropbear in its own OpenWrt package.
+
+set -e
+R=/usr/lib/oxwrt/services/debug-ssh/rootfs
+
+# Skip if already provisioned — uci-defaults re-runs if the script
+# gets re-enabled, and we don't want to blow away a customized rootfs.
+if [ -x "$R/sbin/dropbear" ]; then
+    exit 0
+fi
+
+# Refuse to run if the host binary isn't present — a missing dropbear
+# in the stock image means this script was enabled by mistake.
+if [ ! -x /usr/sbin/dropbear ]; then
+    logger -t oxwrt-debug-ssh "no /usr/sbin/dropbear on host; skipping"
+    exit 0
+fi
+
+mkdir -p "$R/bin" "$R/sbin" "$R/lib" "$R/etc/dropbear" \
+         "$R/dev/pts" "$R/proc" "$R/sys" "$R/tmp" "$R/var/log" "$R/root"
+
+# Core binaries: busybox for the login shell (symlinked per-applet
+# below), dropbear for the listener itself.
+cp /bin/busybox "$R/bin/busybox"
+cp /usr/sbin/dropbear "$R/sbin/dropbear"
+
+# BusyBox applets a debug session actually uses. Adding more is
+# cheap (each is a symlink, ~10 bytes), but keeping the set visible
+# makes the rootfs auditable — "what can an attacker with SSH do?"
+# has a bounded answer.
+cd "$R/bin"
+for a in sh ash ls cat mount umount ps kill ip ping traceroute dmesg free \
+         head tail grep sed awk echo chmod chown stat df du tr find \
+         date touch mkdir rmdir rm cp mv ln readlink uname hostname \
+         nslookup netstat which env printf id whoami pwd true false \
+         sleep clear reset login su tty who logger wget vi more less; do
+    ln -sf busybox "$a"
+done
+cd "$R/sbin"
+for a in ifconfig route arp; do
+    ln -sf /bin/busybox "$a"
+done
+cd - >/dev/null
+
+# Runtime libs — dropbear and busybox both link against the musl
+# loader + libgcc_s on aarch64 OpenWrt.
+cp /lib/ld-musl-aarch64.so.1 "$R/lib/"
+cp /lib/libgcc_s.so.1 "$R/lib/"
+
+# Minimal /etc.
+cat > "$R/etc/passwd" <<EOF
+root:x:0:0:root:/root:/bin/sh
+EOF
+cat > "$R/etc/group" <<EOF
+root:x:0:
+EOF
+cat > "$R/etc/shells" <<EOF
+/bin/sh
+/bin/ash
+EOF
+
+# Host keys + authorized_keys. Share with the stock dropbear install
+# so the operator's ~/.ssh/known_hosts doesn't warn between port 22
+# (stock) and port 2222 (ours) on the same router.
+cp /etc/dropbear/dropbear_ed25519_host_key "$R/etc/dropbear/"
+cp /etc/dropbear/dropbear_rsa_host_key "$R/etc/dropbear/" 2>/dev/null || true
+cp /etc/dropbear/authorized_keys "$R/etc/dropbear/"
+
+chmod 1777 "$R/tmp"
+
+exit 0

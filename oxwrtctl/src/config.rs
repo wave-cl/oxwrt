@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(cfg.wifi.len(), 2);
         assert_eq!(cfg.wifi[0].ssid, "MyNetwork");
         assert_eq!(cfg.wifi[0].network, "lan");
-        assert_eq!(cfg.services.len(), 3);
+        assert_eq!(cfg.services.len(), 4);
 
         // The coredhcp service must declare NET_RAW + NET_ADMIN on top
         // of the default retain list — this is the canonical "override

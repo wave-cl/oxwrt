@@ -344,6 +344,54 @@ target = "/etc/ntp.toml"
 [services.security]
 caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 
+# --- debug-ssh: dropbear escape hatch for bring-up ---
+#
+# Runs under the same supervisor as any other service so an operator
+# can ssh in when the control plane misbehaves — without it, a bug
+# after the PID-1 takeover means "physical power cycle + rollback".
+# Listens on port 2222 so it doesn't fight stock dropbear while we're
+# running as a side binary. Production builds should omit this entry
+# (or the matching rootfs package) for the appliance model.
+#
+# Only spawns when oxwrtctl runs in --services-only or --init mode;
+# ignored by --control-only (which keeps the supervisor empty).
+# The rootfs is built by /etc/uci-defaults/97-oxwrt-debug-ssh-rootfs
+# from the stock busybox + dropbear on first boot.
+[[services]]
+name = "debug-ssh"
+rootfs = "/usr/lib/oxwrt/services/debug-ssh/rootfs"
+entrypoint = ["/sbin/dropbear", "-F", "-E", "-s", "-p", "2222", "-P", "/tmp/dropbear.pid"]
+# `net_mode = host` — dropbear binds on the real LAN bridge. An
+# isolated veth would require exposing port 2222 via DNAT, which is a
+# lot of plumbing for "the operator wants a shell."
+net_mode = "host"
+pids_max = 64
+depends_on = []
+
+# /dev/pts must be bind-mounted writable so dropbear can allocate
+# pseudo-ttys for interactive sessions (ptmx + /dev/pts/N). Everything
+# else in the rootfs is read-only by default.
+[[services.binds]]
+source = "/dev/pts"
+target = "/dev/pts"
+readonly = false
+
+# Dropbear is a legacy C codebase that needs more caps than the
+# default four: CHOWN/DAC_OVERRIDE/FOWNER for pty ownership transfer
+# to the logged-in user, SETUID/SETGID/SETPCAP to drop privilege to
+# that user, KILL to signal child shells, SYS_CHROOT for the
+# user-session chroot, NET_BIND_SERVICE just in case the port
+# changes below 1024. Seccomp and landlock off — adds weeks of
+# policy-authoring work for a service that only runs during
+# bring-up. Tighten later.
+[services.security]
+caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SYS_CHROOT"]
+no_new_privs = true
+seccomp = false
+seccomp_allow = []
+user_namespace = false
+landlock = false
+
 # ---------------- Control plane ----------------
 #
 # Listen on [::1]:51820 (loopback) AND on the LAN bridge IP so the
