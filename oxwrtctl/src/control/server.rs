@@ -1982,6 +1982,7 @@ fn handle_collection(state: &ControlState, collection: &str, action: &CrudAction
         "rule" => handle_crud_rule(state, action),
         "wifi" => handle_crud_wifi(state, action),
         "radio" => handle_crud_radio(state, action),
+        "service" => handle_crud_service(state, action),
         _ => Response::Err {
             message: format!("unknown collection: {collection}"),
         },
@@ -2531,6 +2532,136 @@ fn handle_crud_radio(state: &ControlState, action: &CrudAction) -> Response {
             let mut new_cfg = (*cfg).clone();
             new_cfg.radios.retain(|r| r.phy != *name);
             persist_and_swap(state, new_cfg, &format!("removed radio {name}"))
+        }
+    }
+}
+
+/// Service CRUD. Services are configured (name, rootfs, entrypoint,
+/// caps, …) but their runtime state (pid, state, restart count) lives
+/// in the `Supervisor`. This handler only mutates the *declaration* —
+/// a subsequent `reload` or process restart picks up the change. Adding
+/// a new service does not spawn it until reload; removing a service
+/// does not kill a running instance until reload. This matches the
+/// pattern for every other collection: declarations persist, reload
+/// applies.
+fn handle_crud_service(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Service;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.services) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => match cfg.services.iter().find(|s| s.name == *name) {
+            Some(svc) => match serde_json::to_string_pretty(svc) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
+                },
+            },
+            None => Response::Err {
+                message: format!("service not found: {name}"),
+            },
+        },
+        CrudAction::Add { json } => {
+            let item: Service = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            let item_name = item.name.clone();
+            if cfg.services.iter().any(|s| s.name == item_name) {
+                return Response::Err {
+                    message: format!("service already exists: {item_name}"),
+                };
+            }
+            // depends_on cross-check: every listed dep must exist in
+            // the (soon-to-be) service list. Catches typos before reload.
+            for dep in &item.depends_on {
+                if *dep == item_name {
+                    return Response::Err {
+                        message: format!("service {item_name} depends on itself"),
+                    };
+                }
+                if !cfg.services.iter().any(|s| s.name == *dep) {
+                    return Response::Err {
+                        message: format!("service {item_name} depends on unknown {dep}"),
+                    };
+                }
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.services.push(item);
+            persist_and_swap(state, new_cfg, &format!("added service {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.services.iter().position(|s| s.name == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("service not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.services[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Service = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.services[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated service {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.services.iter().any(|s| s.name == *name) {
+                return Response::Err {
+                    message: format!("service not found: {name}"),
+                };
+            }
+            // Refuse to leave dangling depends_on references. If any
+            // other service depends on the one being removed, force
+            // the operator to update the dependent first.
+            let dependents: Vec<&str> = cfg
+                .services
+                .iter()
+                .filter(|s| s.depends_on.iter().any(|d| d == name))
+                .map(|s| s.name.as_str())
+                .collect();
+            if !dependents.is_empty() {
+                return Response::Err {
+                    message: format!(
+                        "service {name} is depended on by: {}; update or remove those first",
+                        dependents.join(", ")
+                    ),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.services.retain(|s| s.name != *name);
+            persist_and_swap(state, new_cfg, &format!("removed service {name}"))
         }
     }
 }
