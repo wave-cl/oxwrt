@@ -1,0 +1,60 @@
+#!/bin/sh
+# Build a minimal diag rootfs at /usr/lib/oxwrt/diag/ from the stock
+# OpenWrt tree so `oxwrtctl diag ping/traceroute` works out of the box.
+#
+# The oxwrtctl Diag RPC pivots the diagnostic binary into its own mount
+# namespace (see container::oneshot_exec). The rootfs only needs the
+# binary + the dynamic loader + any libs the binary links against. On
+# an OpenWrt stock build, ping and traceroute are BusyBox applets —
+# dispatch happens on argv[0] so the copied "ping" / "traceroute"
+# files are just busybox under different names.
+#
+# Runs before 99-oxwrtctl (alphabetical order) so the diag bins exist
+# before the control plane comes up.
+#
+# In a real firmware build this setup is replaced by the
+# openwrt-packages/oxwrt-diag package, which ships pre-built static
+# binaries inside a verity-protected rootfs. This script is only for
+# the side-binary-on-stock-OpenWrt deployment.
+
+set -e
+R=/usr/lib/oxwrt/diag
+
+# Skip if already populated — the script re-runs across sysupgrade if
+# someone re-enables it, and we don't want to overwrite curated files.
+if [ -x "$R/bin/ping" ]; then
+    exit 0
+fi
+
+mkdir -p "$R/bin" "$R/lib" "$R/etc" "$R/proc" "$R/sys" "$R/dev"
+
+# Copy diagnostic binaries if they exist on the stock image. Missing
+# ones are logged but not fatal — the operator may not need them.
+for b in ping traceroute dig drill ss; do
+    src=""
+    for path in /bin/$b /usr/bin/$b /sbin/$b /usr/sbin/$b; do
+        if [ -f "$path" ]; then
+            src="$path"
+            break
+        fi
+    done
+    if [ -n "$src" ]; then
+        cp "$src" "$R/bin/$b"
+    fi
+done
+
+# Runtime libs for the (dynamically-linked) BusyBox. On aarch64 musl
+# OpenWrt: the loader + libgcc_s. If the image uses glibc or adds more
+# libs, this list expands.
+for lib in /lib/ld-musl-aarch64.so.1 /lib/libgcc_s.so.1; do
+    if [ -f "$lib" ]; then
+        cp "$lib" "$R/lib/"
+    fi
+done
+
+# Minimal /etc — ping and traceroute look up the invoking user and
+# read /etc/resolv.conf for target resolution.
+[ -f /etc/passwd ] && cp /etc/passwd "$R/etc/"
+[ -f /etc/resolv.conf ] && cp /etc/resolv.conf "$R/etc/"
+
+exit 0
