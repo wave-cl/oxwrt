@@ -2047,6 +2047,115 @@ fn handle_config_push(state: &ControlState, toml_text: &str) -> Response {
     persist_and_swap(state, new_cfg, "config pushed (pending reload)")
 }
 
+// ── CRUD cross-reference validation helpers ─────────────────────────
+//
+// These check integrity *within* a single operation: no orphan
+// references introduced on Add/Update, no dangling references left
+// behind on Remove. They run before `persist_and_swap` so a rejected
+// mutation never touches disk or in-memory state.
+//
+// The checks are intentionally shallow — they catch operator typos
+// (wrong zone name, deleted network still referenced by a wifi SSID)
+// but don't model the full reconcile semantics. Anything requiring
+// deeper analysis (e.g. "does this rule result in a DAG-free zone
+// graph?") is left to reload's own validation in `net::install_firewall`.
+//
+// All helpers take the new config (or a candidate item) and return
+// `Ok(())` or `Err(message)` with a human-readable reason — we pass
+// the message straight back to the operator as `Response::Err`.
+
+fn check_zone_network_refs(
+    zone: &crate::config::Zone,
+    cfg: &crate::config::Config,
+) -> Result<(), String> {
+    for net in &zone.networks {
+        if !cfg.networks.iter().any(|n| n.name() == net) {
+            return Err(format!(
+                "zone {} references unknown network: {net}",
+                zone.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_rule_zone_refs(
+    rule: &crate::config::Rule,
+    cfg: &crate::config::Config,
+) -> Result<(), String> {
+    if let Some(src) = &rule.src {
+        if !cfg.firewall.zones.iter().any(|z| z.name == *src) {
+            return Err(format!("rule {} references unknown src zone: {src}", rule.name));
+        }
+    }
+    if let Some(dest) = &rule.dest {
+        if !cfg.firewall.zones.iter().any(|z| z.name == *dest) {
+            return Err(format!(
+                "rule {} references unknown dest zone: {dest}",
+                rule.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_wifi_refs(
+    wifi: &crate::config::Wifi,
+    cfg: &crate::config::Config,
+) -> Result<(), String> {
+    if !cfg.radios.iter().any(|r| r.phy == wifi.radio) {
+        return Err(format!(
+            "wifi {} references unknown radio phy: {}",
+            wifi.ssid, wifi.radio
+        ));
+    }
+    if !cfg.networks.iter().any(|n| n.name() == wifi.network) {
+        return Err(format!(
+            "wifi {} references unknown network: {}",
+            wifi.ssid, wifi.network
+        ));
+    }
+    Ok(())
+}
+
+/// Given a candidate removal, return the list of dependents that still
+/// reference it (if any). The caller formats the error; an empty list
+/// means the removal is safe.
+fn dependents_on_network(
+    name: &str,
+    cfg: &crate::config::Config,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for z in &cfg.firewall.zones {
+        if z.networks.iter().any(|n| n == name) {
+            out.push(format!("zone {}", z.name));
+        }
+    }
+    for w in &cfg.wifi {
+        if w.network == name {
+            out.push(format!("wifi {}", w.ssid));
+        }
+    }
+    out
+}
+
+fn dependents_on_zone(name: &str, cfg: &crate::config::Config) -> Vec<String> {
+    cfg.firewall
+        .rules
+        .iter()
+        .filter(|r| r.src.as_deref() == Some(name) || r.dest.as_deref() == Some(name))
+        .map(|r| format!("rule {}", r.name))
+        .collect()
+}
+
+fn dependents_on_radio(phy: &str, cfg: &crate::config::Config) -> Vec<String> {
+    cfg.wifi
+        .iter()
+        .filter(|w| w.radio == phy)
+        .map(|w| format!("wifi {}", w.ssid))
+        .collect()
+}
+
 /// Serialize config to TOML, atomic-write to disk, swap the in-memory Arc.
 fn persist_and_swap(
     state: &ControlState,
@@ -2157,6 +2266,15 @@ fn handle_crud_network(state: &ControlState, action: &CrudAction) -> Response {
                     message: format!("network not found: {name}"),
                 };
             }
+            let dependents = dependents_on_network(name, &cfg);
+            if !dependents.is_empty() {
+                return Response::Err {
+                    message: format!(
+                        "network {name} is referenced by: {}; update or remove those first",
+                        dependents.join(", ")
+                    ),
+                };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.networks.retain(|n| n.name() != name);
             persist_and_swap(state, new_cfg, &format!("removed network {name}"))
@@ -2201,6 +2319,9 @@ fn handle_crud_zone(state: &ControlState, action: &CrudAction) -> Response {
                     message: format!("zone already exists: {}", item.name),
                 };
             }
+            if let Err(e) = check_zone_network_refs(&item, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             let item_name = item.name.clone();
             new_cfg.firewall.zones.push(item);
@@ -2240,6 +2361,9 @@ fn handle_crud_zone(state: &ControlState, action: &CrudAction) -> Response {
                     };
                 }
             };
+            if let Err(e) = check_zone_network_refs(&updated, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.firewall.zones[idx] = updated;
             persist_and_swap(state, new_cfg, &format!("updated zone {name}"))
@@ -2248,6 +2372,15 @@ fn handle_crud_zone(state: &ControlState, action: &CrudAction) -> Response {
             if !cfg.firewall.zones.iter().any(|z| z.name == *name) {
                 return Response::Err {
                     message: format!("zone not found: {name}"),
+                };
+            }
+            let dependents = dependents_on_zone(name, &cfg);
+            if !dependents.is_empty() {
+                return Response::Err {
+                    message: format!(
+                        "zone {name} is referenced by: {}; update or remove those first",
+                        dependents.join(", ")
+                    ),
                 };
             }
             let mut new_cfg = (*cfg).clone();
@@ -2294,6 +2427,9 @@ fn handle_crud_rule(state: &ControlState, action: &CrudAction) -> Response {
                     message: format!("rule already exists: {}", item.name),
                 };
             }
+            if let Err(e) = check_rule_zone_refs(&item, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             let item_name = item.name.clone();
             new_cfg.firewall.rules.push(item);
@@ -2333,6 +2469,9 @@ fn handle_crud_rule(state: &ControlState, action: &CrudAction) -> Response {
                     };
                 }
             };
+            if let Err(e) = check_rule_zone_refs(&updated, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.firewall.rules[idx] = updated;
             persist_and_swap(state, new_cfg, &format!("updated rule {name}"))
@@ -2387,6 +2526,9 @@ fn handle_crud_wifi(state: &ControlState, action: &CrudAction) -> Response {
                     message: format!("wifi already exists: {}", item.ssid),
                 };
             }
+            if let Err(e) = check_wifi_refs(&item, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             let item_ssid = item.ssid.clone();
             new_cfg.wifi.push(item);
@@ -2426,6 +2568,9 @@ fn handle_crud_wifi(state: &ControlState, action: &CrudAction) -> Response {
                     };
                 }
             };
+            if let Err(e) = check_wifi_refs(&updated, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.wifi[idx] = updated;
             persist_and_swap(state, new_cfg, &format!("updated wifi {name}"))
@@ -2527,6 +2672,15 @@ fn handle_crud_radio(state: &ControlState, action: &CrudAction) -> Response {
             if !cfg.radios.iter().any(|r| r.phy == *name) {
                 return Response::Err {
                     message: format!("radio not found: {name}"),
+                };
+            }
+            let dependents = dependents_on_radio(name, &cfg);
+            if !dependents.is_empty() {
+                return Response::Err {
+                    message: format!(
+                        "radio {name} is referenced by: {}; update or remove those first",
+                        dependents.join(", ")
+                    ),
                 };
             }
             let mut new_cfg = (*cfg).clone();
