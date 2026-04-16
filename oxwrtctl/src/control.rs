@@ -1,6 +1,7 @@
 pub mod client;
 #[cfg(target_os = "linux")]
 pub mod server;
+pub mod validate;
 
 use std::io;
 #[cfg(target_os = "linux")]
