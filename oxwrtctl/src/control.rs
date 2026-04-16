@@ -445,4 +445,92 @@ mod tests {
             _ => panic!("expected Diag, got {req:?}"),
         }
     }
+
+    /// `apply` requires `--confirm` (same safety gate as `reset`).
+    #[test]
+    fn apply_requires_confirm_flag() {
+        let err = parse_request("apply", &[]).unwrap_err();
+        assert!(err.contains("--confirm"), "unexpected error: {err}");
+
+        let req = parse_request("apply", &["--confirm".to_string()]).unwrap();
+        match req {
+            Request::FwApply {
+                confirm,
+                keep_settings,
+            } => {
+                assert!(confirm);
+                assert!(keep_settings, "default should keep settings");
+            }
+            _ => panic!("expected FwApply, got {req:?}"),
+        }
+    }
+
+    /// `apply --confirm --clean` sets keep_settings = false.
+    #[test]
+    fn apply_clean_flag() {
+        let req = parse_request(
+            "apply",
+            &["--confirm".to_string(), "--clean".to_string()],
+        )
+        .unwrap();
+        match req {
+            Request::FwApply {
+                confirm,
+                keep_settings,
+            } => {
+                assert!(confirm);
+                assert!(!keep_settings, "--clean should set keep_settings=false");
+            }
+            _ => panic!("expected FwApply, got {req:?}"),
+        }
+    }
+
+    /// `update` requires a file path. We can't test with a real file in
+    /// a unit test easily, but we can verify missing-path rejection.
+    #[test]
+    fn update_requires_path() {
+        let err = parse_request("update", &[]).unwrap_err();
+        assert!(
+            err.contains("missing firmware image path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// `update` with a nonexistent file returns a clear error.
+    #[test]
+    fn update_rejects_nonexistent_file() {
+        let err = parse_request(
+            "update",
+            &["/tmp/does-not-exist-oxwrt-test.bin".to_string()],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("No such file") || err.contains("not found") || err.contains("os error"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// `update` with a real (temp) file produces FwUpdate with correct
+    /// size and a valid hex SHA-256 hash.
+    #[test]
+    fn update_computes_sha256() {
+        let tmp = std::env::temp_dir().join("oxwrt-test-fw.bin");
+        let payload = b"oxwrt test payload";
+        std::fs::write(&tmp, payload).unwrap();
+
+        let req = parse_request("update", &[tmp.to_str().unwrap().to_string()]).unwrap();
+        match req {
+            Request::FwUpdate { size, sha256 } => {
+                assert_eq!(size, payload.len() as u64);
+                assert_eq!(sha256.len(), 64, "sha256 should be 64 hex chars");
+                assert!(
+                    sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                    "sha256 should be hex: {sha256}"
+                );
+            }
+            _ => panic!("expected FwUpdate, got {req:?}"),
+        }
+
+        std::fs::remove_file(&tmp).ok();
+    }
 }
