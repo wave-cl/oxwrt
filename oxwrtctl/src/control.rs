@@ -248,6 +248,8 @@ bridge = "br-lan"
 members = ["eth1", "eth2"]
 address = "192.168.8.1"
 prefix = 24
+
+[firewall.lan]
 allow_control_plane = true
 allow_wan = true
 
@@ -332,7 +334,7 @@ mod tests {
         assert_eq!(cfg.control.authorized_keys, control.authorized_keys);
         assert_eq!(cfg.lan.bridge, "br-lan");
         assert!(cfg.services.is_empty());
-        assert!(cfg.isolated_subnets.is_empty());
+        assert!(cfg.networks.is_empty());
     }
 
     /// Listen string must be quoted exactly once — this guards against

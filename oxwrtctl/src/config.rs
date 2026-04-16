@@ -29,95 +29,90 @@ pub struct Config {
     pub timezone: Option<String>,
     pub wan: Wan,
     pub lan: Lan,
-    /// Additional untrusted subnets (guest WiFi, IoT VLANs, DMZ, etc.).
-    /// Default firewall stance for every isolated subnet is "drop
-    /// everything into the router" — per-subnet flags (`allow_dhcp`,
-    /// `allow_dns`) explicitly punch holes, and `client_isolation`
-    /// adds an L3 defense-in-depth drop for `iif == oif` forwards.
-    /// Cross-subnet forwards to the trusted LAN are always blocked.
+    /// Additional networks (guest WiFi, IoT VLANs, DMZ, etc.).
+    /// Topology only — firewall policy lives in `firewall.zones`.
     #[serde(default)]
-    pub isolated_subnets: Vec<IsolatedSubnet>,
+    pub networks: Vec<Network>,
+    /// All firewall policy in one place: LAN zone + per-network zones.
+    #[serde(default)]
+    pub firewall: Firewall,
     #[serde(default)]
     pub radios: Vec<Radio>,
+    /// WiFi SSIDs, each referencing a radio (by `phy`) and a network zone.
+    #[serde(default)]
+    pub wifi: Vec<Wifi>,
     #[serde(default)]
     pub services: Vec<Service>,
     pub control: Control,
 }
 
-/// A single isolated network: its own L2 domain + subnet, firewalled
-/// off from the trusted LAN by default, explicit allows for the router
-/// services (DHCP, DNS) the clients need.
+/// A single network: its own L2 domain + subnet. Topology only —
+/// firewall policy lives in `Firewall.zones`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IsolatedSubnet {
-    /// Short name used for logging and rule tagging.
+pub struct Network {
     pub name: String,
-    /// Interface (physical, bridge, or veth) that this subnet lives on.
     pub iface: String,
-    /// Router's IPv4 address on this subnet.
     pub address: Ipv4Addr,
-    /// Prefix length (e.g. 24).
     pub prefix: u8,
-    /// Punch a hole in `INPUT` for DHCP server traffic (UDP 67/68)
-    /// arriving on this subnet's interface.
+}
+
+/// All firewall policy in one place.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Firewall {
     #[serde(default)]
-    pub allow_dhcp: bool,
-    /// Punch a hole in `INPUT` for DNS traffic (UDP/TCP 53) arriving
-    /// on this subnet's interface. Note that the actual DNS service
-    /// lives in an isolated netns; `install_dnat_rules` plumbs the
-    /// DNAT from this subnet's router IP to the service peer.
+    pub lan: LanPolicy,
     #[serde(default)]
-    pub allow_dns: bool,
-    /// Whether the sQUIC control plane is reachable from this subnet.
-    /// Default false — operators must explicitly opt in to expose the
-    /// management plane on an untrusted network. The trusted LAN
-    /// always allows the control plane (see `Lan.allow_control_plane`).
-    #[serde(default)]
-    pub allow_control_plane: bool,
-    /// Whether clients on this subnet can forward to the WAN
-    /// interface (i.e., reach the internet). Default `false` —
-    /// untrusted subnets get no internet unless explicitly opted in.
-    /// This is the toggle for "guest WiFi reaches the internet, IoT
-    /// VLAN does not."
-    #[serde(default)]
-    pub allow_wan: bool,
-    /// Arbitrary additional INPUT punches for this subnet. Each entry
-    /// is a `(proto, port)` rule that gets emitted as one (UDP-only,
-    /// TCP-only) or two (Both) accept rules with `iif` matching this
-    /// subnet's interface. Useful for mDNS, captive portal, NTP
-    /// server, etc. Default empty.
-    #[serde(default)]
-    pub input_allow: Vec<PortRule>,
-    /// Add an L3 defense-in-depth `iif == oif` drop in `FORWARD`.
-    /// This is one half of "client isolation"; the radio-level half
-    /// (`hostapd.conf: ap_isolate=1`) and L2 bridge-port
-    /// (`ip link set ... type bridge_slave isolated on`) halves must
-    /// be set up separately when wireless lands.
+    pub zones: Vec<ZonePolicy>,
+}
+
+/// Firewall policy for the trusted LAN zone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanPolicy {
     #[serde(default = "default_true")]
-    pub client_isolation: bool,
-    /// Other isolated subnets (by `name`) that this subnet is allowed
-    /// to forward to. Each entry produces a one-way `iif=this oif=peer`
-    /// accept; the reverse direction must be declared explicitly on
-    /// the peer side, so a peer relationship is asymmetric by default.
-    /// Use this for things like "guest WiFi can talk to the printer
-    /// VLAN but not vice versa." Default empty.
-    #[serde(default)]
-    pub peers: Vec<String>,
-    /// Per-subnet whitelist of service names this subnet may reach
-    /// via the supervisor's veth network. `None` (the default) means
-    /// "use the implicit port-matching logic" — i.e. `allow_dns` lets
-    /// the subnet hit any service exposing port 53, `allow_dhcp` lets
-    /// it hit 67/68. `Some(list)` switches to an explicit whitelist:
-    /// only the named services are reachable, irrespective of which
-    /// ports they expose. `Some(vec![])` means "no services."
+    pub allow_wan: bool,
+    #[serde(default = "default_true")]
+    pub allow_control_plane: bool,
     #[serde(default)]
     pub allow_services: Option<Vec<String>>,
+}
+
+impl Default for LanPolicy {
+    fn default() -> Self {
+        Self {
+            allow_wan: true,
+            allow_control_plane: true,
+            allow_services: None,
+        }
+    }
+}
+
+/// Per-network firewall zone policy. `network` references a `Network.name`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZonePolicy {
+    pub network: String,
+    #[serde(default)]
+    pub allow_wan: bool,
+    #[serde(default)]
+    pub allow_dhcp: bool,
+    #[serde(default)]
+    pub allow_dns: bool,
+    #[serde(default)]
+    pub allow_control_plane: bool,
+    #[serde(default = "default_true")]
+    pub client_isolation: bool,
+    #[serde(default)]
+    pub peers: Vec<String>,
+    #[serde(default)]
+    pub allow_services: Option<Vec<String>>,
+    #[serde(default)]
+    pub input_allow: Vec<PortRule>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// A single (protocol, port) firewall rule used in `IsolatedSubnet.input_allow`.
+/// A single (protocol, port) firewall rule used in `ZonePolicy.input_allow`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortRule {
     pub proto: PortProto,
@@ -158,38 +153,43 @@ pub struct Lan {
     pub members: Vec<String>,
     pub address: Ipv4Addr,
     pub prefix: u8,
-    /// Whether the sQUIC control plane is reachable from the trusted
-    /// LAN. Default `true` — the operator's primary management path.
-    /// Set to `false` only if you've explicitly enabled the control
-    /// plane on a different subnet via
-    /// `IsolatedSubnet.allow_control_plane`, otherwise you'll lock
-    /// yourself out of the router.
-    #[serde(default = "default_true")]
-    pub allow_control_plane: bool,
-    /// Whether the trusted LAN can forward to the WAN interface.
-    /// Default `true` — the standard "router routes the LAN to the
-    /// internet" behavior. Set to `false` for an air-gapped LAN.
-    #[serde(default = "default_true")]
-    pub allow_wan: bool,
-    /// Whitelist of service names the trusted LAN may reach via the
-    /// supervisor's veth network. `None` (the default) means "all
-    /// services" — preserves the historical "trusted LAN reaches
-    /// everything" behavior. `Some(list)` restricts the LAN to the
-    /// named services. `Some(vec![])` means "no services" (the LAN
-    /// can still reach the WAN if `allow_wan = true`, just not any
-    /// container).
-    #[serde(default)]
-    pub allow_services: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Radio {
     pub phy: String,
-    pub ssid: String,
-    pub key: String,
+    #[serde(default)]
+    pub band: String,
     pub channel: u16,
     #[serde(default)]
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wifi {
+    pub radio: String,
+    pub ssid: String,
+    #[serde(default = "default_wifi_security")]
+    pub security: WifiSecurity,
+    #[serde(default)]
+    pub passphrase: String,
+    pub network: String,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WifiSecurity {
+    Open,
+    Wpa2,
+    #[default]
+    Wpa3Sae,
+    Wpa2Wpa3,
+}
+
+fn default_wifi_security() -> WifiSecurity {
+    WifiSecurity::Wpa3Sae
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,9 +445,16 @@ mod tests {
         assert_eq!(cfg.hostname, "slate7");
         assert_eq!(cfg.timezone.as_deref(), Some("Europe/Berlin"));
         assert_eq!(cfg.lan.bridge, "br-lan");
-        assert_eq!(cfg.isolated_subnets.len(), 2);
-        assert_eq!(cfg.isolated_subnets[0].name, "guest");
-        assert_eq!(cfg.isolated_subnets[0].peers, vec!["iot".to_string()]);
+        assert_eq!(cfg.networks.len(), 2);
+        assert_eq!(cfg.networks[0].name, "guest");
+        assert_eq!(cfg.firewall.zones.len(), 2);
+        assert_eq!(cfg.firewall.zones[0].network, "guest");
+        assert_eq!(cfg.firewall.zones[0].peers, vec!["iot".to_string()]);
+        assert!(cfg.firewall.lan.allow_wan);
+        assert!(cfg.firewall.lan.allow_control_plane);
+        assert_eq!(cfg.wifi.len(), 2);
+        assert_eq!(cfg.wifi[0].ssid, "MyNetwork");
+        assert_eq!(cfg.wifi[0].network, "lan");
         assert_eq!(cfg.services.len(), 3);
 
         // The coredhcp service must declare NET_RAW + NET_ADMIN on top
@@ -471,7 +478,7 @@ mod tests {
     /// expects: `allow_services = None` ⇒ implicit port-match logic,
     /// `Some(vec![])` ⇒ explicit "no services."
     #[test]
-    fn isolated_subnet_peers_and_allow_services() {
+    fn zone_policy_peers_and_allow_services() {
         let toml_text = r#"
 hostname = "rtr"
 [wan]
@@ -482,32 +489,40 @@ bridge = "br-lan"
 members = ["eth1"]
 address = "192.168.1.1"
 prefix = 24
-allow_services = ["dns"]
 [control]
 listen = ["[::1]:51820"]
 authorized_keys = "/etc/oxwrt/keys"
 
-[[isolated_subnets]]
+[firewall.lan]
+allow_services = ["dns"]
+
+[[networks]]
 name = "guest"
 iface = "br-guest"
 address = "192.168.10.1"
 prefix = 24
-allow_dns = true
-peers = ["iot"]
-allow_services = []
 
-[[isolated_subnets]]
+[[networks]]
 name = "iot"
 iface = "br-iot"
 address = "192.168.20.1"
 prefix = 24
+
+[[firewall.zones]]
+network = "guest"
+allow_dns = true
+peers = ["iot"]
+allow_services = []
+
+[[firewall.zones]]
+network = "iot"
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("parse");
-        assert_eq!(cfg.lan.allow_services.as_deref(), Some(&["dns".to_string()][..]));
-        let guest = &cfg.isolated_subnets[0];
+        assert_eq!(cfg.firewall.lan.allow_services.as_deref(), Some(&["dns".to_string()][..]));
+        let guest = &cfg.firewall.zones[0];
         assert_eq!(guest.peers, vec!["iot".to_string()]);
         assert_eq!(guest.allow_services.as_deref(), Some(&[][..]));
-        let iot = &cfg.isolated_subnets[1];
+        let iot = &cfg.firewall.zones[1];
         assert!(iot.peers.is_empty());
         assert!(iot.allow_services.is_none());
     }

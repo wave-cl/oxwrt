@@ -173,7 +173,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // subnet (whose clients reach WAN through us). Enable both
     // unconditionally; both calls are idempotent and the cost on a
     // pure-LAN deployment is two no-op writes.
-    if isolated_services > 0 || !cfg.isolated_subnets.is_empty() {
+    if isolated_services > 0 || !cfg.networks.is_empty() {
         if let Err(e) = net::enable_ipv4_forwarding() {
             tracing::error!(error = %e, "enable_ipv4_forwarding failed");
         }
@@ -190,8 +190,8 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // subnet that has `allow_dns = true` can hit the exposed port on
     // their own gateway address and get DNATed to the service.
     let mut listen_addrs: Vec<std::net::Ipv4Addr> = vec![cfg.lan.address];
-    for iso in &cfg.isolated_subnets {
-        listen_addrs.push(iso.address);
+    for net in &cfg.networks {
+        listen_addrs.push(net.address);
     }
     let mut dnat_rules: Vec<net::DnatRule> = Vec::new();
     for svc in &cfg.services {

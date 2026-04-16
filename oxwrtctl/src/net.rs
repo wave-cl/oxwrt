@@ -465,7 +465,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // INPUT: sQUIC control plane from trusted LAN → accept (one rule
     // per control listen port). Skipped only if the operator has
     // explicitly disabled it on the trusted LAN, which is a footgun.
-    if cfg.lan.allow_control_plane {
+    if cfg.firewall.lan.allow_control_plane {
         for &port in &control_ports {
             Rule::new(&input)
                 .map_err(|e| Error::Firewall(e.to_string()))?
@@ -481,11 +481,15 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         );
     }
 
-    // INPUT: per-isolated-subnet explicit allows. Default stance is
-    // drop (the chain's default policy), so an isolated subnet gets
-    // NOTHING into the router except what its flags punch through.
-    for iso in &cfg.isolated_subnets {
-        if iso.allow_dhcp {
+    // INPUT: per-network zone explicit allows. Default stance is
+    // drop (the chain's default policy), so a network zone gets
+    // NOTHING into the router except what its zone policy punches through.
+    for zone in &cfg.firewall.zones {
+        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
+            tracing::warn!(zone = %zone.network, "firewall zone references unknown network; skipping");
+            continue;
+        };
+        if zone.allow_dhcp {
             // DHCPv4 server listens on UDP/67; clients send from UDP/68.
             // Both endpoints of the exchange need to be accepted because
             // in the BROADCAST case the conntrack "established" rule
@@ -493,65 +497,65 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             for port in [67u16, 68u16] {
                 Rule::new(&input)
                     .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&iso.iface)
+                    .iiface(&net.iface)
                     .map_err(|e| Error::Firewall(e.to_string()))?
                     .dport(port, Protocol::UDP)
                     .accept()
                     .add_to_batch(&mut batch);
             }
-            tracing::info!(subnet = %iso.name, iface = %iso.iface, "input: DHCP allow");
+            tracing::info!(subnet = %net.name, iface = %net.iface, "input: DHCP allow");
         }
-        if iso.allow_dns {
+        if zone.allow_dns {
             // DNS over UDP and TCP on port 53. These reach the router
             // IP on this subnet; the oxwrt-dnat table DNATs them to
             // the DNS container.
             Rule::new(&input)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .dport(53, Protocol::UDP)
                 .accept()
                 .add_to_batch(&mut batch);
             Rule::new(&input)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .dport(53, Protocol::TCP)
                 .accept()
                 .add_to_batch(&mut batch);
-            tracing::info!(subnet = %iso.name, iface = %iso.iface, "input: DNS allow");
+            tracing::info!(subnet = %net.name, iface = %net.iface, "input: DNS allow");
         }
-        if iso.allow_control_plane {
+        if zone.allow_control_plane {
             for &port in &control_ports {
                 Rule::new(&input)
                     .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&iso.iface)
+                    .iiface(&net.iface)
                     .map_err(|e| Error::Firewall(e.to_string()))?
                     .dport(port, Protocol::UDP)
                     .accept()
                     .add_to_batch(&mut batch);
             }
             tracing::info!(
-                subnet = %iso.name,
-                iface = %iso.iface,
+                subnet = %net.name,
+                iface = %net.iface,
                 ports = ?control_ports,
                 "input: control-plane allow"
             );
         }
         // Arbitrary additional INPUT punches.
-        for rule_spec in &iso.input_allow {
+        for rule_spec in &zone.input_allow {
             for proto in port_proto_to_list(rule_spec.proto) {
                 Rule::new(&input)
                     .map_err(|e| Error::Firewall(e.to_string()))?
-                    .iiface(&iso.iface)
+                    .iiface(&net.iface)
                     .map_err(|e| Error::Firewall(e.to_string()))?
                     .dport(rule_spec.port, proto)
                     .accept()
                     .add_to_batch(&mut batch);
             }
             tracing::info!(
-                subnet = %iso.name,
-                iface = %iso.iface,
+                subnet = %net.name,
+                iface = %net.iface,
                 proto = ?rule_spec.proto,
                 port = rule_spec.port,
                 "input: custom allow"
@@ -590,7 +594,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .add_to_batch(&mut batch);
 
     // 2. Trusted LAN → WAN.
-    if cfg.lan.allow_wan {
+    if cfg.firewall.lan.allow_wan {
         Rule::new(&forward)
             .map_err(|e| Error::Firewall(e.to_string()))?
             .iiface(&cfg.lan.bridge)
@@ -609,13 +613,14 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
         let veth_host = veth_host_name(svc);
 
-        // 3. Trusted LAN → service-netns veth, gated by `lan.allow_services`.
+        // 3. Trusted LAN → service-netns veth, gated by `firewall.lan.allow_services`.
         //    None = all services reachable (historical behavior). Some(list)
         //    = only the named services. The LAN never loses the ability
         //    to reach a service via the established/related rule (1) once
         //    the service initiates the conversation, but inbound new
         //    connections from the LAN are gated here.
         let lan_allowed = cfg
+            .firewall
             .lan
             .allow_services
             .as_ref()
@@ -667,19 +672,24 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         tracing::info!(svc = %svc.name, veth = %veth_host, "forward: lan↔svc + svc→wan");
     }
 
-    // 6. Per-isolated-subnet forwarding rules.
-    for iso in &cfg.isolated_subnets {
+    // 6. Per-network zone forwarding rules.
+    for zone in &cfg.firewall.zones {
+        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
+            tracing::warn!(zone = %zone.network, "firewall zone references unknown network; skipping");
+            continue;
+        };
+
         // 6a. → WAN.
-        if iso.allow_wan {
+        if zone.allow_wan {
             Rule::new(&forward)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .oiface(wan_iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .accept()
                 .add_to_batch(&mut batch);
-            tracing::info!(subnet = %iso.name, wan = %wan_iface, "forward: iso→wan");
+            tracing::info!(subnet = %net.name, wan = %wan_iface, "forward: iso→wan");
         }
 
         // 6b. → service-netns veths. Two modes:
@@ -690,19 +700,16 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         //
         //   - `allow_services = None`: the implicit port-match logic
         //     applies — `allow_dns` permits any service exposing port
-        //     53, `allow_dhcp` permits 67/68. (DHCP servers usually
-        //     run host-net so the DHCP branch won't usually match;
-        //     harmless if a future Rust DHCP server lives in a netns
-        //     and exposes 67.)
+        //     53, `allow_dhcp` permits 67/68.
         for svc in &cfg.services {
             if svc.veth.is_none() {
                 continue;
             }
-            let allowed = match &iso.allow_services {
+            let allowed = match &zone.allow_services {
                 Some(list) => list.iter().any(|n| n == &svc.name),
                 None => svc.expose.iter().any(|e| {
-                    (iso.allow_dns && e.lan_port == 53)
-                        || (iso.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
+                    (zone.allow_dns && e.lan_port == 53)
+                        || (zone.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
                 }),
             };
             if !allowed {
@@ -711,71 +718,71 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             let veth_host = veth_host_name(svc);
             Rule::new(&forward)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .oiface(&veth_host)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .accept()
                 .add_to_batch(&mut batch);
             tracing::info!(
-                subnet = %iso.name,
+                subnet = %net.name,
                 svc = %svc.name,
-                mode = if iso.allow_services.is_some() { "explicit" } else { "port-match" },
+                mode = if zone.allow_services.is_some() { "explicit" } else { "port-match" },
                 "forward: iso→svc"
             );
         }
 
-        // 6d. Per-peer forwarding: an iso subnet can declare a list of
-        //     OTHER iso subnet names it's allowed to talk to. Each entry
+        // 6d. Per-peer forwarding: a zone can declare a list of
+        //     OTHER network names it's allowed to talk to. Each entry
         //     emits a one-way `iif=this oif=peer` accept; the reverse
         //     direction must be declared separately on the peer side.
         //     A typo in `peers` produces a warn (not an error) so a
-        //     subnet rename doesn't take down the entire firewall install.
-        for peer_name in &iso.peers {
-            let Some(peer) = cfg.isolated_subnets.iter().find(|p| &p.name == peer_name)
+        //     network rename doesn't take down the entire firewall install.
+        for peer_name in &zone.peers {
+            let Some(peer) = cfg.networks.iter().find(|p| &p.name == peer_name)
             else {
                 tracing::warn!(
-                    subnet = %iso.name,
+                    subnet = %net.name,
                     peer = %peer_name,
-                    "forward: peer not found in isolated_subnets; skipping"
+                    "forward: peer not found in networks; skipping"
                 );
                 continue;
             };
-            if peer.iface == iso.iface {
+            if peer.iface == net.iface {
                 // Same interface ⇒ this is the same as setting
                 // `client_isolation = false`. Skip the duplicate.
                 continue;
             }
             Rule::new(&forward)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .oiface(&peer.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .accept()
                 .add_to_batch(&mut batch);
             tracing::info!(
-                subnet = %iso.name,
+                subnet = %net.name,
                 peer = %peer.name,
                 "forward: iso→peer"
             );
         }
 
-        // 6c. Client isolation = false → emit explicit iif=iso oif=iso
+        // 6c. Client isolation = false → emit explicit iif=net oif=net
         //     accept. With the default-drop policy, leaving this off
         //     already gives the operator client isolation for free
         //     at the L3 layer.
-        if !iso.client_isolation {
+        if !zone.client_isolation {
             Rule::new(&forward)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iso.iface)
+                .iiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
-                .oiface(&iso.iface)
+                .oiface(&net.iface)
                 .map_err(|e| Error::Firewall(e.to_string()))?
                 .accept()
                 .add_to_batch(&mut batch);
             tracing::info!(
-                subnet = %iso.name,
+                subnet = %net.name,
                 "forward: iso↔iso allowed (client_isolation=false)"
             );
         }
@@ -783,7 +790,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
 
     batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
     tracing::info!(
-        isolated_subnets = cfg.isolated_subnets.len(),
+        networks = cfg.networks.len(),
+        zones = cfg.firewall.zones.len(),
         control_ports = ?control_ports,
         "nftables ruleset installed"
     );
@@ -815,7 +823,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     out.push("    type filter hook input priority 0; policy drop;".to_string());
     out.push("    ct state established,related accept".to_string());
     out.push("    iif \"lo\" accept".to_string());
-    if cfg.lan.allow_control_plane {
+    if cfg.firewall.lan.allow_control_plane {
         for &port in &control_ports {
             out.push(format!(
                 "    iif \"{}\" udp dport {} accept   # lan control plane",
@@ -823,34 +831,37 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
             ));
         }
     }
-    for iso in &cfg.isolated_subnets {
-        if iso.allow_dhcp {
+    for zone in &cfg.firewall.zones {
+        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
+            continue;
+        };
+        if zone.allow_dhcp {
             for port in [67u16, 68u16] {
                 out.push(format!(
                     "    iif \"{}\" udp dport {} accept   # iso {} dhcp",
-                    iso.iface, port, iso.name
+                    net.iface, port, net.name
                 ));
             }
         }
-        if iso.allow_dns {
+        if zone.allow_dns {
             out.push(format!(
                 "    iif \"{}\" udp dport 53 accept   # iso {} dns",
-                iso.iface, iso.name
+                net.iface, net.name
             ));
             out.push(format!(
                 "    iif \"{}\" tcp dport 53 accept   # iso {} dns",
-                iso.iface, iso.name
+                net.iface, net.name
             ));
         }
-        if iso.allow_control_plane {
+        if zone.allow_control_plane {
             for &port in &control_ports {
                 out.push(format!(
                     "    iif \"{}\" udp dport {} accept   # iso {} control",
-                    iso.iface, port, iso.name
+                    net.iface, port, net.name
                 ));
             }
         }
-        for spec in &iso.input_allow {
+        for spec in &zone.input_allow {
             for proto in port_proto_to_list(spec.proto) {
                 let pname = match proto {
                     rustables::Protocol::TCP => "tcp",
@@ -858,7 +869,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
                 };
                 out.push(format!(
                     "    iif \"{}\" {} dport {} accept   # iso {} custom",
-                    iso.iface, pname, spec.port, iso.name
+                    net.iface, pname, spec.port, net.name
                 ));
             }
         }
@@ -869,7 +880,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     out.push("  chain forward {".to_string());
     out.push("    type filter hook forward priority 0; policy drop;".to_string());
     out.push("    ct state established,related accept".to_string());
-    if cfg.lan.allow_wan {
+    if cfg.firewall.lan.allow_wan {
         out.push(format!(
             "    iif \"{}\" oif \"{}\" accept   # lan→wan",
             cfg.lan.bridge, wan_iface
@@ -881,6 +892,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
         }
         let veth = veth_host_name(svc);
         let lan_allowed = cfg
+            .firewall
             .lan
             .allow_services
             .as_ref()
@@ -910,22 +922,25 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
             }
         }
     }
-    for iso in &cfg.isolated_subnets {
-        if iso.allow_wan {
+    for zone in &cfg.firewall.zones {
+        let Some(net) = cfg.networks.iter().find(|n| n.name == zone.network) else {
+            continue;
+        };
+        if zone.allow_wan {
             out.push(format!(
                 "    iif \"{}\" oif \"{}\" accept   # iso {}→wan",
-                iso.iface, wan_iface, iso.name
+                net.iface, wan_iface, net.name
             ));
         }
         for svc in &cfg.services {
             if svc.veth.is_none() {
                 continue;
             }
-            let allowed = match &iso.allow_services {
+            let allowed = match &zone.allow_services {
                 Some(list) => list.iter().any(|n| n == &svc.name),
                 None => svc.expose.iter().any(|e| {
-                    (iso.allow_dns && e.lan_port == 53)
-                        || (iso.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
+                    (zone.allow_dns && e.lan_port == 53)
+                        || (zone.allow_dhcp && (e.lan_port == 67 || e.lan_port == 68))
                 }),
             };
             if !allowed {
@@ -933,26 +948,26 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
             }
             out.push(format!(
                 "    iif \"{}\" oif \"{}\" accept   # iso {}→svc {}",
-                iso.iface,
+                net.iface,
                 veth_host_name(svc),
-                iso.name,
+                net.name,
                 svc.name
             ));
         }
-        for peer_name in &iso.peers {
-            if let Some(peer) = cfg.isolated_subnets.iter().find(|p| &p.name == peer_name) {
-                if peer.iface != iso.iface {
+        for peer_name in &zone.peers {
+            if let Some(peer) = cfg.networks.iter().find(|p| &p.name == peer_name) {
+                if peer.iface != net.iface {
                     out.push(format!(
                         "    iif \"{}\" oif \"{}\" accept   # iso {}→peer {}",
-                        iso.iface, peer.iface, iso.name, peer.name
+                        net.iface, peer.iface, net.name, peer.name
                     ));
                 }
             }
         }
-        if !iso.client_isolation {
+        if !zone.client_isolation {
             out.push(format!(
                 "    iif \"{}\" oif \"{}\" accept   # iso {} client isolation off",
-                iso.iface, iso.iface, iso.name
+                net.iface, net.iface, net.name
             ));
         }
     }
