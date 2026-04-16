@@ -7,7 +7,7 @@ use ed25519_dalek::SigningKey;
 
 use crate::container;
 use crate::control::{ControlState, FrameError, read_frame, write_frame};
-use crate::rpc::{Request, Response, ServiceStatus};
+use crate::rpc::{CrudAction, Request, Response, ServiceStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -141,6 +141,14 @@ impl Server {
                 continue;
             }
 
+            // Collection CRUD: synchronous handler, single response.
+            if let Request::Collection { collection, action } = &request {
+                let resp = handle_collection(&self.state, collection, action);
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+
             // Firmware apply: trigger sysupgrade + reboot.
             if let Request::FwApply { confirm, keep_settings } = &request {
                 let resp = handle_fw_apply(*confirm, *keep_settings);
@@ -239,6 +247,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::FwApply { .. } => vec![Response::Err {
             message: "BUG: FwApply should be handled async upstream".to_string(),
+        }],
+        Request::Collection { .. } => vec![Response::Err {
+            message: "BUG: Collection should be handled upstream".to_string(),
         }],
     }
 }
@@ -1947,5 +1958,528 @@ fn load_authorized_keys(path: &Path) -> Result<Vec<[u8; 32]>, Error> {
         }
     }
     Ok(keys)
+}
+
+// ── Collection CRUD ─────────────────────────────────────────────────
+
+fn handle_collection(state: &ControlState, collection: &str, action: &CrudAction) -> Response {
+    match collection {
+        "network" => handle_crud_network(state, action),
+        "zone" => handle_crud_zone(state, action),
+        "rule" => handle_crud_rule(state, action),
+        "wifi" => handle_crud_wifi(state, action),
+        "radio" => handle_crud_radio(state, action),
+        _ => Response::Err {
+            message: format!("unknown collection: {collection}"),
+        },
+    }
+}
+
+/// Shallow JSON merge: copy all top-level keys from `patch` into `base`.
+fn json_merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    if let (Some(base_obj), Some(patch_obj)) = (base.as_object_mut(), patch.as_object()) {
+        for (k, v) in patch_obj {
+            base_obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Serialize config to TOML, atomic-write to disk, swap the in-memory Arc.
+fn persist_and_swap(
+    state: &ControlState,
+    new_cfg: crate::config::Config,
+    desc: &str,
+) -> Response {
+    let toml_text = match toml::to_string_pretty(&new_cfg) {
+        Ok(t) => t,
+        Err(e) => {
+            return Response::Err {
+                message: format!("serialize config: {e}"),
+            };
+        }
+    };
+    let path = std::path::Path::new(crate::config::DEFAULT_PATH);
+    let tmp_path = path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &toml_text) {
+        return Response::Err {
+            message: format!("write tmp: {e}"),
+        };
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Response::Err {
+            message: format!("rename: {e}"),
+        };
+    }
+    if let Ok(mut cfg_lock) = state.config.write() {
+        *cfg_lock = std::sync::Arc::new(new_cfg);
+    }
+    tracing::info!("{desc} (pending reload)");
+    Response::Ok
+}
+
+fn handle_crud_network(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Network;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.networks) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.networks.iter().find(|n| n.name() == name) {
+                Some(net) => match serde_json::to_string_pretty(net) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("network not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: Network = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            let item_name = item.name().to_string();
+            if cfg.networks.iter().any(|n| n.name() == item_name) {
+                return Response::Err {
+                    message: format!("network already exists: {item_name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.networks.push(item);
+            persist_and_swap(state, new_cfg, &format!("added network {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.networks.iter().position(|n| n.name() == name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("network not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.networks[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Network = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.networks[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated network {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.networks.iter().any(|n| n.name() == name) {
+                return Response::Err {
+                    message: format!("network not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.networks.retain(|n| n.name() != name);
+            persist_and_swap(state, new_cfg, &format!("removed network {name}"))
+        }
+    }
+}
+
+fn handle_crud_zone(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Zone;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.firewall.zones) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.firewall.zones.iter().find(|z| z.name == *name) {
+                Some(zone) => match serde_json::to_string_pretty(zone) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("zone not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: Zone = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.firewall.zones.iter().any(|z| z.name == item.name) {
+                return Response::Err {
+                    message: format!("zone already exists: {}", item.name),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_name = item.name.clone();
+            new_cfg.firewall.zones.push(item);
+            persist_and_swap(state, new_cfg, &format!("added zone {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.firewall.zones.iter().position(|z| z.name == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("zone not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.firewall.zones[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Zone = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.firewall.zones[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated zone {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.firewall.zones.iter().any(|z| z.name == *name) {
+                return Response::Err {
+                    message: format!("zone not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.firewall.zones.retain(|z| z.name != *name);
+            persist_and_swap(state, new_cfg, &format!("removed zone {name}"))
+        }
+    }
+}
+
+fn handle_crud_rule(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Rule;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.firewall.rules) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.firewall.rules.iter().find(|r| r.name == *name) {
+                Some(rule) => match serde_json::to_string_pretty(rule) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("rule not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: Rule = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.firewall.rules.iter().any(|r| r.name == item.name) {
+                return Response::Err {
+                    message: format!("rule already exists: {}", item.name),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_name = item.name.clone();
+            new_cfg.firewall.rules.push(item);
+            persist_and_swap(state, new_cfg, &format!("added rule {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.firewall.rules.iter().position(|r| r.name == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("rule not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.firewall.rules[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Rule = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.firewall.rules[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated rule {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.firewall.rules.iter().any(|r| r.name == *name) {
+                return Response::Err {
+                    message: format!("rule not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.firewall.rules.retain(|r| r.name != *name);
+            persist_and_swap(state, new_cfg, &format!("removed rule {name}"))
+        }
+    }
+}
+
+fn handle_crud_wifi(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Wifi;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.wifi) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.wifi.iter().find(|w| w.ssid == *name) {
+                Some(wifi) => match serde_json::to_string_pretty(wifi) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("wifi not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: Wifi = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.wifi.iter().any(|w| w.ssid == item.ssid) {
+                return Response::Err {
+                    message: format!("wifi already exists: {}", item.ssid),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_ssid = item.ssid.clone();
+            new_cfg.wifi.push(item);
+            persist_and_swap(state, new_cfg, &format!("added wifi {item_ssid}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.wifi.iter().position(|w| w.ssid == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("wifi not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.wifi[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Wifi = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.wifi[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated wifi {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.wifi.iter().any(|w| w.ssid == *name) {
+                return Response::Err {
+                    message: format!("wifi not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.wifi.retain(|w| w.ssid != *name);
+            persist_and_swap(state, new_cfg, &format!("removed wifi {name}"))
+        }
+    }
+}
+
+fn handle_crud_radio(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Radio;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.radios) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.radios.iter().find(|r| r.phy == *name) {
+                Some(radio) => match serde_json::to_string_pretty(radio) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("radio not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: Radio = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.radios.iter().any(|r| r.phy == item.phy) {
+                return Response::Err {
+                    message: format!("radio already exists: {}", item.phy),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_phy = item.phy.clone();
+            new_cfg.radios.push(item);
+            persist_and_swap(state, new_cfg, &format!("added radio {item_phy}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.radios.iter().position(|r| r.phy == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("radio not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.radios[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: Radio = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.radios[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated radio {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.radios.iter().any(|r| r.phy == *name) {
+                return Response::Err {
+                    message: format!("radio not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.radios.retain(|r| r.phy != *name);
+            persist_and_swap(state, new_cfg, &format!("removed radio {name}"))
+        }
+    }
 }
 

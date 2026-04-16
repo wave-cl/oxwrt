@@ -43,6 +43,20 @@ pub enum Request {
     /// clean flash. The client defaults to `true` (keep settings);
     /// pass `--clean` to get `false`.
     FwApply { confirm: bool, keep_settings: bool },
+    Collection {
+        collection: String,
+        action: CrudAction,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "crud", rename_all = "lowercase")]
+pub enum CrudAction {
+    List,
+    Get { name: String },
+    Add { json: String },
+    Update { name: String, json: String },
+    Remove { name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

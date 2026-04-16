@@ -80,7 +80,7 @@ impl ControlState {
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::rpc::{Request, Response};
+use crate::rpc::{CrudAction, Request, Response};
 
 const MAX_FRAME: u32 = 1 << 20;
 
@@ -209,6 +209,30 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             // Default (no --clean) = keep /etc/oxwrt.toml + keys.
             let keep_settings = !args.iter().any(|a| a == "--clean");
             Ok(Request::FwApply { confirm: true, keep_settings })
+        }
+        "network" | "zone" | "rule" | "wifi" | "radio" => {
+            let action = match args.first().map(|s| s.as_str()) {
+                Some("list") => CrudAction::List,
+                Some("get") => {
+                    let name = args.get(1).ok_or(format!("{cmd} get: missing name"))?;
+                    CrudAction::Get { name: name.clone() }
+                }
+                Some("add") => {
+                    let json = args.get(1).ok_or(format!("{cmd} add: missing JSON"))?;
+                    CrudAction::Add { json: json.clone() }
+                }
+                Some("update") => {
+                    let name = args.get(1).ok_or(format!("{cmd} update: missing name"))?;
+                    let json = args.get(2).ok_or(format!("{cmd} update: missing JSON"))?;
+                    CrudAction::Update { name: name.clone(), json: json.clone() }
+                }
+                Some("remove") => {
+                    let name = args.get(1).ok_or(format!("{cmd} remove: missing name"))?;
+                    CrudAction::Remove { name: name.clone() }
+                }
+                _ => return Err(format!("{cmd}: missing action (list|get|add|update|remove)")),
+            };
+            Ok(Request::Collection { collection: cmd.to_string(), action })
         }
         _ => Err(format!("unknown command: {cmd}")),
     }
@@ -340,6 +364,7 @@ pub fn format_response(resp: &Response) -> String {
 mod tests {
     use super::*;
     use crate::config::{Config, Control};
+    use crate::rpc::CrudAction;
     use std::path::PathBuf;
 
     /// `default_config_text` must produce TOML that round-trips into a
@@ -558,5 +583,71 @@ mod tests {
         }
 
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn collection_crud_parse() {
+        // list
+        let req = parse_request("rule", &["list".to_string()]).unwrap();
+        match req {
+            Request::Collection { collection, action } => {
+                assert_eq!(collection, "rule");
+                assert!(matches!(action, CrudAction::List));
+            }
+            _ => panic!("expected Collection"),
+        }
+
+        // add
+        let req = parse_request(
+            "network",
+            &[
+                "add".to_string(),
+                r#"{"name":"test","type":"simple","iface":"eth5","address":"10.0.0.1","prefix":24}"#.to_string(),
+            ],
+        )
+        .unwrap();
+        match req {
+            Request::Collection { action: CrudAction::Add { json }, .. } => {
+                assert!(json.contains("test"));
+            }
+            _ => panic!("expected Collection Add"),
+        }
+
+        // get
+        let req = parse_request("wifi", &["get".to_string(), "MySSID".to_string()]).unwrap();
+        match req {
+            Request::Collection { collection, action: CrudAction::Get { name } } => {
+                assert_eq!(collection, "wifi");
+                assert_eq!(name, "MySSID");
+            }
+            _ => panic!("expected Collection Get"),
+        }
+
+        // update
+        let req = parse_request(
+            "radio",
+            &["update".to_string(), "phy0".to_string(), r#"{"channel":44}"#.to_string()],
+        )
+        .unwrap();
+        match req {
+            Request::Collection { collection, action: CrudAction::Update { name, json } } => {
+                assert_eq!(collection, "radio");
+                assert_eq!(name, "phy0");
+                assert!(json.contains("44"));
+            }
+            _ => panic!("expected Collection Update"),
+        }
+
+        // remove
+        let req = parse_request("zone", &["remove".to_string(), "guest".to_string()]).unwrap();
+        match req {
+            Request::Collection { action: CrudAction::Remove { name }, .. } => {
+                assert_eq!(name, "guest");
+            }
+            _ => panic!("expected Collection Remove"),
+        }
+
+        // missing action
+        assert!(parse_request("rule", &[]).is_err());
     }
 }
