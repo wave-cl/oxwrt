@@ -539,26 +539,9 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
         return Response::Err { message: msg };
     }
 
-    // Phase 3: atomic write tmp + rename. Write-failure leaves the
-    // original file intact; rename-failure cleans up the tmp file.
-    let tmp_path = match path.parent() {
-        Some(parent) => parent.join(".oxwrt.toml.tmp"),
-        None => {
-            return Response::Err {
-                message: format!("config path has no parent: {path:?}"),
-            };
-        }
-    };
-    if let Err(e) = std::fs::write(&tmp_path, doc.to_string()) {
-        return Response::Err {
-            message: format!("write {tmp_path:?}: {e}"),
-        };
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Response::Err {
-            message: format!("rename: {e}"),
-        };
+    // Phase 3: write to disk.
+    if let Err(e) = atomic_write_config(&doc.to_string()) {
+        return Response::Err { message: e };
     }
 
     // Phase 4: publish the new in-memory config so subsequent Get/Status
@@ -741,29 +724,11 @@ async fn handle_reset(state: &ControlState, confirm: bool) -> Response {
         };
     }
 
-    // Atomic write: tmp + rename. Same pattern as handle_set.
-    let path = Path::new(config::DEFAULT_PATH);
-    let tmp_path = match path.parent() {
-        Some(parent) => parent.join(".oxwrt.toml.tmp"),
-        None => {
-            return Response::Err {
-                message: format!("reset: config path has no parent: {path:?}"),
-            };
-        }
-    };
-    if let Err(e) = std::fs::write(&tmp_path, &default_text) {
-        return Response::Err {
-            message: format!("reset: write {tmp_path:?}: {e}"),
-        };
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Response::Err {
-            message: format!("reset: rename: {e}"),
-        };
+    if let Err(e) = atomic_write_config(&default_text) {
+        return Response::Err { message: format!("reset: {e}") };
     }
 
-    tracing::warn!(path = %path.display(), "factory reset: config wiped to defaults");
+    tracing::warn!("factory reset: config wiped to defaults");
 
     // Reuse the existing reload path — it re-reads from disk, reconciles
     // network state, reinstalls the firewall, swaps the supervisor, and
@@ -2005,6 +1970,30 @@ fn json_merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
 }
 
 /// Dump the entire running config as TOML.
+/// Write config text to disk. Tries atomic tmp+rename first; falls back
+/// to direct overwrite if rename returns EBUSY (bind-mounted files in
+/// Docker / containers can't be renamed over).
+fn atomic_write_config(text: &str) -> Result<(), String> {
+    let path = std::path::Path::new(crate::config::DEFAULT_PATH);
+    let tmp_path = path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, text) {
+        // tmp write failed — try direct overwrite as last resort
+        return std::fs::write(path, text)
+            .map_err(|e2| format!("write config: tmp failed ({e}), direct failed ({e2})"));
+    }
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            // EBUSY on bind-mounted files — fall back to direct overwrite.
+            // Less atomic but the only option on bind mounts.
+            tracing::debug!(error = %e, "rename failed, falling back to direct write");
+            std::fs::write(path, text)
+                .map_err(|e2| format!("write config: rename ({e}), direct ({e2})"))
+        }
+    }
+}
+
 fn handle_config_dump(state: &ControlState) -> Response {
     let cfg = state.config_snapshot();
     match toml::to_string_pretty(&*cfg) {
@@ -2043,18 +2032,8 @@ fn persist_and_swap(
             };
         }
     };
-    let path = std::path::Path::new(crate::config::DEFAULT_PATH);
-    let tmp_path = path.with_extension("toml.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &toml_text) {
-        return Response::Err {
-            message: format!("write tmp: {e}"),
-        };
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Response::Err {
-            message: format!("rename: {e}"),
-        };
+    if let Err(e) = atomic_write_config(&toml_text) {
+        return Response::Err { message: e };
     }
     if let Ok(mut cfg_lock) = state.config.write() {
         *cfg_lock = std::sync::Arc::new(new_cfg);
