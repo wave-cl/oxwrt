@@ -52,6 +52,15 @@ pub struct ControlState {
     /// few hundred ms of early mounts / netlink setup before this
     /// fires — but close enough for operational use.
     pub boot_time: std::time::Instant,
+    /// True when `oxwrtctl` was started with `--control-only`. In this
+    /// mode the control plane is the only subsystem running — no early
+    /// mounts, no netlink, no firewall, no supervisor. `reload` honors
+    /// this flag by re-parsing + swapping the in-memory config but
+    /// skipping every reconcile phase (netlink addresses, sethostname,
+    /// firewall install, service supervisor). Used for side-binary
+    /// testing on stock OpenWrt devices where touching live network
+    /// state would kill SSH.
+    pub control_only: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -70,6 +79,28 @@ impl ControlState {
             firewall_dump: RwLock::new(firewall_dump),
             wan_lease,
             boot_time: std::time::Instant::now(),
+            control_only: false,
+        })
+    }
+
+    /// Construct a ControlState for `--control-only` mode. Same as `new`
+    /// but sets the `control_only` flag so `handle_reload_async` skips
+    /// its reconcile phases.
+    pub fn new_control_only(
+        config: Config,
+        supervisor: Supervisor,
+        logd: Logd,
+        firewall_dump: Vec<String>,
+        wan_lease: SharedLease,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            config: RwLock::new(Arc::new(config)),
+            supervisor: Mutex::new(supervisor),
+            logd,
+            firewall_dump: RwLock::new(firewall_dump),
+            wan_lease,
+            boot_time: std::time::Instant::now(),
+            control_only: true,
         })
     }
 

@@ -26,6 +26,7 @@ fn main() -> ExitCode {
 
     match mode.as_deref() {
         Some("--init") => run_init(),
+        Some("--control-only") => run_control_only(),
         Some("--client") => run_client(args.collect()),
         Some("--smoke") => run_smoke(args.collect()),
         Some("--smoke-ns") => run_smoke_ns(args.collect()),
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: oxwrtctl --init\n\
+                        oxwrtctl --control-only\n\
                         oxwrtctl --client <remote> <cmd> [args...]\n\
                         oxwrtctl --smoke <rootfs> <entrypoint> [args...]\n\
                         oxwrtctl --smoke-ns <rootfs> <host_ip> <peer_ip> <entrypoint> [args...]\n\
@@ -252,6 +254,23 @@ fn run_init() -> ExitCode {
 #[cfg(not(target_os = "linux"))]
 fn run_init() -> ExitCode {
     eprintln!("oxwrtctl: --init is only supported on Linux");
+    ExitCode::FAILURE
+}
+
+#[cfg(target_os = "linux")]
+fn run_control_only() -> ExitCode {
+    match init::run_control_only() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("oxwrtctl: control-only failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_control_only() -> ExitCode {
+    eprintln!("oxwrtctl: --control-only is only supported on Linux");
     ExitCode::FAILURE
 }
 

@@ -53,6 +53,87 @@ pub fn run() -> Result<(), Error> {
     rt.block_on(async_main(cfg))
 }
 
+/// Control-plane-only mode: starts the sQUIC listener + supervisor tick
+/// loop, but skips early mounts, network bring-up, service spawning, and
+/// firewall install. Safe to run as a normal process (procd managed or
+/// from SSH) on a live OpenWrt device — won't touch the network config.
+///
+/// Use this for development: test CRUD / config-dump / diag / status
+/// against real hardware before committing to a PID 1 replacement.
+pub fn run_control_only() -> Result<(), Error> {
+    let config_path = std::env::var("OXWRT_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+    let cfg = Config::load(&config_path)?;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .worker_threads(2)
+        .build()
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+
+    rt.block_on(control_only_main(cfg))
+}
+
+async fn control_only_main(cfg: Config) -> Result<(), Error> {
+    tracing::info!(
+        hostname = %cfg.hostname,
+        services = cfg.services.len(),
+        "oxwrtctl: control-plane-only mode"
+    );
+
+    // Empty state: no firewall dump, no WAN lease, empty supervisor.
+    let wan_lease: control::SharedLease = Arc::new(std::sync::RwLock::new(None));
+    let supervisor = Supervisor::from_config(&[]);
+    let logd = Logd::new();
+    let firewall_dump: Vec<String> = Vec::new();
+    let state = ControlState::new_control_only(
+        cfg.clone(),
+        supervisor,
+        logd.clone(),
+        firewall_dump,
+        wan_lease,
+    );
+
+    let listen_addrs = parse_listen_addrs(&cfg.control.listen);
+    if listen_addrs.is_empty() {
+        return Err(Error::Runtime(
+            "no valid control listen addresses in config".to_string(),
+        ));
+    }
+    tracing::info!(?listen_addrs, "starting sQUIC control plane");
+
+    let server = Arc::new(Server::load(
+        Path::new(SIGNING_KEY_PATH),
+        &cfg.control.authorized_keys,
+        state.clone(),
+    )?);
+    let server_task = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server.listen(&listen_addrs).await {
+                tracing::error!(error = %e, "control server exited");
+            }
+        })
+    };
+
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("oxwrtctl: SIGINT → shutdown");
+        }
+        _ = term.recv() => {
+            tracing::info!("oxwrtctl: SIGTERM → shutdown");
+        }
+    }
+
+    server_task.abort();
+    Ok(())
+}
+
 async fn async_main(cfg: Config) -> Result<(), Error> {
     // Boot flow (plan §3): network bring-up → start containers → start sQUIC
     // control → main select loop {sigchld, control_cmd, reload, shutdown}.

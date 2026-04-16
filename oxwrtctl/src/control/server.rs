@@ -1340,6 +1340,23 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         }
     };
 
+    // Control-only mode short-circuit: re-parse + swap the in-memory
+    // config but skip every reconcile phase (netlink, sethostname,
+    // firewall, supervisor). This preserves the ability to hand-edit
+    // /etc/oxwrt.toml and have `reload` validate + publish the result
+    // for subsequent Get/CRUD reads, without violating the
+    // --control-only contract of "don't touch live network state."
+    if state.control_only {
+        let Ok(mut cfg) = state.config.write() else {
+            return Response::Err {
+                message: "reload: config lock poisoned".to_string(),
+            };
+        };
+        *cfg = std::sync::Arc::new(new_cfg);
+        tracing::info!("control-only reload: config re-parsed and swapped (no reconcile)");
+        return Response::Ok;
+    }
+
     // Phase 2: reconcile netlink address state. We compare against the
     // KERNEL's current state, not the in-memory `state.config` —
     // because `Set` already updated the in-memory config and any two
@@ -1859,6 +1876,17 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
                 .collect::<Vec<_>>()
                 .join(","),
         ),
+        // Control-plane fields. `listen` is safe to expose — it's the
+        // same info `ss -lnu` would show to anyone on the LAN. The
+        // `authorized_keys` *path* is also safe (just a filesystem
+        // location); we deliberately don't expose the pubkey *contents*
+        // because that's unnecessary and an attacker who hasn't already
+        // compromised the control plane shouldn't care, while one who
+        // has can cat the file directly.
+        "control.listen" => Some(cfg.control.listen.join(",")),
+        "control.authorized_keys" => {
+            Some(cfg.control.authorized_keys.to_string_lossy().into_owned())
+        }
         _ => None,
     };
     match value {
