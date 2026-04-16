@@ -292,7 +292,14 @@ fn early_mounts() -> Result<(), Error> {
         }
         match mount(*source, *target, *fstype, *flags, no_data) {
             Ok(()) => {}
-            Err(rustix::io::Errno::BUSY) => {}
+            // EBUSY = target already mounted. ENODEV = fs type can't
+            // be mounted on this target (e.g., devtmpfs when /dev is
+            // already a different fs). Both mean "someone beat us to
+            // it" — fine when not running as true PID 1 (SSH dev test,
+            // container that already has /proc etc.).
+            Err(rustix::io::Errno::BUSY) | Err(rustix::io::Errno::NODEV) => {
+                tracing::debug!(target = target, "mount skipped (already mounted)");
+            }
             Err(source) => {
                 return Err(Error::Mount {
                     target: (*target).to_string(),
