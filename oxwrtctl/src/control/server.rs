@@ -1828,6 +1828,16 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
                 unreachable!()
             }
         }),
+        // lan.prefix and wan.prefix are also settable (as integers);
+        // exposing them separately means operators can script against
+        // the prefix without parsing the combined "address/prefix" form.
+        "lan.prefix" => cfg.lan().map(|n| {
+            if let Network::Lan { prefix, .. } = n {
+                prefix.to_string()
+            } else {
+                unreachable!()
+            }
+        }),
         "wan.mode" => cfg.primary_wan().map(|n| {
             if let Network::Wan { wan, .. } = n {
                 match wan {
@@ -1846,6 +1856,24 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
                 format!("{address}/{prefix}")
             } else {
                 "(not static)".to_string()
+            }
+        }),
+        "wan.prefix" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan: WanConfig::Static { prefix, .. }, .. } = n {
+                prefix.to_string()
+            } else {
+                "(not static)".to_string()
+            }
+        }),
+        // wan.username is operator config (ISP account), not a secret —
+        // exposed symmetrically with the Set that writes it. wan.password
+        // is deliberately NOT exposed: it's settable but never readable,
+        // matching the convention of write-only credential fields.
+        "wan.username" => cfg.primary_wan().map(|n| {
+            if let Network::Wan { wan: WanConfig::Pppoe { username, .. }, .. } = n {
+                username.clone()
+            } else {
+                "(not pppoe)".to_string()
             }
         }),
         "wan.gateway" => cfg.primary_wan().map(|n| {
