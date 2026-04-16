@@ -26,7 +26,6 @@ fn main() -> ExitCode {
 
     match mode.as_deref() {
         Some("--init") => run_init(),
-        _ if is_pid1 => run_init(),
         Some("--client") => run_client(args.collect()),
         Some("--smoke") => run_smoke(args.collect()),
         Some("--smoke-ns") => run_smoke_ns(args.collect()),
@@ -36,6 +35,7 @@ fn main() -> ExitCode {
             println!("oxwrtctl {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        _ if is_pid1 => run_init(),
         _ => {
             eprintln!(
                 "usage: oxwrtctl --init\n\
