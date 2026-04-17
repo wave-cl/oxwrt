@@ -5,6 +5,9 @@
 # downloads regenerated on demand; the tracked overlay lives under
 # `openwrt-packages/imagebuilder-overlay/`.
 /imagebuilder/
+# Staged cross-built service binaries (hickory-dns, ntp-daemon, coredhcp)
+# produced by `make services-stage`. Size: tens of MBs; regenerate on demand.
+/build-services/
 .idea/
 *.swp
 *.swo

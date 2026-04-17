@@ -2,19 +2,20 @@
 #
 # Serves DHCPv4 leases on the LAN bridge. This file is bind-mounted
 # read-only into the dhcp container at /etc/coredhcp.yml.
+#
+# Plugin syntax gotcha: each entry is a single arg string (Go's flags
+# style), not a YAML mapping. `lease_time: 3600` is interpreted as the
+# single arg "3600", which `lease_time` then parses as a Go time.Duration
+# and rejects ("invalid duration: 3600"). Use the duration form "12h"
+# instead. Same story for range — the four pieces go on one arg line.
 
 server4:
   listen:
     - "%br-lan"
   plugins:
-    - lease_time: 3600
-    - server_id: 192.168.8.1
-    - dns: 192.168.8.1
-    - router: 192.168.8.1
+    - lease_time: 12h
+    - server_id: 192.168.1.1
+    - dns: 192.168.1.1
+    - router: 192.168.1.1
     - netmask: 255.255.255.0
-    - range:
-        start: 192.168.8.100
-        end: 192.168.8.250
-        lease_time: 3600
-    - file:
-        path: /var/lib/coredhcp/leases.txt
+    - range: /var/lib/coredhcp/leases.txt 192.168.1.100 192.168.1.250 12h
