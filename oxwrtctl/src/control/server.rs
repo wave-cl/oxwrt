@@ -32,6 +32,19 @@ impl Server {
         state: Arc<ControlState>,
     ) -> Result<Self, Error> {
         let signing_key = load_or_create_signing_key(key_path)?;
+        // Log the derived public key at startup so operators can
+        // discover it off a UART console after a fresh flash —
+        // /etc/oxwrt/ is regenerated on every full sysupgrade and the
+        // client needs this value as SQUIC_SERVER_KEY. Without this
+        // log, the only way to get the key is to read
+        // /etc/oxwrt/key.ed25519 over a shell (impossible if oxwrtctl
+        // replaces dropbear) or via the --print-server-key mode
+        // (impossible if oxwrtctl is pid 1).
+        let verifying = signing_key.verifying_key();
+        tracing::info!(
+            server_pubkey = %hex::encode(verifying.to_bytes()),
+            "control: server signing keypair loaded"
+        );
         let authorized_keys = load_authorized_keys(authorized_keys_path)?;
         Ok(Self {
             signing_key,
