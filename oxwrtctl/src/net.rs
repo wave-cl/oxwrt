@@ -872,3 +872,188 @@ fn parse_dnat_target(s: &str) -> Option<(Ipv4Addr, u16)> {
 fn veth_host_name(svc: &Service) -> String {
     format!("veth-{}", svc.name)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pure-function unit tests for the helpers at the bottom of this
+    //! file. Compiles and runs only on Linux targets (the whole module
+    //! is `#[cfg(target_os = "linux")]`), so `cargo test` on a macOS
+    //! dev box skips them — re-run via `cargo test --target
+    //! aarch64-unknown-linux-musl` when iterating, or rely on CI that
+    //! builds for Linux.
+    //!
+    //! The four helpers tested here are the glue between the declarative
+    //! `Config` (from config.rs) and the rustables / nftables wire types
+    //! used by `install_firewall`. They're pure functions of their
+    //! inputs, so the tests don't need any mock netlink / cgroup /
+    //! seccomp infrastructure.
+    use super::*;
+    use crate::config::{
+        Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone,
+    };
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+
+    fn minimal_config() -> Config {
+        Config {
+            hostname: "t".to_string(),
+            timezone: None,
+            networks: vec![
+                Network::Lan {
+                    name: "lan".to_string(),
+                    bridge: "br-lan".to_string(),
+                    members: vec![],
+                    address: Ipv4Addr::new(192, 168, 1, 1),
+                    prefix: 24,
+                },
+                Network::Simple {
+                    name: "guest".to_string(),
+                    iface: "br-guest".to_string(),
+                    address: Ipv4Addr::new(10, 99, 0, 1),
+                    prefix: 24,
+                },
+            ],
+            firewall: Firewall {
+                zones: vec![Zone {
+                    name: "trusted".to_string(),
+                    networks: vec!["lan".to_string(), "guest".to_string()],
+                    default_input: crate::config::ChainPolicy::Accept,
+                    default_forward: crate::config::ChainPolicy::Drop,
+                    masquerade: false,
+                }],
+                rules: vec![],
+            },
+            radios: vec![],
+            wifi: vec![],
+            services: vec![],
+            control: Control {
+                listen: vec!["[::1]:51820".to_string()],
+                authorized_keys: PathBuf::from("/x"),
+            },
+        }
+    }
+
+    // ── parse_dnat_target ──────────────────────────────────────────
+
+    #[test]
+    fn parse_dnat_target_ipv4_port() {
+        assert_eq!(
+            parse_dnat_target("10.53.0.2:15353"),
+            Some((Ipv4Addr::new(10, 53, 0, 2), 15353))
+        );
+        assert_eq!(
+            parse_dnat_target("127.0.0.1:53"),
+            Some((Ipv4Addr::new(127, 0, 0, 1), 53))
+        );
+    }
+
+    #[test]
+    fn parse_dnat_target_rejects_bad_inputs() {
+        assert_eq!(parse_dnat_target(""), None);
+        assert_eq!(parse_dnat_target("nope"), None);
+        assert_eq!(parse_dnat_target("not.an.ip:80"), None);
+        assert_eq!(parse_dnat_target("1.2.3.4"), None, "missing port");
+        assert_eq!(parse_dnat_target("1.2.3.4:"), None, "empty port");
+        // u16 overflow
+        assert_eq!(parse_dnat_target("1.2.3.4:99999"), None);
+        // Colon absent
+        assert_eq!(parse_dnat_target("1.2.3.4.80"), None);
+    }
+
+    #[test]
+    fn parse_dnat_target_ipv6_not_supported() {
+        // rsplit_once(':') on a v6 address splits at the last colon,
+        // which doesn't yield a valid v4. Document intent.
+        assert_eq!(parse_dnat_target("[::1]:53"), None);
+        assert_eq!(parse_dnat_target("fe80::1:53"), None);
+    }
+
+    // ── port_spec_to_list ──────────────────────────────────────────
+
+    #[test]
+    fn port_spec_to_list_variants() {
+        assert_eq!(port_spec_to_list(&None), Vec::<u16>::new());
+        assert_eq!(port_spec_to_list(&Some(PortSpec::Single(53))), vec![53u16]);
+        assert_eq!(
+            port_spec_to_list(&Some(PortSpec::List(vec![67, 68]))),
+            vec![67u16, 68]
+        );
+        // Empty list is preserved (caller decides whether that's an error).
+        assert_eq!(
+            port_spec_to_list(&Some(PortSpec::List(vec![]))),
+            Vec::<u16>::new()
+        );
+    }
+
+    // ── proto_to_nf_list ───────────────────────────────────────────
+
+    #[test]
+    fn proto_to_nf_list_variants() {
+        use rustables::Protocol;
+        assert_eq!(proto_to_nf_list(None), Vec::<Protocol>::new());
+        assert_eq!(proto_to_nf_list(Some(Proto::Tcp)), vec![Protocol::TCP]);
+        assert_eq!(proto_to_nf_list(Some(Proto::Udp)), vec![Protocol::UDP]);
+        // "both" expands UDP first, TCP second (the install loop
+        // iterates in order and UDP is more common for our ports).
+        assert_eq!(
+            proto_to_nf_list(Some(Proto::Both)),
+            vec![Protocol::UDP, Protocol::TCP]
+        );
+        // ICMP is handled via a different code path; this helper
+        // returns empty so the port-iteration loop skips it.
+        assert_eq!(proto_to_nf_list(Some(Proto::Icmp)), Vec::<Protocol>::new());
+    }
+
+    // ── zone_ifaces ────────────────────────────────────────────────
+
+    #[test]
+    fn zone_ifaces_expands_firewall_zone_networks() {
+        let cfg = minimal_config();
+        // "trusted" zone covers lan + guest → br-lan + br-guest.
+        let ifaces = zone_ifaces(&cfg, "trusted");
+        assert_eq!(ifaces, vec!["br-lan".to_string(), "br-guest".to_string()]);
+    }
+
+    #[test]
+    fn zone_ifaces_falls_back_to_direct_network_name() {
+        let cfg = minimal_config();
+        // No zone named "guest", but there's a network named "guest" —
+        // helper falls back to the direct network lookup.
+        assert_eq!(zone_ifaces(&cfg, "guest"), vec!["br-guest".to_string()]);
+    }
+
+    #[test]
+    fn zone_ifaces_unknown_returns_empty() {
+        let cfg = minimal_config();
+        assert_eq!(zone_ifaces(&cfg, "nowhere"), Vec::<String>::new());
+    }
+
+    // ── veth_host_name ─────────────────────────────────────────────
+
+    #[test]
+    fn veth_host_name_stable() {
+        let svc = Service {
+            name: "dns".to_string(),
+            rootfs: PathBuf::from("/x"),
+            entrypoint: vec![],
+            env: BTreeMap::new(),
+            net_mode: Default::default(),
+            veth: None,
+            memory_max: None,
+            cpu_max: None,
+            pids_max: None,
+            binds: vec![],
+            depends_on: vec![],
+            security: Default::default(),
+        };
+        assert_eq!(veth_host_name(&svc), "veth-dns");
+        // Name with hyphens must round-trip into the interface name
+        // unchanged — Linux allows hyphens in iface names.
+        let svc2 = Service {
+            name: "debug-ssh".to_string(),
+            ..svc
+        };
+        assert_eq!(veth_host_name(&svc2), "veth-debug-ssh");
+    }
+}

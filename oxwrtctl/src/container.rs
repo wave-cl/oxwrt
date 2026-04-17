@@ -1141,6 +1141,10 @@ fn move_to_cgroup(spec: &Service, pid: u32) -> Result<(), Error> {
 
 /// Pre-built CStrings + flags for the child's post-fork syscall sequence.
 /// Constructed on the parent side so no allocation happens in pre_exec.
+///
+/// `Debug` is only for test assertions (`unwrap_err()` requires it); the
+/// real-world path only ever reads individual fields during pre_exec.
+#[derive(Debug)]
 struct PreparedContainer {
     rootfs: CString,
     put_old_in_new_root: CString,  // <rootfs>/.old_root — argument to pivot_root
@@ -1182,6 +1186,7 @@ struct PreparedContainer {
     envp_c: Vec<CString>,
 }
 
+#[derive(Debug)]
 struct BindEntry {
     source: CString,
     target_in_rootfs: CString,
