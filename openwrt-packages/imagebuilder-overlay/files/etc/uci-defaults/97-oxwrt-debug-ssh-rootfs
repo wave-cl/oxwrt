@@ -29,9 +29,17 @@
 set -e
 R=/usr/lib/oxwrt/services/debug-ssh/rootfs
 
-# Skip if already provisioned — uci-defaults re-runs if the script
-# gets re-enabled, and we don't want to blow away a customized rootfs.
-if [ -x "$R/sbin/dropbear" ]; then
+# Two-stage idempotency: the binary + applet tree might be image-staged
+# (imagebuilder-stage Makefile target copies them in at image-build
+# time), but the dropbear host keys are per-device and regenerated on
+# every clean flash. Check them separately so we always top up the key
+# trio even if the binaries already exist.
+need_bin=0
+need_keys=0
+[ -x "$R/sbin/dropbear" ] || need_bin=1
+[ -s "$R/etc/dropbear/dropbear_ed25519_host_key" ] || need_keys=1
+
+if [ "$need_bin" = 0 ] && [ "$need_keys" = 0 ]; then
     exit 0
 fi
 
@@ -45,53 +53,60 @@ fi
 mkdir -p "$R/bin" "$R/sbin" "$R/lib" "$R/etc/dropbear" \
          "$R/dev/pts" "$R/proc" "$R/sys" "$R/tmp" "$R/var/log" "$R/root"
 
-# Core binaries: busybox for the login shell (symlinked per-applet
-# below), dropbear for the listener itself.
-cp /bin/busybox "$R/bin/busybox"
-cp /usr/sbin/dropbear "$R/sbin/dropbear"
+if [ "$need_bin" = 1 ]; then
+    # Core binaries: busybox for the login shell (symlinked per-applet
+    # below), dropbear for the listener itself.
+    cp /bin/busybox "$R/bin/busybox"
+    cp /usr/sbin/dropbear "$R/sbin/dropbear"
 
-# BusyBox applets a debug session actually uses. Adding more is
-# cheap (each is a symlink, ~10 bytes), but keeping the set visible
-# makes the rootfs auditable — "what can an attacker with SSH do?"
-# has a bounded answer.
-cd "$R/bin"
-for a in sh ash ls cat mount umount ps kill ip ping traceroute dmesg free \
-         head tail grep sed awk echo chmod chown stat df du tr find wc \
-         date touch mkdir rmdir rm cp mv ln readlink uname hostname \
-         nslookup netstat which env printf id whoami pwd true false xargs \
-         sleep clear reset login su tty who logger wget vi more less cut sort uniq; do
-    ln -sf busybox "$a"
-done
-cd "$R/sbin"
-for a in ifconfig route arp; do
-    ln -sf /bin/busybox "$a"
-done
-cd - >/dev/null
+    # BusyBox applets a debug session actually uses. Adding more is
+    # cheap (each is a symlink, ~10 bytes), but keeping the set visible
+    # makes the rootfs auditable — "what can an attacker with SSH do?"
+    # has a bounded answer.
+    cd "$R/bin"
+    for a in sh ash ls cat mount umount ps kill ip ping traceroute dmesg free \
+             head tail grep sed awk echo chmod chown stat df du tr find wc \
+             date touch mkdir rmdir rm cp mv ln readlink uname hostname \
+             nslookup netstat which env printf id whoami pwd true false xargs \
+             sleep clear reset login su tty who logger wget vi more less cut sort uniq; do
+        ln -sf busybox "$a"
+    done
+    cd "$R/sbin"
+    for a in ifconfig route arp; do
+        ln -sf /bin/busybox "$a"
+    done
+    cd - >/dev/null
 
-# Runtime libs — dropbear and busybox both link against the musl
-# loader + libgcc_s on aarch64 OpenWrt.
-cp /lib/ld-musl-aarch64.so.1 "$R/lib/"
-cp /lib/libgcc_s.so.1 "$R/lib/"
+    # Runtime libs — dropbear and busybox both link against the musl
+    # loader + libgcc_s on aarch64 OpenWrt.
+    cp /lib/ld-musl-aarch64.so.1 "$R/lib/"
+    cp /lib/libgcc_s.so.1 "$R/lib/"
 
-# Minimal /etc.
-cat > "$R/etc/passwd" <<EOF
+    # Minimal /etc.
+    cat > "$R/etc/passwd" <<EOF
 root:x:0:0:root:/root:/bin/sh
 EOF
-cat > "$R/etc/group" <<EOF
+    cat > "$R/etc/group" <<EOF
 root:x:0:
 EOF
-cat > "$R/etc/shells" <<EOF
+    cat > "$R/etc/shells" <<EOF
 /bin/sh
 /bin/ash
 EOF
 
-# Host keys + authorized_keys. Share with the stock dropbear install
-# so the operator's ~/.ssh/known_hosts doesn't warn between port 22
-# (stock) and port 2222 (ours) on the same router.
+    chmod 1777 "$R/tmp"
+fi
+
+# Host keys + authorized_keys — ALWAYS refresh, regardless of whether
+# the binary tree was already present. These files are per-device
+# (regenerated on every clean flash by dropbear's own init.d) so they
+# must be copied into the rootfs on every first boot after flash.
+# Running this block even when $need_bin = 0 is how we avoid the bug
+# where the image pre-populated /sbin/dropbear, the "binary exists"
+# check exited 0, and the rootfs/etc/dropbear/ stayed empty — dropbear
+# bounced immediately because it had no host keys.
 cp /etc/dropbear/dropbear_ed25519_host_key "$R/etc/dropbear/"
 cp /etc/dropbear/dropbear_rsa_host_key "$R/etc/dropbear/" 2>/dev/null || true
 cp /etc/dropbear/authorized_keys "$R/etc/dropbear/"
-
-chmod 1777 "$R/tmp"
 
 exit 0

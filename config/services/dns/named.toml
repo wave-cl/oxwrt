@@ -1,20 +1,35 @@
 # hickory-dns configuration for oxwrt.
 #
-# Forwarding resolver with local cache. Upstreams over DoT.
-# This file is bind-mounted read-only into the dns container at
-# /etc/named.toml.
+# Forwarding resolver with local cache. This file is bind-mounted
+# read-only into the dns container at /etc/named.toml.
 
 listen_addrs_ipv4 = ["0.0.0.0"]
 listen_port = 15353
 directory = "/var"
 
+# zone_type: hickory-dns 0.25 removed "Forward"; accepted values are
+# Primary / Secondary / External. For a pure forwarding resolver we
+# want External — the zone content lives elsewhere and we just route
+# queries through the upstream via the forward store below.
 [[zones]]
 zone = "."
-zone_type = "Forward"
+zone_type = "External"
 
+# Upstream resolvers over plain UDP/TCP. hickory 0.25 dropped the
+# ad-hoc `tls` protocol variant from the name_servers config. DNS-over-
+# TLS is back as a separate `tls` store type on newer releases; for
+# now use UDP to 1.1.1.1 / 9.9.9.9 and revisit when we pin a newer
+# hickory version. trust_negative_responses keeps NXDOMAIN cached
+# briefly so we don't hammer upstream on missing names.
 [[zones.stores]]
 type = "forward"
-name_servers = [
-  { socket_addr = "1.1.1.1:853", protocol = "tls", tls_dns_name = "cloudflare-dns.com" },
-  { socket_addr = "9.9.9.9:853", protocol = "tls", tls_dns_name = "dns.quad9.net" },
-]
+
+[[zones.stores.name_servers]]
+socket_addr = "1.1.1.1:53"
+protocol = "udp"
+trust_negative_responses = false
+
+[[zones.stores.name_servers]]
+socket_addr = "9.9.9.9:53"
+protocol = "udp"
+trust_negative_responses = false

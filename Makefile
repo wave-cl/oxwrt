@@ -193,6 +193,12 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/ntp.toml
 	cp config/services/dhcp/coredhcp.yml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
+	# Writable lease-file dir on the host side. coredhcp opens this
+	# file at startup (sqlite DB, grows with each lease). Landlock
+	# sees the bind-mount source and refuses the spawn if the file is
+	# missing; so create it up-front even though it's empty.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/var/lib/oxwrt/coredhcp
+	touch $(IMAGEBUILDER_DIR)/files/var/lib/oxwrt/coredhcp/leases.txt
 	# Minimal passwd/group inside service rootfs (see per-package
 	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
 	for svc in dns ntp dhcp; do \
