@@ -25,24 +25,30 @@ fn main() -> ExitCode {
     // so the binary works as a direct init replacement without flags.
     let is_pid1 = std::process::id() == 1;
 
-    // OpenWrt's /sbin/init (procd-init) execs /sbin/procd once early in
-    // boot expecting the real procd to do a small chunk of preinit
-    // setup then exit. /sbin/init continues on with the shell-driven
+    // OpenWrt's /sbin/init (procd-init) execs /sbin/procd once early
+    // in boot expecting the real procd to do a small chunk of preinit
+    // setup then exit. /sbin/init continues with the shell-driven
     // /etc/preinit afterward, and finally execve's /sbin/procd a
     // second time — that second call is where we actually become pid 1.
     //
-    // Our oxwrtctl doesn't implement procd's preinit protocol (real
-    // procd writes state under /tmp/.preinit and returns). Since
-    // everything preinit needs is also done by the shell /etc/preinit
-    // hooks, silently exiting 0 on the non-pid1 invocation is safe.
-    // Without this check, we print usage to stderr and exit 2 —
-    // harmless but noisy in UART logs and confusing to operators.
+    // We don't implement procd's preinit protocol (real procd writes
+    // state under /tmp/.preinit and returns). Since everything preinit
+    // needs is also done by the shell /etc/preinit hooks, silently
+    // exiting 0 on this non-pid1 invocation is safe. Without this
+    // bypass we print usage to stderr and exit 2 — harmless but noisy
+    // in UART logs and confusing.
     //
-    // Heuristic: invoked as `procd` (argv[0] ends with "/procd" or
-    // exactly "procd") with no args and not pid 1. That catches the
-    // preinit hand-off regardless of what env vars /sbin/init sets.
-    let argv0_base = argv0.rsplit('/').next().unwrap_or("");
-    if mode.is_none() && !is_pid1 && argv0_base == "procd" {
+    // Heuristic: if invoked with no args AND we're not pid 1 AND
+    // stderr is not a tty, assume this is the init chain calling us
+    // and silently exit 0. The "stderr not a tty" half is what
+    // separates "init invoked us" (stderr goes to the kernel console
+    // or /dev/null) from "operator typed `oxwrtctl`" (stderr is the
+    // user's terminal). Earlier attempts used argv[0] == "procd" but
+    // that proved unreliable — on this firmware the stray usage print
+    // persisted even with the argv0 check in place.
+    use std::io::IsTerminal;
+    let _ = argv0; // keep for future debugging; not used by current heuristic
+    if mode.is_none() && !is_pid1 && !std::io::stderr().is_terminal() {
         return ExitCode::SUCCESS;
     }
 
