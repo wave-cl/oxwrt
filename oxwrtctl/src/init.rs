@@ -297,6 +297,21 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // make other processes unhappy. Best-effort: failure just logs.
     bootstrap_clock_floor();
 
+    // Pet the hardware watchdog. The Flint 2 (and most OpenWrt boards)
+    // enable a hardware watchdog at boot — on mediatek/filogic the
+    // timeout is 31s by default. procd normally writes to /dev/watchdog
+    // every few seconds to keep the timer from firing. When we replace
+    // procd, the watchdog is still on but nobody's petting it, so the
+    // device reboots ~30s into every boot. That reboot loop is
+    // indistinguishable from an oxwrtctl crash unless you squint at
+    // UART logs for "mtk-wdt ... Watchdog enabled".
+    //
+    // Best-effort: opens /dev/watchdog, writes a byte, sleeps 5s, loops
+    // forever. If the device doesn't exist or we can't open it, log
+    // and give up — the system will reboot in 30s, at which point the
+    // operator will notice something's wrong.
+    spawn_watchdog_pet();
+
     // Enable cgroup v2 controllers once so per-service memory/cpu/pids
     // limits from config take effect when `container::setup_cgroup` writes
     // to memory.max etc.
@@ -506,6 +521,52 @@ fn parse_listen_addrs(listen: &[String]) -> Vec<SocketAddr> {
             }
         })
         .collect()
+}
+
+/// Pet the hardware watchdog in a background task.
+///
+/// Every OpenWrt board with a hardware watchdog (almost all of them,
+/// including mediatek/filogic which this firmware targets) expects
+/// userspace to write to /dev/watchdog periodically, or the watchdog
+/// fires and the SoC reboots. On the GL-MT6000 the default timeout is
+/// 31s. Stock procd runs a watchdog.c thread that writes every 5s.
+///
+/// We need to do the same. If /dev/watchdog doesn't exist (QEMU,
+/// non-watchdog boards, --services-only side-binary), this logs at
+/// debug level and returns — the loop only runs when the device is
+/// actually there.
+fn spawn_watchdog_pet() {
+    use std::io::Write;
+
+    let wd = match std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/watchdog")
+    {
+        Ok(f) => f,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                tracing::debug!("no /dev/watchdog on this system; skipping");
+            } else {
+                tracing::warn!(error = %e, "open /dev/watchdog failed");
+            }
+            return;
+        }
+    };
+    tracing::info!("watchdog petting loop started (5s interval)");
+
+    std::thread::Builder::new()
+        .name("watchdog".to_string())
+        .spawn(move || {
+            let mut wd = wd;
+            loop {
+                if let Err(e) = wd.write_all(b"\0") {
+                    tracing::warn!(error = %e, "watchdog write failed");
+                }
+                let _ = wd.flush();
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        })
+        .expect("spawn watchdog thread");
 }
 
 /// Move the system clock forward to at least the binary's build time

@@ -16,6 +16,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     init_tracing();
+    let argv0 = std::env::args().next().unwrap_or_default();
     let mut args = std::env::args().skip(1);
     let mode = args.next();
 
@@ -25,19 +26,23 @@ fn main() -> ExitCode {
     let is_pid1 = std::process::id() == 1;
 
     // OpenWrt's /sbin/init (procd-init) execs /sbin/procd once early in
-    // boot with PREINIT=1 set, expecting the real procd to do a small
-    // chunk of preinit setup then exit. /sbin/init continues on with
-    // the shell-driven /etc/preinit afterward, and finally execve's
-    // /sbin/procd a second time WITHOUT PREINIT — that second call is
-    // where we actually become pid 1.
+    // boot expecting the real procd to do a small chunk of preinit
+    // setup then exit. /sbin/init continues on with the shell-driven
+    // /etc/preinit afterward, and finally execve's /sbin/procd a
+    // second time — that second call is where we actually become pid 1.
     //
-    // Our oxwrtctl doesn't implement procd's PREINIT protocol (real
-    // procd writes some state under /tmp and returns). Since everything
-    // preinit needs is also done by the shell /etc/preinit hooks,
-    // silently exiting 0 is safe and matches the "let the shell do it"
-    // expectation. Without this check, we'd print usage to stderr and
-    // exit 2 — harmless but noisy in UART logs.
-    if mode.is_none() && !is_pid1 && std::env::var_os("PREINIT").is_some() {
+    // Our oxwrtctl doesn't implement procd's preinit protocol (real
+    // procd writes state under /tmp/.preinit and returns). Since
+    // everything preinit needs is also done by the shell /etc/preinit
+    // hooks, silently exiting 0 on the non-pid1 invocation is safe.
+    // Without this check, we print usage to stderr and exit 2 —
+    // harmless but noisy in UART logs and confusing to operators.
+    //
+    // Heuristic: invoked as `procd` (argv[0] ends with "/procd" or
+    // exactly "procd") with no args and not pid 1. That catches the
+    // preinit hand-off regardless of what env vars /sbin/init sets.
+    let argv0_base = argv0.rsplit('/').next().unwrap_or("");
+    if mode.is_none() && !is_pid1 && argv0_base == "procd" {
         return ExitCode::SUCCESS;
     }
 
