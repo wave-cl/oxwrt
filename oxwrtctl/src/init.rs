@@ -284,6 +284,21 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::warn!(error = %e, "enable_cgroup_controllers failed");
     }
 
+    // Run once-per-boot first-boot scripts under /etc/uci-defaults/.
+    // Normally procd executes these as part of its boot sequence; since
+    // we replace procd, we have to do it ourselves — otherwise
+    // /etc/init.d/oxwrtctl never gets enabled (irrelevant under our own
+    // supervision) and more importantly the per-service rootfs
+    // provisioners (97-oxwrt-debug-ssh-rootfs, 98-oxwrt-diag-rootfs)
+    // never run, leaving those services with empty rootfs dirs and
+    // permanent "spawn failed: No such file" errors.
+    //
+    // Semantics: execute each script, and on successful exit (status 0)
+    // delete it — matching procd's convention. Failed scripts stay
+    // around for the next boot to retry. Run in alphabetical order so
+    // 97 < 98 < 99 sequencing is preserved.
+    run_uci_defaults();
+
     // Network bring-up is non-fatal. A missing kernel module (e.g. bridge,
     // veth) or a misconfigured interface shouldn't prevent the control plane
     // from starting — the operator can fix it over sQUIC and `reload`.
@@ -471,6 +486,81 @@ fn parse_listen_addrs(listen: &[String]) -> Vec<SocketAddr> {
             }
         })
         .collect()
+}
+
+/// Execute once-per-boot scripts under `/etc/uci-defaults/` in
+/// alphabetical order. Successful scripts (exit 0) are deleted so they
+/// don't re-run on subsequent boots. Failed scripts stay around and
+/// are retried next boot. Matches procd's built-in behavior — we only
+/// reimplement it here because, as the replacement for `/sbin/procd`,
+/// we're the only thing on the system that knows how to drive these.
+///
+/// Best-effort: any IO error or spawn error is logged, never fatal.
+/// A misbehaving uci-default script MUST NOT prevent the supervisor
+/// from starting — the operator needs the control plane to debug it.
+fn run_uci_defaults() {
+    const DIR: &str = "/etc/uci-defaults";
+    let rd = match std::fs::read_dir(DIR) {
+        Ok(rd) => rd,
+        Err(e) => {
+            // ENOENT is normal on an image with no first-boot scripts
+            // (or on the second boot after the first-boot scripts have
+            // all been cleared).
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %e, "uci-defaults: read_dir failed");
+            }
+            return;
+        }
+    };
+
+    let mut entries: Vec<_> = rd
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(false)
+        })
+        .collect();
+    entries.sort();
+
+    for script in entries {
+        tracing::info!(script = %script.display(), "uci-defaults: running");
+        // Ensure the script is executable — at image-stage time we chmod
+        // 755 these, but defensive `chmod +x` via the shell works for
+        // hand-dropped operator scripts too. Invoke through /bin/sh so
+        // scripts without a shebang still work.
+        let status = std::process::Command::new("/bin/sh")
+            .arg(&script)
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                if let Err(e) = std::fs::remove_file(&script) {
+                    tracing::warn!(
+                        script = %script.display(),
+                        error = %e,
+                        "uci-defaults: remove after success failed"
+                    );
+                }
+            }
+            Ok(s) => {
+                tracing::warn!(
+                    script = %script.display(),
+                    status = ?s,
+                    "uci-defaults: script failed; will retry next boot"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    script = %script.display(),
+                    error = %e,
+                    "uci-defaults: spawn failed"
+                );
+            }
+        }
+    }
 }
 
 fn early_mounts() -> Result<(), Error> {

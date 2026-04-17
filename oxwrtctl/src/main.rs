@@ -24,6 +24,23 @@ fn main() -> ExitCode {
     // so the binary works as a direct init replacement without flags.
     let is_pid1 = std::process::id() == 1;
 
+    // OpenWrt's /sbin/init (procd-init) execs /sbin/procd once early in
+    // boot with PREINIT=1 set, expecting the real procd to do a small
+    // chunk of preinit setup then exit. /sbin/init continues on with
+    // the shell-driven /etc/preinit afterward, and finally execve's
+    // /sbin/procd a second time WITHOUT PREINIT — that second call is
+    // where we actually become pid 1.
+    //
+    // Our oxwrtctl doesn't implement procd's PREINIT protocol (real
+    // procd writes some state under /tmp and returns). Since everything
+    // preinit needs is also done by the shell /etc/preinit hooks,
+    // silently exiting 0 is safe and matches the "let the shell do it"
+    // expectation. Without this check, we'd print usage to stderr and
+    // exit 2 — harmless but noisy in UART logs.
+    if mode.is_none() && !is_pid1 && std::env::var_os("PREINIT").is_some() {
+        return ExitCode::SUCCESS;
+    }
+
     match mode.as_deref() {
         Some("--init") => run_init(),
         Some("--control-only") => run_control_only(),
