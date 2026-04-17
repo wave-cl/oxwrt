@@ -31,7 +31,14 @@ fi
 mkdir -p "$BUILD_DIR"
 
 echo "=== Step 1: Build initramfs ==="
+# --platform linux/arm64 is REQUIRED. Without it Docker Desktop on an
+# Apple Silicon host may fall back to amd64 (emulated via Rosetta 2),
+# which installs the wrong-arch Alpine linux-virt kernel (x86 bzImage)
+# that qemu-system-aarch64 silently refuses to boot — manifests as a
+# totally empty serial log. The kernel must match the -cpu in the
+# QEMU step below.
 docker run --rm \
+    --platform linux/arm64 \
     -v "$OXWRTCTL:/oxwrtctl:ro" \
     -v "$BUILD_DIR:/out" \
     alpine:latest sh -ec '
@@ -51,15 +58,24 @@ docker run --rm \
     ln -sf sbin/oxwrtctl $INITRD/init
     chmod +x $INITRD/sbin/oxwrtctl
 
-    # Minimal config — no services, no WAN, just enough to boot
+    # Minimal config — no services, just enough to boot as PID 1 in
+    # QEMU. Uses the unified `[[networks]]` array format (type-tagged
+    # wan/lan/simple variants), which is what config::Config has
+    # expected since the CRUD refactor. An older copy of this file
+    # shipped with the pre-refactor `[wan]` + `[lan]` separate-section
+    # layout, which now fails parse with "missing field `networks`".
     cat > $INITRD/etc/oxwrt.toml << "TOML"
 hostname = "qemu-test"
 
-[wan]
-mode = "dhcp"
+[[networks]]
+name = "wan"
+type = "wan"
 iface = "eth0"
+mode = "dhcp"
 
-[lan]
+[[networks]]
+name = "lan"
+type = "lan"
 bridge = "br-lan"
 members = []
 address = "192.168.8.1"
