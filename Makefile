@@ -173,7 +173,7 @@ IMAGEBUILDER_PACKAGES := \
 .PHONY: imagebuilder-stage imagebuilder-image \
         imagebuilder-stage-bare imagebuilder-stage-init \
         imagebuilder-stage-uci99 imagebuilder-stage-uci98 \
-        imagebuilder-stage-uci97
+        imagebuilder-stage-uci97 imagebuilder-stage-pid1
 
 # ── Bisect targets for the post-flash boot-hang investigation ───────
 #
@@ -449,6 +449,56 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
+
+# ── stage-pid1: full stage + PID-1 takeover ─────────────────────────
+#
+# Runs imagebuilder-stage, then layers the /sbin/procd override on top.
+#
+# The hook: OpenWrt's boot is
+#   kernel → /sbin/init (procd-init, 65KB binary) → /lib/preinit/* →
+#   execve("/sbin/procd")
+# So /sbin/procd is pid 1 *after* preinit has already mounted the
+# overlay, pivot_root'd, loaded modules, etc. By overwriting
+# /sbin/procd with oxwrtctl, we inherit pid 1 with the filesystem
+# fully set up — no need to reimplement mount_root in Rust.
+#
+# Safety properties:
+#   - /sbin/init (procd-init) stays intact. If oxwrtctl fails to
+#     start, procd-init's internal failsafe still runs (the rootfs
+#     is already up, operator can boot into failsafe via uart and
+#     inspect).
+#   - debug-ssh service on :2222 (baked in via 97-oxwrt-debug-ssh-
+#     rootfs) provides a recovery shell without procd-supervised
+#     dropbear. Login works independently of oxwrtctl's own state.
+#   - Mode is pinned to "init" so the supervisor activates the full
+#     async_main path (network, firewall, WAN DHCP, containers).
+#
+# DO NOT FLASH BLINDLY. Run from UART-connected bench with a
+# recovery plan (u-boot HTTP uploader ready with a stock image) in
+# case the device wedges. The first successful boot here is the
+# demo of "we replaced procd."
+imagebuilder-stage-pid1: imagebuilder-stage
+	# Overwrite stock procd binary with oxwrtctl. When /sbin/init
+	# execve's /sbin/procd at the end of preinit, our binary takes
+	# pid 1 — detected via getpid()==1 in main.rs and routed to
+	# run_init() automatically (no CLI flag needed).
+	mkdir -p $(IMAGEBUILDER_DIR)/files/sbin
+	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/sbin/procd
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/sbin/procd
+	# Force mode=init. services-only would skip netlink + firewall
+	# install, leaving the device without networking (pre-takeover
+	# procd isn't there to do it either).
+	echo init > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
+	@echo ""
+	@echo "PID-1 takeover layer applied:"
+	@echo "  /sbin/procd  → oxwrtctl ($$(du -h $(IMAGEBUILDER_DIR)/files/sbin/procd | cut -f1))"
+	@echo "  /etc/oxwrt/mode = init"
+	@echo ""
+	@echo "⚠️  FLASH WITH RECOVERY READY:"
+	@echo "   - UART console connected"
+	@echo "   - u-boot HTTP recovery image staged"
+	@echo ""
+	@echo "Next: make imagebuilder-image"
 
 imagebuilder-image: imagebuilder-stage
 	# Run inside a Docker sandbox because the host (macOS or similar)
