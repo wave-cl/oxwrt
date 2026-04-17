@@ -236,7 +236,9 @@ imagebuilder-image: imagebuilder-stage
 		apt-get update && apt-get install -y --no-install-recommends \
 			make gcc gettext zlib1g-dev libncurses-dev \
 			python3 python3-setuptools file perl wget rsync \
-			unzip gzip zstd xz-utils bzip2 gawk \
+			unzip gzip zstd xz-utils bzip2 gawk patch git \
+			diffutils findutils which ca-certificates \
+			libelf-dev libssl-dev \
 			2>&1 | tail -3 && \
 		cp -a /src /build && cd /build && \
 		make image PROFILE=$(IMAGEBUILDER_PROFILE) \
