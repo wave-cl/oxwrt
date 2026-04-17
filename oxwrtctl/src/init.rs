@@ -277,6 +277,26 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::warn!(error = %e, hostname = %cfg.hostname, "sethostname failed");
     }
 
+    // Bootstrap the system clock to at least the binary's build time.
+    //
+    // The GL-MT6000 has no battery-backed RTC. Every cold boot starts
+    // at Jan 1 1970, which breaks the sQUIC replay-window check (clients
+    // with real timestamps are >56 years ahead, way outside ±120s).
+    // Operators can't push a new config or talk to the control plane
+    // until the clock is sane — and NTP can't help, because ntpd runs
+    // as a supervised service that needs DNS which needs WAN.
+    //
+    // BUILD_EPOCH_SECS is baked in at compile time by build.rs. Bumping
+    // the clock up to that value gives us a floor that's "recent enough"
+    // for an operator who just flashed the image: if they connect within
+    // ~2 minutes of binary build time, their timestamp will be within
+    // the replay window. Stale images (more than ~2 min old) still need
+    // a real NTP sync — see TODO in the `wan_dhcp` flow.
+    //
+    // Only moves the clock FORWARD — never steps backwards, which would
+    // make other processes unhappy. Best-effort: failure just logs.
+    bootstrap_clock_floor();
+
     // Enable cgroup v2 controllers once so per-service memory/cpu/pids
     // limits from config take effect when `container::setup_cgroup` writes
     // to memory.max etc.
@@ -486,6 +506,68 @@ fn parse_listen_addrs(listen: &[String]) -> Vec<SocketAddr> {
             }
         })
         .collect()
+}
+
+/// Move the system clock forward to at least the binary's build time
+/// if it's currently behind. Never moves the clock backwards.
+///
+/// Rationale: see the call site comment in `async_main`. Short version:
+/// cold boot with no RTC → clock is 1970 → sQUIC replay window (±120s)
+/// rejects every client handshake until something syncs time. NTP is
+/// downstream of DNS which is downstream of WAN, so NTP can't bootstrap
+/// from a cold start — we have to do it ourselves before the control
+/// plane listens.
+fn bootstrap_clock_floor() {
+    const BUILD_EPOCH_SECS: u64 = match u64::from_str_radix(env!("BUILD_EPOCH_SECS"), 10) {
+        Ok(v) => v,
+        Err(_) => 0,
+    };
+    if BUILD_EPOCH_SECS == 0 {
+        return;
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if now_secs >= BUILD_EPOCH_SECS {
+        // Clock is already at or past build time — NTP probably synced
+        // us earlier (warm reboot preserving /var/lib/oxwrt), or the
+        // operator ran `date -s` over UART. Nothing to do.
+        return;
+    }
+
+    // Pre-check: don't bother calling settimeofday(2) if the delta is
+    // less than a second — avoids noise in logs on the normal case
+    // where the clock is already set.
+    let delta = BUILD_EPOCH_SECS - now_secs;
+
+    let tv = rustix::time::Timespec {
+        tv_sec: BUILD_EPOCH_SECS as i64,
+        tv_nsec: 0,
+    };
+    match rustix::time::clock_settime(rustix::time::ClockId::Realtime, tv) {
+        Ok(()) => {
+            tracing::info!(
+                from_secs = now_secs,
+                to_secs = BUILD_EPOCH_SECS,
+                forward_by_secs = delta,
+                "clock bootstrapped to build-time floor"
+            );
+        }
+        Err(e) => {
+            // EPERM on a system that doesn't let us clock_settime —
+            // shouldn't happen when we're PID 1, but could happen when
+            // running as a side binary for development. Not fatal.
+            tracing::warn!(
+                error = %e,
+                from_secs = now_secs,
+                to_secs = BUILD_EPOCH_SECS,
+                "clock bootstrap failed (clock_settime EPERM?) — sQUIC may reject clients with real timestamps"
+            );
+        }
+    }
 }
 
 /// Execute once-per-boot scripts under `/etc/uci-defaults/` in

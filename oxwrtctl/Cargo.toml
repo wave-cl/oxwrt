@@ -38,6 +38,7 @@ rustix = { version = "1", features = [
     "pipe",
     "event",
     "termios",
+    "time",
 ] }
 rtnetlink = "0.20"
 netlink-packet-route = "0.29"
