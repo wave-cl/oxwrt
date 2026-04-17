@@ -23,6 +23,35 @@ STOP=01
 
 PROG=/usr/bin/oxwrtctl
 
+# Operator-selectable run mode. The single-line file /etc/oxwrt/mode
+# determines how procd launches us:
+#
+#   control-only   (default if file missing) — supervisor empty, just
+#                  the sQUIC control plane. Safe side-binary coexistence
+#                  with stock OpenWrt — will not touch live network
+#                  state even on reload.
+#   services-only  supervisor populated from /etc/oxwrt.toml and spawns
+#                  declared services (including debug-ssh on port 2222),
+#                  but no network/firewall reconcile. Use this once
+#                  you've validated the per-service rootfs layouts.
+#   init           full PID-1-like takeover, including firewall install
+#                  and netlink reconcile. DO NOT set this unless you're
+#                  ready for the side-binary to fight procd/fw4 over
+#                  /etc/config — this mode is really intended for when
+#                  the binary IS actually PID 1 (via /sbin/init symlink).
+#
+# Anything else falls back to control-only with a log warning. Changing
+# the mode means `ssh root@router /etc/init.d/oxwrtctl restart`.
+MODE_FILE=/etc/oxwrt/mode
+
+get_mode() {
+    if [ -r "$MODE_FILE" ]; then
+        head -n1 "$MODE_FILE" | tr -d ' \t\n\r'
+    else
+        echo "control-only"
+    fi
+}
+
 start_service() {
     # Refuse to start if the binary is missing — gives a clearer
     # failure than procd's generic "respawn too fast" loop.
@@ -31,8 +60,19 @@ start_service() {
         return 1
     }
 
+    mode="$(get_mode)"
+    case "$mode" in
+        control-only|services-only|init)
+            : ;;
+        *)
+            logger -t oxwrtctl "unknown mode '$mode' in $MODE_FILE; falling back to control-only"
+            mode="control-only"
+            ;;
+    esac
+    logger -t oxwrtctl "starting in --$mode mode"
+
     procd_open_instance oxwrtctl
-    procd_set_param command "$PROG" --control-only
+    procd_set_param command "$PROG" "--$mode"
     # Respawn on crash: threshold=3600s, timeout=5s, retry=5 times before
     # giving up. Matches procd defaults for long-running daemons.
     procd_set_param respawn 3600 5 5

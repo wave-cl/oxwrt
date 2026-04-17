@@ -56,10 +56,10 @@ cp /usr/sbin/dropbear "$R/sbin/dropbear"
 # has a bounded answer.
 cd "$R/bin"
 for a in sh ash ls cat mount umount ps kill ip ping traceroute dmesg free \
-         head tail grep sed awk echo chmod chown stat df du tr find \
+         head tail grep sed awk echo chmod chown stat df du tr find wc \
          date touch mkdir rmdir rm cp mv ln readlink uname hostname \
-         nslookup netstat which env printf id whoami pwd true false \
-         sleep clear reset login su tty who logger wget vi more less; do
+         nslookup netstat which env printf id whoami pwd true false xargs \
+         sleep clear reset login su tty who logger wget vi more less cut sort uniq; do
     ln -sf busybox "$a"
 done
 cd "$R/sbin"
