@@ -33,7 +33,15 @@ fn main() {
         });
 
     println!("cargo:rustc-env=BUILD_EPOCH_SECS={epoch}");
-    // Re-run only if the env var changes (normal rebuilds pick up
-    // the default "now" fallback on every build automatically).
-    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // DO NOT add any `rerun-if-*` directive. Adding one overrides
+    // cargo's default "re-run whenever any file in the crate changes"
+    // heuristic — with e.g. `rerun-if-env-changed=SOURCE_DATE_EPOCH`,
+    // cargo will only re-run this script when that env var changes,
+    // baking a stale BUILD_EPOCH_SECS into every subsequent release.
+    // We WANT this script to re-run on every meaningful rebuild so
+    // the clock bootstrap floor reflects the latest binary build time.
+    //
+    // Verified: on pid1-v5, the absence of this directive caused
+    // cargo to reuse v3's build time (~40 min stale), which then sat
+    // outside the 3600s sQUIC replay window anyway.
 }
