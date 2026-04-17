@@ -97,16 +97,30 @@ EOF
     chmod 1777 "$R/tmp"
 fi
 
-# Host keys + authorized_keys — ALWAYS refresh, regardless of whether
-# the binary tree was already present. These files are per-device
-# (regenerated on every clean flash by dropbear's own init.d) so they
-# must be copied into the rootfs on every first boot after flash.
-# Running this block even when $need_bin = 0 is how we avoid the bug
-# where the image pre-populated /sbin/dropbear, the "binary exists"
-# check exited 0, and the rootfs/etc/dropbear/ stayed empty — dropbear
-# bounced immediately because it had no host keys.
-cp /etc/dropbear/dropbear_ed25519_host_key "$R/etc/dropbear/"
-cp /etc/dropbear/dropbear_rsa_host_key "$R/etc/dropbear/" 2>/dev/null || true
-cp /etc/dropbear/authorized_keys "$R/etc/dropbear/"
+# Host keys + authorized_keys — refresh on every run if present.
+#
+# Trap: stock OpenWrt generates the dropbear host keys on FIRST start
+# of /etc/init.d/dropbear. uci-defaults runs in preinit, BEFORE any
+# service starts, so on a truly fresh flash these files don't exist
+# yet. An earlier version of this script used `set -e` + unconditional
+# `cp`, which bombed the whole script (and took procd down the wrong
+# path) on first boot.
+#
+# Fix: each cp is guarded with `|| true` and a conditional existence
+# check. Missing keys just get topped up when the supervisor's debug-
+# ssh service first tries to spawn (it'll fail to start, backoff,
+# and on a subsequent cycle the keys exist because /etc/init.d/
+# dropbear has started by then — if the operator ever hit that
+# window, which in practice means never because stock dropbear runs
+# before our supervisor does anything useful).
+if [ -s /etc/dropbear/dropbear_ed25519_host_key ]; then
+    cp /etc/dropbear/dropbear_ed25519_host_key "$R/etc/dropbear/" || true
+fi
+if [ -s /etc/dropbear/dropbear_rsa_host_key ]; then
+    cp /etc/dropbear/dropbear_rsa_host_key "$R/etc/dropbear/" || true
+fi
+if [ -s /etc/dropbear/authorized_keys ]; then
+    cp /etc/dropbear/authorized_keys "$R/etc/dropbear/" || true
+fi
 
 exit 0
