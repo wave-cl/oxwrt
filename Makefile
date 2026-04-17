@@ -394,12 +394,28 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/ntp.toml
 	cp config/services/dhcp/coredhcp.yml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
-	# Writable lease-file dir on the host side. coredhcp opens this
-	# file at startup (sqlite DB, grows with each lease). Landlock
-	# sees the bind-mount source and refuses the spawn if the file is
-	# missing; so create it up-front even though it's empty.
-	mkdir -p $(IMAGEBUILDER_DIR)/files/var/lib/oxwrt/coredhcp
-	touch $(IMAGEBUILDER_DIR)/files/var/lib/oxwrt/coredhcp/leases.txt
+	# Writable lease-file dir on the host side.
+	#
+	# DO NOT stage under files/var/ — OpenWrt ships /var as a symlink
+	# to /tmp (tmpfs), and any files/ overlay path under var/
+	# silently CLOBBERS that symlink by materializing /var as a real
+	# squashfs directory. That breaks the entire userspace boot:
+	# procd's ubus init calls chown(/var/run/ubus), which fails
+	# because /var/run is now a read-only squashfs path instead of a
+	# tmpfs. Device hangs before reaching uci-defaults, before any
+	# service spawns. Diagnosed via UART console on 2026-04-17 after
+	# many hours of bisect cycles.
+	#
+	# Stage the leases file under /etc/oxwrt/coredhcp/ instead — /etc
+	# is writable overlayfs (persistent across reboots) and nothing
+	# downstream depends on OpenWrt's /etc being a symlink. The
+	# bind-mount source in config/oxwrt.toml [[services.binds]] for
+	# coredhcp needs to match this path, or an init-time symlink /var/
+	# lib/oxwrt/coredhcp -> /etc/oxwrt/coredhcp can be created by a
+	# uci-defaults script if the in-container path must stay
+	# /var/lib/coredhcp.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt/coredhcp
+	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/coredhcp/leases.txt
 	# Minimal passwd/group inside service rootfs (see per-package
 	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
 	for svc in dns ntp dhcp; do \
