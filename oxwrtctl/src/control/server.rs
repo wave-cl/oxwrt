@@ -293,6 +293,17 @@ fn handle_set(state: &ControlState, key: &str, value: &str) -> Response {
                 };
             }
             new_cfg.hostname = value.to_string();
+            // Apply to the live kernel immediately — otherwise `set
+            // hostname` only updates the in-memory config + /etc/
+            // oxwrt.toml, and the kernel hostname doesn't change
+            // until the next `reload` (or the next boot). In
+            // --control-only mode `reload` short-circuits the
+            // reconcile phases, so the apply would never happen at
+            // all. sethostname(2) is cheap + idempotent; just do it
+            // here for instant operator feedback.
+            if let Err(e) = rustix::system::sethostname(value.as_bytes()) {
+                tracing::warn!(error = %e, hostname = %value, "sethostname failed");
+            }
         }
         "timezone" => {
             new_cfg.timezone = if value.is_empty() {
