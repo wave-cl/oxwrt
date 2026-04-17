@@ -47,8 +47,25 @@ fn main() -> ExitCode {
     // that proved unreliable — on this firmware the stray usage print
     // persisted even with the argv0 check in place.
     use std::io::IsTerminal;
-    let _ = argv0; // keep for future debugging; not used by current heuristic
-    if mode.is_none() && !is_pid1 && !std::io::stderr().is_terminal() {
+    // Three independent "init invoked us" signals. Any one → silent exit.
+    // We combine them because no single heuristic caught every case
+    // in testing: the argv0=="procd" check missed the stray invocation
+    // on real hardware, stderr.is_terminal() would return true if
+    // /dev/console is inherited, and ppid==1 alone doesn't catch
+    // grandchild-of-init execs.
+    let argv0_base = argv0.rsplit('/').next().unwrap_or("");
+    #[cfg(target_os = "linux")]
+    let ppid_is_init = rustix::process::getppid()
+        .map(|p| p.as_raw_nonzero().get() == 1)
+        .unwrap_or(false);
+    #[cfg(not(target_os = "linux"))]
+    let ppid_is_init = false;
+    let stderr_not_tty = !std::io::stderr().is_terminal();
+    let called_as_procd = argv0_base == "procd";
+    if mode.is_none()
+        && !is_pid1
+        && (ppid_is_init || stderr_not_tty || called_as_procd)
+    {
         return ExitCode::SUCCESS;
     }
 
