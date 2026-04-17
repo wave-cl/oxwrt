@@ -143,9 +143,32 @@ IMAGEBUILDER_DIR ?= imagebuilder/openwrt-imagebuilder-25.12.2-mediatek-filogic.L
 IMAGEBUILDER_PROFILE ?= glinet_gl-mt6000
 IMAGEBUILDER_PACKAGES := \
 	kmod-veth \
-	nftables \
-	-dnsmasq -dnsmasq-full -odhcpd-ipv6only -odhcpd \
-	-firewall4 -kmod-nft-offload
+	kmod-nft-nat \
+	nftables
+
+# IMAGE PHILOSOPHY: this image adds oxwrtctl + services as SIDE
+# BINARIES alongside the stock OpenWrt stack (procd + netifd +
+# firewall4 + dnsmasq + odhcpd + dropbear). This mirrors the "first
+# successful flash" configuration we used during bring-up — stock
+# services handle LAN bringup / DHCP / DNS / firewall by default, and
+# oxwrtctl runs in --control-only or --services-only via /etc/oxwrt/
+# mode until the operator explicitly flips it to --init.
+#
+# Earlier we tried removing firewall4 / dnsmasq / odhcpd to make
+# oxwrt the sole owner of those roles, but it turned the fresh image
+# into a brick on boot — likely because some preinit / board.d
+# scripts assume those packages are present, and without them neither
+# the LAN bridge nor SSH ever come up. Rather than chase that
+# failure, we coexist with the stock stack and let the operator
+# uninstall it piece-by-piece from a shell when ready.
+#
+# kmod-veth: needed for container::spawn's isolated netns
+# (host-side veth pair creation). Without it, rtnetlink: Not
+# supported (os error 95) on every isolated service.
+#
+# kmod-nft-nat: needed for our `type nat hook postrouting | prerouting`
+# chains (MASQUERADE + DNAT). Ships with firewall4 as a dependency,
+# so usually present — we pin it explicitly for forward-compat.
 
 .PHONY: imagebuilder-stage imagebuilder-image
 

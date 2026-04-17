@@ -529,6 +529,12 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     );
 
     // ── 2. ip oxwrt-nat: MASQUERADE for zones with masquerade=true ──
+    //
+    // Requires kmod-nft-nat in the image (nft_chain_nat / nft_masq).
+    // That package ships with firewall4; if the image drops firewall4
+    // without explicitly including kmod-nft-nat, every `type nat
+    // hook ...` chain here fails with a generic "Error received from
+    // the kernel" and the table never appears in `nft list tables`.
 
     let has_masq = cfg.firewall.zones.iter().any(|z| z.masquerade);
     if has_masq {
@@ -550,7 +556,14 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .with_expr(Masquerade::default())
             .add_to_batch(&mut nat_batch);
 
-        nat_batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
+        // Error path logs inline: the generic kernel error comes back
+        // as a bare io::Error, and losing it to `?` alone means the
+        // operator sees only "install_firewall failed" upstream with
+        // no hint about which of the three table installs went wrong.
+        nat_batch.send().map_err(|e| {
+            tracing::error!(error = %e, "nftables NAT MASQUERADE batch send failed");
+            Error::Firewall(e.to_string())
+        })?;
         tracing::info!("nftables NAT MASQUERADE installed");
     }
 
@@ -631,7 +644,10 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             tracing::info!(rule = %rule.name, target = %target_str, "DNAT rule emitted");
         }
 
-        dnat_batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
+        dnat_batch.send().map_err(|e| {
+            tracing::error!(error = %e, "nftables DNAT batch send failed");
+            Error::Firewall(e.to_string())
+        })?;
         tracing::info!(count = dnat_rules.len(), "nftables DNAT installed");
     }
 
