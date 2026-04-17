@@ -304,9 +304,13 @@ target = "/etc/coredhcp.yml"
 # readonly = true (default)
 
 [[services.binds]]
-source = "/var/lib/oxwrt/coredhcp/leases.txt"
+source = "/etc/oxwrt/coredhcp/leases.txt"
 target = "/var/lib/coredhcp/leases.txt"
 readonly = false             # coredhcp needs to write lease state
+# Source is /etc/oxwrt/... not /var/lib/oxwrt/... because OpenWrt's /var
+# is a symlink to /tmp (tmpfs). Staging files under /var in the squashfs
+# overlay clobbers the symlink and breaks procd's ubus chown (see
+# Makefile comment in imagebuilder-stage).
 
 # coredhcp needs NET_RAW + NET_ADMIN for its raw sockets on top of the
 # default four caps. Landlock's writable-bind-mount rule automatically
