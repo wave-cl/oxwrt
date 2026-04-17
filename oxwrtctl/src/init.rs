@@ -369,6 +369,27 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                     lease,
                     wan_lease.clone(),
                 );
+
+                // Now that we have a WAN lease, fire a one-shot SNTP
+                // query against a hard-coded IP to snap the system
+                // clock to real-time. We can't use the ntpd-rs service
+                // for this: it needs DNS to resolve pool.ntp.org, which
+                // needs the dns container up, which needs us past this
+                // boot phase. And without NTP the bootstrap-clock-floor
+                // is only accurate to build-time ± replay_window — fine
+                // for operators who flash and immediately connect, but
+                // broken for images that sat for hours before boot.
+                //
+                // time.cloudflare.com (162.159.200.1) — anycast, very
+                // reliable, no DNS needed. Not authenticated (NTS would
+                // need time and roots both), but we only use the result
+                // to initialize a floor; ntpd-rs takes over for ongoing
+                // discipline.
+                tokio::spawn(async {
+                    if let Err(e) = sntp_bootstrap_clock("162.159.200.1:123").await {
+                        tracing::warn!(error = %e, "sntp bootstrap failed");
+                    }
+                });
             }
             Err(e) => {
                 tracing::warn!(iface = %iface, error = %e, "wan dhcp: no lease acquired");
@@ -521,6 +542,79 @@ fn parse_listen_addrs(listen: &[String]) -> Vec<SocketAddr> {
             }
         })
         .collect()
+}
+
+/// One-shot SNTP client: query `addr` (e.g. a hard-coded NTP server
+/// IP), read the reply's transmit timestamp, and step the system
+/// clock to match.
+///
+/// Minimal RFC 4330 implementation — no stratum / delay / precision
+/// handling. We only use the result to initialize the clock; ntpd-rs
+/// (our supervised service) takes over long-term discipline once DNS
+/// is working.
+///
+/// Fails loudly if anything goes wrong (unreachable server, malformed
+/// reply, clock_settime EPERM): best-effort, logged, not fatal.
+async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
+    use tokio::net::UdpSocket;
+    use tokio::time::{Duration, timeout};
+
+    // SNTP request: 48 zero bytes except the first, which is the
+    // LI/VN/Mode header. 0x1B = LI=0, VN=3, Mode=3 (client).
+    let mut req = [0u8; 48];
+    req[0] = 0x1B;
+
+    let sock = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("bind: {e}"))?;
+    sock.connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
+
+    timeout(Duration::from_secs(5), sock.send(&req))
+        .await
+        .map_err(|_| "send timeout".to_string())?
+        .map_err(|e| format!("send: {e}"))?;
+
+    let mut buf = [0u8; 48];
+    timeout(Duration::from_secs(5), sock.recv(&mut buf))
+        .await
+        .map_err(|_| "recv timeout".to_string())?
+        .map_err(|e| format!("recv: {e}"))?;
+
+    // Transmit timestamp: offset 40, 8 bytes (32-bit seconds since
+    // NTP epoch 1900, 32-bit fractional seconds).
+    let ntp_secs = u32::from_be_bytes([buf[40], buf[41], buf[42], buf[43]]);
+    let ntp_frac = u32::from_be_bytes([buf[44], buf[45], buf[46], buf[47]]);
+    if ntp_secs == 0 {
+        return Err("reply had zero transmit timestamp".to_string());
+    }
+
+    // NTP epoch is Jan 1 1900; UNIX epoch is Jan 1 1970 —
+    // 2_208_988_800 seconds earlier.
+    const NTP_TO_UNIX_EPOCH: u64 = 2_208_988_800;
+    let unix_secs = u64::from(ntp_secs).saturating_sub(NTP_TO_UNIX_EPOCH);
+    // Fractional seconds → nanoseconds: (frac / 2^32) * 1e9.
+    let unix_nsec = ((u64::from(ntp_frac) * 1_000_000_000) >> 32) as u32;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let skew = unix_secs as i64 - now as i64;
+
+    let tv = rustix::time::Timespec {
+        tv_sec: unix_secs as i64,
+        tv_nsec: unix_nsec as i64,
+    };
+    rustix::time::clock_settime(rustix::time::ClockId::Realtime, tv)
+        .map_err(|e| format!("clock_settime: {e}"))?;
+
+    tracing::info!(
+        server = %addr,
+        unix_secs,
+        skew_secs = skew,
+        "sntp bootstrap: clock set from ntp reply"
+    );
+    Ok(())
 }
 
 /// Locate the /dev/watchdog file descriptor inherited from procd-init.

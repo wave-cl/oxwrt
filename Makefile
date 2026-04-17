@@ -173,7 +173,8 @@ IMAGEBUILDER_PACKAGES := \
 .PHONY: imagebuilder-stage imagebuilder-image \
         imagebuilder-stage-bare imagebuilder-stage-init \
         imagebuilder-stage-uci99 imagebuilder-stage-uci98 \
-        imagebuilder-stage-uci97 imagebuilder-stage-pid1
+        imagebuilder-stage-uci97 imagebuilder-stage-pid1 \
+        imagebuilder-image-pid1 .imagebuilder-build
 
 # ── Bisect targets for the post-flash boot-hang investigation ───────
 #
@@ -447,6 +448,20 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 	# their control key post-flash via the `oxwrtctl --print-server-key`
 	# workflow. The file must exist (server fails to start without it).
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
+	# Preserve /etc/oxwrt/ across sysupgrade operations. Without this,
+	# every firmware update regenerates the server signing key, changes
+	# the sQUIC server pubkey, and locks out every client that was
+	# previously pinned to the old key. The operator would have to
+	# re-read the pubkey from UART and re-export SQUIC_SERVER_KEY on
+	# every update — painful during bring-up, broken in production.
+	#
+	# /etc/sysupgrade.conf is the canonical OpenWrt hook: each line is
+	# a path (or pattern) copied from the old rootfs to the new one
+	# during `sysupgrade` (default, without -n). Doesn't help for
+	# U-Boot HTTP recovery (raw full-flash wipes overlay unconditionally
+	# — nothing on the squashfs can preserve across that), but that's
+	# a recovery path anyway, not a normal update.
+	echo "/etc/oxwrt/" > $(IMAGEBUILDER_DIR)/files/etc/sysupgrade.conf
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
 
@@ -498,7 +513,38 @@ imagebuilder-stage-pid1: imagebuilder-stage
 	@echo "   - UART console connected"
 	@echo "   - u-boot HTTP recovery image staged"
 	@echo ""
-	@echo "Next: make imagebuilder-image"
+	@echo "Next: make imagebuilder-image-pid1"
+
+# Image-build variant for the PID-1 takeover. MUST NOT use
+# `imagebuilder-image` — that depends on `imagebuilder-stage`, which
+# rm -rf's files/ and re-stages from scratch, wiping the /sbin/procd
+# override. Flashing the result of that sequence silently ships a
+# services-only image (found out the hard way).
+imagebuilder-image-pid1: imagebuilder-stage-pid1 .imagebuilder-build
+
+# Internal: run the docker image-build step against whatever is
+# currently staged in $(IMAGEBUILDER_DIR)/files. Shared between
+# `imagebuilder-image` and `imagebuilder-image-pid1` so the two
+# differ only in what overlay is staged, not in how the image is
+# baked.
+.imagebuilder-build:
+	docker run --rm -v $(CURDIR)/$(IMAGEBUILDER_DIR):/src \
+		debian:bookworm-slim bash -c '\
+		apt-get update && apt-get install -y --no-install-recommends \
+			make gcc gettext zlib1g-dev libncurses-dev \
+			python3 python3-setuptools file perl wget rsync \
+			unzip gzip zstd xz-utils bzip2 gawk patch git \
+			diffutils findutils which ca-certificates \
+			libelf-dev libssl-dev \
+			2>&1 | tail -3 && \
+		cp -a /src /build && cd /build && \
+		make image PROFILE=$(IMAGEBUILDER_PROFILE) \
+			PACKAGES="$(IMAGEBUILDER_PACKAGES)" \
+			FILES=/build/files && \
+		rm -rf /src/bin && cp -a /build/bin /src/bin'
+	@echo ""
+	@echo "Image(s) at:"
+	@find $(IMAGEBUILDER_DIR)/bin -name '*sysupgrade*' -ls
 
 imagebuilder-image: imagebuilder-stage
 	# Run inside a Docker sandbox because the host (macOS or similar)
