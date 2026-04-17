@@ -977,6 +977,12 @@ impl Supervisor {
         for sup in self.services.iter_mut() {
             match reap(sup) {
                 Ok(Some(status)) => {
+                    // Same tracing + logd dual-write as spawn failure
+                    // (see the `spawn failed` arm below) — surface the
+                    // exit code so the Status RPC's `last_log` shows
+                    // something useful for a service that exited
+                    // cleanly but with a non-zero status (bad config,
+                    // missing runtime dep, etc.).
                     tracing::warn!(
                         service = %sup.spec.name,
                         code = status.code().unwrap_or(-1),
@@ -984,10 +990,20 @@ impl Supervisor {
                         restarts = sup.restarts,
                         "service exited"
                     );
+                    logd.push(
+                        &sup.spec.name,
+                        format!(
+                            "service exited: code={} signal={:?} restarts={}",
+                            status.code().unwrap_or(-1),
+                            status.signal(),
+                            sup.restarts
+                        ),
+                    );
                 }
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(service = %sup.spec.name, error = %e, "reap failed");
+                    logd.push(&sup.spec.name, format!("reap failed: {e}"));
                 }
             }
         }
@@ -1024,7 +1040,14 @@ impl Supervisor {
                 continue;
             }
             if let Err(e) = spawn(sup, logd) {
+                // Log to tracing for syslog/journalctl AND push to the
+                // per-service ring so the Status RPC surfaces the
+                // reason in `last_log`. Without the logd.push, a
+                // crash-looping service shows "Crashed restarts=N"
+                // with no hint as to why, forcing operators to ssh
+                // in and read syslog.
                 tracing::error!(service = %sup.spec.name, error = %e, "spawn failed");
+                logd.push(&sup.spec.name, format!("spawn failed: {e}"));
                 sup.state = ServiceState::Crashed;
                 sup.next_restart = Some(now + sup.backoff);
                 sup.backoff = (sup.backoff * 2).min(BACKOFF_MAX);

@@ -1947,6 +1947,14 @@ fn handle_restart(state: &ControlState, name: &str) -> Response {
     Response::Ok
 }
 
+/// Byte cap on the `last_log` field per ServiceStatus. 240 chars fits
+/// on two terminal lines of an 80-col display without wrapping into
+/// something unreadable — long enough to carry a one-line panic
+/// message or an "Error: <reason>" from a Rust binary's stderr, short
+/// enough that a `status` response with 10 crashed services doesn't
+/// dwarf the useful fields above it.
+const LAST_LOG_CLIP: usize = 240;
+
 fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
     let Ok(sup) = state.supervisor.lock() else {
         return vec![];
@@ -1955,12 +1963,31 @@ fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
     let _ = now; // uptime is measured from Instant, not SystemTime
     sup.services
         .iter()
-        .map(|s| ServiceStatus {
-            name: s.spec.name.clone(),
-            pid: s.pid(),
-            state: s.state,
-            restarts: s.restarts,
-            uptime_secs: s.uptime().as_secs(),
+        .map(|s| {
+            // Pull the most recent log line for this service, if any.
+            // logd holds a bounded ring so this is O(ring_cap); cheap
+            // enough to do every time `status` is called.
+            let last_log = state
+                .logd
+                .tail(&s.spec.name, 1)
+                .into_iter()
+                .next()
+                .map(|l| {
+                    let mut line = l.line;
+                    if line.len() > LAST_LOG_CLIP {
+                        line.truncate(LAST_LOG_CLIP);
+                        line.push_str("…");
+                    }
+                    line
+                });
+            ServiceStatus {
+                name: s.spec.name.clone(),
+                pid: s.pid(),
+                state: s.state,
+                restarts: s.restarts,
+                uptime_secs: s.uptime().as_secs(),
+                last_log,
+            }
         })
         .collect()
 }

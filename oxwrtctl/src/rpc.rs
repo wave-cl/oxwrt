@@ -101,6 +101,18 @@ pub struct ServiceStatus {
     pub state: ServiceState,
     pub restarts: u32,
     pub uptime_secs: u64,
+    /// Most recent log line captured from the service's stderr, if
+    /// any. Populated from the per-service ring in `logd` — so an
+    /// operator looking at `oxwrtctl --client <addr> status` gets a
+    /// one-line hint about *why* a Crashed service crashed, without
+    /// needing to shell into the device or call `logs <name>`.
+    ///
+    /// `None` for services that have produced zero log output yet
+    /// (typically a freshly-declared service that hasn't spawned).
+    /// Clipped to 240 chars server-side to keep `status` readable
+    /// even when the crash message is a multi-kilobyte backtrace.
+    #[serde(default)]
+    pub last_log: Option<String>,
 }
 
 /// Slim WAN summary for the Status RPC. Only the operator-facing

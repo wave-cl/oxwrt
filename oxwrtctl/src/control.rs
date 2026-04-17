@@ -387,6 +387,14 @@ pub fn format_response(resp: &Response) -> String {
                         "  {:<16} {:?} pid={:?} restarts={} uptime={}s\n",
                         s.name, s.state, s.pid, s.restarts, s.uptime_secs
                     ));
+                    // Indented last-log line if the server sent one —
+                    // makes crash causes visible at a glance instead
+                    // of forcing an `oxwrtctl logs <service>` follow-up.
+                    if let Some(line) = &s.last_log {
+                        if !line.is_empty() {
+                            out.push_str(&format!("    ↳ {}\n", line.trim_end()));
+                        }
+                    }
                 }
             }
             out
