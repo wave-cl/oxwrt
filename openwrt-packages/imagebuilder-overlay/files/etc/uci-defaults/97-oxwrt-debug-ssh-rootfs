@@ -97,28 +97,31 @@ EOF
     chmod 1777 "$R/tmp"
 fi
 
-# Host keys + authorized_keys — refresh on every run if present.
+# Host keys: generate directly via dropbearkey rather than copying
+# from /etc/dropbear/.
 #
-# Trap: stock OpenWrt generates the dropbear host keys on FIRST start
-# of /etc/init.d/dropbear. uci-defaults runs in preinit, BEFORE any
-# service starts, so on a truly fresh flash these files don't exist
-# yet. An earlier version of this script used `set -e` + unconditional
-# `cp`, which bombed the whole script (and took procd down the wrong
-# path) on first boot.
+# Earlier versions copied from stock dropbear's /etc/dropbear/. That's
+# a race: uci-defaults runs in preinit, BEFORE /etc/init.d/dropbear
+# starts — so on a fresh flash the host keys don't exist yet. Worse,
+# after PID-1 takeover there IS no stock dropbear to generate them.
+# Generating them here with dropbearkey (which ships alongside the
+# dropbear binary) removes both failure modes.
 #
-# Fix: each cp is guarded with `|| true` and a conditional existence
-# check. Missing keys just get topped up when the supervisor's debug-
-# ssh service first tries to spawn (it'll fail to start, backoff,
-# and on a subsequent cycle the keys exist because /etc/init.d/
-# dropbear has started by then — if the operator ever hit that
-# window, which in practice means never because stock dropbear runs
-# before our supervisor does anything useful).
-if [ -s /etc/dropbear/dropbear_ed25519_host_key ]; then
-    cp /etc/dropbear/dropbear_ed25519_host_key "$R/etc/dropbear/" || true
-fi
-if [ -s /etc/dropbear/dropbear_rsa_host_key ]; then
-    cp /etc/dropbear/dropbear_rsa_host_key "$R/etc/dropbear/" || true
-fi
+# Keys are per-device: regenerated on every clean flash. If we want
+# persistent keys across firmware updates, push them via the control
+# plane post-flash — don't embed them in the image.
+for kt in ed25519 rsa; do
+    key="$R/etc/dropbear/dropbear_${kt}_host_key"
+    if [ ! -s "$key" ]; then
+        dropbearkey -t "$kt" -f "$key" >/dev/null 2>&1 || \
+            logger -t oxwrt-debug-ssh "dropbearkey -t $kt failed"
+    fi
+done
+
+# authorized_keys: ship the operator's key if stock dropbear has one
+# staged (imagebuilder-stage copies ~/.ssh/id_ed25519.pub there). Safe
+# to leave absent — the service will start but refuse logins, which
+# is a better failure mode than not starting at all.
 if [ -s /etc/dropbear/authorized_keys ]; then
     cp /etc/dropbear/authorized_keys "$R/etc/dropbear/" || true
 fi
