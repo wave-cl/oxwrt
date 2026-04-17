@@ -597,4 +597,105 @@ dnat_target = "10.53.0.2:15353"
         assert_eq!(dnat.action, crate::config::Action::Dnat);
         assert_eq!(dnat.dnat_target.as_deref(), Some("10.53.0.2:15353"));
     }
+
+    // ── shipped-service-config regression tests ─────────────────────
+    //
+    // These guard the three service config files we ship under
+    // config/services/{dns,ntp,dhcp}/ against silently regressing to
+    // formats that crash-loop the service at runtime. Each test
+    // captures a concrete bug we hit today during live bring-up:
+    //
+    //   - named.toml shipped `zone_type = "Forward"` (removed from
+    //     hickory-dns 0.25 which now accepts only Primary/Secondary/
+    //     External) and `protocol = "tls"` under name_servers (not a
+    //     valid variant in 0.25).
+    //   - coredhcp.yml shipped `lease_time: 3600` which coredhcp
+    //     rejects with "invalid duration: 3600" — the plugin wants a
+    //     Go time.Duration string like "12h".
+    //
+    // No crate-level parser checks here (would require heavy dev-deps
+    // on hickory-server / ntpd / a Go-parser bridge); instead we do
+    // cheap regex-ish string checks for the specific known-bad
+    // tokens. That's narrower than a full parse but keeps the test
+    // fast and dependency-free, and any future bug class can be
+    // added by dropping another assertion here.
+
+    fn read_service_config(rel: &str) -> String {
+        let path = format!("{}/../config/services/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    #[test]
+    fn named_toml_avoids_known_hickory025_breakers() {
+        let text = read_service_config("dns/named.toml");
+        // First line of defense: must be valid TOML.
+        let _: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("named.toml not valid TOML: {e}"));
+        // hickory 0.25 removed `Forward` as a zone_type variant.
+        assert!(
+            !text.contains("zone_type = \"Forward\""),
+            "named.toml uses `zone_type = \"Forward\"` which hickory 0.25 \
+             rejects; use `External` for forwarding-only zones"
+        );
+        // hickory 0.25 removed the `tls` protocol string on name_servers.
+        assert!(
+            !text.contains("protocol = \"tls\""),
+            "named.toml uses `protocol = \"tls\"` on a name_server which \
+             hickory 0.25 no longer accepts; use `udp` or `tcp`, or move \
+             to a dedicated `[[zones.stores]] type = \"tls\"` store when \
+             we pin a newer hickory"
+        );
+        // Must declare at least one upstream (otherwise forwarding zone
+        // has nowhere to send queries).
+        assert!(
+            text.contains("[[zones.stores.name_servers]]")
+                || text.contains("name_servers = ["),
+            "named.toml must declare at least one upstream name_server"
+        );
+    }
+
+    #[test]
+    fn coredhcp_yml_lease_time_is_duration_not_integer() {
+        let text = read_service_config("dhcp/coredhcp.yml");
+        // A `lease_time: <integer>` line is the bug: coredhcp wants a
+        // Go time.Duration string ("12h", "1h30m", etc.), not a raw
+        // number.
+        //
+        // Regex-free check: split on newlines, find any line where
+        // the trimmed text is `- lease_time: <digits>` with no unit
+        // suffix. This catches `- lease_time: 3600` but not
+        // `- lease_time: 12h` or `lease_time: 1h`.
+        for line in text.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("- lease_time:") {
+                let val = rest.trim();
+                assert!(
+                    val.is_empty() || !val.chars().all(|c| c.is_ascii_digit()),
+                    "coredhcp.yml has `{t}` with a bare integer; use a Go \
+                     time.Duration string like \"12h\" instead — coredhcp \
+                     rejects integers with `invalid duration: ...`"
+                );
+            }
+        }
+        // Also verify addresses point at 192.168.1.x (not the stale
+        // 192.168.8.x GL.iNet default the repo shipped with for a while).
+        assert!(
+            !text.contains("192.168.8."),
+            "coredhcp.yml references 192.168.8.x — stale GL.iNet default; \
+             our LAN is 192.168.1.x per config/oxwrt.toml"
+        );
+    }
+
+    #[test]
+    fn ntp_toml_is_valid_toml() {
+        let text = read_service_config("ntp/ntp.toml");
+        let _: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("ntp.toml not valid TOML: {e}"));
+        // Minimum: at least one [[source]] block, otherwise ntpd
+        // doesn't know who to sync against.
+        assert!(
+            text.contains("[[source]]"),
+            "ntp.toml must declare at least one [[source]] pool/server"
+        );
+    }
 }
