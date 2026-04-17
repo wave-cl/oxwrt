@@ -115,7 +115,138 @@ $(BUILD_SERVICES)/dhcp/coredhcp:
 	CXX="zig c++ -target aarch64-linux-musl" \
 	go build -o $(CURDIR)/$@ .
 
-# ── OpenWRT image ────────────────────────────────────────────────────
+# ── OpenWrt imagebuilder ────────────────────────────────────────────
+#
+# Alternate path to an image: instead of rebuilding the OpenWrt kernel
+# and packages from source (the `image` target above), the imagebuilder
+# consumes prebuilt upstream packages for the target profile and just
+# assembles them into a sysupgrade image along with our overlay.
+#
+# Why use it during bring-up: 2-minute builds vs 30+ for a full buildroot,
+# and we don't need a custom kernel yet. Once oxwrt needs to change the
+# kernel config (e.g. to trim, add verity, etc.), switch back to `image`.
+#
+# Requires:
+#   - Docker (for the build sandbox — host libc != target libc)
+#   - The imagebuilder tarball under imagebuilder/  (.gitignored; see
+#     the README in openwrt-packages/imagebuilder-overlay/)
+#
+# The resulting sysupgrade image lands at:
+#   imagebuilder/<imagebuilder-dir>/bin/targets/<target>/<image>-sysupgrade.bin
+#
+# kmod-veth is explicitly pulled in: hickory-dns + ntpd-rs run in
+# isolated netns that are wired to the host via veth pairs. Without
+# the module, container::spawn for an isolated service errors with
+# "rtnetlink: Not supported (os error 95)".
+
+IMAGEBUILDER_DIR ?= imagebuilder/openwrt-imagebuilder-25.12.2-mediatek-filogic.Linux-x86_64
+IMAGEBUILDER_PROFILE ?= glinet_gl-mt6000
+IMAGEBUILDER_PACKAGES := \
+	kmod-veth \
+	nftables \
+	-dnsmasq -dnsmasq-full -odhcpd-ipv6only -odhcpd \
+	-firewall4 -kmod-nft-offload
+
+.PHONY: imagebuilder-stage imagebuilder-image
+
+# Populate the imagebuilder's files/ overlay from our tracked overlay
+# + the cross-built binaries. Separated from `imagebuilder-image` so an
+# operator can inspect what gets shipped before the Docker build runs.
+imagebuilder-stage: rust-oxwrtctl services-stage
+	@if [ ! -d "$(IMAGEBUILDER_DIR)" ]; then \
+		echo "ERROR: $(IMAGEBUILDER_DIR) not found. Download the imagebuilder for mediatek/filogic from"; \
+		echo "  https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/"; \
+		echo "and extract under imagebuilder/."; \
+		exit 1; \
+	fi
+	mkdir -p $(IMAGEBUILDER_DIR)/files
+	# Clean previous stage so removed files don't linger.
+	rm -rf $(IMAGEBUILDER_DIR)/files/*
+	# Tracked overlay (init.d, uci-defaults, default authorized_keys).
+	cp -a openwrt-packages/imagebuilder-overlay/files/. $(IMAGEBUILDER_DIR)/files/
+	# Default runtime config. Operators can override via the sQUIC
+	# control plane after first boot. (Using cp/install + mkdir pair
+	# because macOS BSD install lacks -D.)
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
+	         $(IMAGEBUILDER_DIR)/files/usr/bin
+	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
+	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	# Service binaries at the rootfs-root paths the oxwrt.toml
+	# entrypoints expect.
+	for svc in dns ntp dhcp; do \
+		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc; \
+	done
+	cp -L $(BUILD_SERVICES)/dns/hickory-dns \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dns/rootfs/hickory-dns
+	cp -L $(BUILD_SERVICES)/ntp/ntp-daemon \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/rootfs/ntp-daemon
+	cp -L $(BUILD_SERVICES)/dhcp/coredhcp \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/rootfs/coredhcp
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dns/rootfs/hickory-dns \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/rootfs/ntp-daemon \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/rootfs/coredhcp
+	# Host-side config bind-mount sources.
+	cp config/services/dns/named.toml \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dns/named.toml
+	cp config/services/ntp/ntp.toml \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/ntp.toml
+	cp config/services/dhcp/coredhcp.yml \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
+	# Minimal passwd/group inside service rootfs (see per-package
+	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
+	for svc in dns ntp dhcp; do \
+		printf 'root:x:0:0:root:/:/bin/false\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
+			> $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc/passwd; \
+		printf 'root:x:0:\nnobody:x:65534:\n' \
+			> $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc/group; \
+	done
+	# Default mode: services-only. Operators who want full PID-1-like
+	# behavior edit this file and reboot.
+	echo services-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
+	# SSH authorized_keys — pulled from the operator's ~/.ssh/id_ed25519.pub
+	# at stage time so the flashed image lets them in. Not committed to
+	# git (each operator bakes their own). If the key is missing, warn
+	# and continue with an empty file — the image will still boot but
+	# only the sQUIC control plane will be reachable until they push an
+	# authorized_keys over it.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/dropbear
+	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
+		cp "$$HOME/.ssh/id_ed25519.pub" $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+		chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+	else \
+		echo "WARNING: ~/.ssh/id_ed25519.pub not found; flashed image will have no SSH keys"; \
+		touch $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+	fi
+	# Control-plane authorized_keys file is intentionally empty in the
+	# default image — an empty file makes the sQUIC server accept any
+	# valid MAC1 client. Operators who want pubkey pinning should push
+	# their control key post-flash via the `oxwrtctl --print-server-key`
+	# workflow. The file must exist (server fails to start without it).
+	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
+	@echo ""
+	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
+
+imagebuilder-image: imagebuilder-stage
+	# Run inside a Docker sandbox because the host (macOS or similar)
+	# isn't case-sensitive and the OpenWrt build refuses that. Copy
+	# into an in-container ext4 dir first.
+	docker run --rm -v $(CURDIR)/$(IMAGEBUILDER_DIR):/src \
+		debian:bookworm-slim bash -c '\
+		apt-get update && apt-get install -y --no-install-recommends \
+			make gcc gettext zlib1g-dev libncurses-dev \
+			python3 python3-setuptools file perl wget rsync \
+			unzip gzip zstd xz-utils 2>&1 | tail -3 && \
+		cp -a /src /build && cd /build && \
+		make image PROFILE=$(IMAGEBUILDER_PROFILE) \
+			PACKAGES="$(IMAGEBUILDER_PACKAGES)" \
+			FILES=/build/files && \
+		rm -rf /src/bin && cp -a /build/bin /src/bin'
+	@echo ""
+	@echo "Image(s) at:"
+	@find $(IMAGEBUILDER_DIR)/bin -name '*sysupgrade*' -ls
+
+# ── OpenWRT image (full buildroot) ──────────────────────────────────
 
 image: rust $(OPENWRT_DIR)/.config
 	@# Copy overlay files into the OpenWRT files/ directory so they
