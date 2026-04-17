@@ -130,6 +130,17 @@ echo "Container: $CONTAINER"
 # Wait for the control plane to be ready
 sleep 3
 
+# Sync the container's wall clock to the host's. Docker Desktop's
+# Linux VM usually shares host time, but after a Mac sleep/wake cycle
+# or a long build the VM clock can drift — enough to fall outside
+# squic's 120s replay window, which causes every handshake to
+# silent-drop and this test to report 41 "handshake timed out"
+# failures that are actually clock skew, not real bugs.
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+docker exec "$CONTAINER" sh -c "date -u -s '$NOW'" >/dev/null 2>&1 || {
+    echo "warning: couldn't sync container clock; tests may fail with squic handshake timeouts"
+}
+
 # Wait for control plane to be ready. Skip docker ps check
 # (Docker Desktop API can be flaky — 500 errors on /containers/json
 # even when the container is running fine).
