@@ -170,7 +170,185 @@ IMAGEBUILDER_PACKAGES := \
 # chains (MASQUERADE + DNAT). Ships with firewall4 as a dependency,
 # so usually present — we pin it explicitly for forward-compat.
 
-.PHONY: imagebuilder-stage imagebuilder-image
+.PHONY: imagebuilder-stage imagebuilder-image \
+        imagebuilder-stage-bare imagebuilder-stage-init \
+        imagebuilder-stage-uci99 imagebuilder-stage-uci98 \
+        imagebuilder-stage-uci97
+
+# ── Bisect targets for the post-flash boot-hang investigation ───────
+#
+# The full image (`imagebuilder-stage`) doesn't boot cleanly on the
+# Flint 2 — device is unreachable on the LAN after a clean flash.
+# These progressively-richer staging targets let us bisect which
+# layer of the overlay breaks boot. Each one `rm -rf`s files/ and
+# stages only its own subset — so flashing a build from
+# `imagebuilder-stage-bare` reveals whether the flash mechanism itself
+# is OK, flashing `-init` reveals whether our init.d script is the
+# problem, and so on up to the full image.
+#
+# Suggested sequence (see the "Image boot-hang: bisect via minimal
+# images" task chip for the full workflow):
+#   make imagebuilder-stage-bare  && make imagebuilder-image
+#   [flash via sysupgrade -n, verify reachable]
+#   make imagebuilder-stage-init  && make imagebuilder-image
+#   [flash, verify]
+#   ...continue escalating until one of them hangs boot.
+#
+# Invariant: each target is self-contained (cleans files/ first and
+# rebuilds its subset). They are not chained via recipe dependency
+# because make's mtime-based up-to-date logic would skip the rm-rf
+# and leak artifacts from a previous layer.
+
+# ── stage-bare: minimal image (oxwrtctl binary only) ────────────────
+#
+# Populates files/ with:
+#   /usr/bin/oxwrtctl
+#   /etc/oxwrt.toml
+#   /etc/oxwrt/mode                (= "control-only" default)
+#   /etc/oxwrt/authorized_keys     (empty — accept all MAC1 clients)
+#   /etc/dropbear/authorized_keys  (operator's ~/.ssh/id_ed25519.pub)
+#
+# Deliberately OMITS:
+#   /etc/init.d/oxwrtctl           (no procd integration)
+#   /etc/uci-defaults/97, 98, 99   (no first-boot scripts)
+#   /usr/lib/oxwrt/services/*      (no service rootfs, no binaries)
+#
+# Expected behavior post-flash: device boots stock OpenWrt with an
+# unused binary present but no auto-start. Operator SSHes in, runs
+# `/usr/bin/oxwrtctl --control-only` manually to confirm the binary
+# works. This baseline proves the flash mechanism itself is fine
+# (same assumption as stock OpenWrt).
+imagebuilder-stage-bare: rust-oxwrtctl
+	$(call imagebuilder_check_dir)
+	$(call imagebuilder_clean_files)
+	$(call imagebuilder_stage_bare)
+	@echo ""
+	@echo "Staged BARE layer (binary + /etc/oxwrt + ssh keys). No init.d, no uci-defaults, no service rootfs."
+
+# ── stage-init: + /etc/init.d/oxwrtctl ──────────────────────────────
+#
+# Everything in -bare, plus the procd init script. Still no
+# uci-defaults, so the init script is shipped but NOT enabled at
+# boot — it doesn't appear in /etc/rc.d/S* on first boot. The
+# operator has to `/etc/init.d/oxwrtctl enable; start` from a shell.
+#
+# Tests whether the init.d shell script itself (the one with the
+# mode dispatcher) has a syntax / sourcing bug that breaks boot.
+# Even unenabled, procd scans /etc/init.d/ at boot for metadata —
+# a broken START=/STOP= directive or shellfail could in principle
+# upset preinit.
+imagebuilder-stage-init: rust-oxwrtctl
+	$(call imagebuilder_check_dir)
+	$(call imagebuilder_clean_files)
+	$(call imagebuilder_stage_bare)
+	$(call imagebuilder_stage_init)
+	@echo ""
+	@echo "Staged INIT layer (+ /etc/init.d/oxwrtctl). Still no uci-defaults."
+
+# ── stage-uci99: + 99-oxwrtctl uci-defaults ─────────────────────────
+#
+# Adds only the enable-on-first-boot hook. If the full image's hang
+# is caused by a misbehavior in /etc/init.d/oxwrtctl enable (which
+# procd runs via uci-defaults at preinit), this layer should
+# reproduce it — the 99 script's only action is `enable`.
+imagebuilder-stage-uci99: rust-oxwrtctl
+	$(call imagebuilder_check_dir)
+	$(call imagebuilder_clean_files)
+	$(call imagebuilder_stage_bare)
+	$(call imagebuilder_stage_init)
+	$(call imagebuilder_stage_uci, 99-oxwrtctl)
+	@echo ""
+	@echo "Staged UCI99 layer (+ 99-oxwrtctl uci-default = enable on first boot)."
+
+# ── stage-uci98: + 98-oxwrt-diag-rootfs ─────────────────────────────
+#
+# Adds the diag rootfs provisioner (copies /bin/ping + musl libs into
+# /usr/lib/oxwrt/diag at first boot). Pure filesystem work — no
+# service registration or netlink — but it's the largest of our
+# uci-defaults scripts and touches many files.
+imagebuilder-stage-uci98: rust-oxwrtctl
+	$(call imagebuilder_check_dir)
+	$(call imagebuilder_clean_files)
+	$(call imagebuilder_stage_bare)
+	$(call imagebuilder_stage_init)
+	$(call imagebuilder_stage_uci, 99-oxwrtctl)
+	$(call imagebuilder_stage_uci, 98-oxwrt-diag-rootfs)
+	@echo ""
+	@echo "Staged UCI98 layer (+ 98-oxwrt-diag-rootfs)."
+
+# ── stage-uci97: + 97-oxwrt-debug-ssh-rootfs ────────────────────────
+#
+# The debug-ssh provisioner. Previously buggy (set -e on missing
+# dropbear host keys, fixed in 82f3151). If the full image's hang
+# comes from ANY residual issue with this script's first-boot
+# behavior, this is where it'll surface.
+imagebuilder-stage-uci97: rust-oxwrtctl
+	$(call imagebuilder_check_dir)
+	$(call imagebuilder_clean_files)
+	$(call imagebuilder_stage_bare)
+	$(call imagebuilder_stage_init)
+	$(call imagebuilder_stage_uci, 99-oxwrtctl)
+	$(call imagebuilder_stage_uci, 98-oxwrt-diag-rootfs)
+	$(call imagebuilder_stage_uci, 97-oxwrt-debug-ssh-rootfs)
+	@echo ""
+	@echo "Staged UCI97 layer (+ 97-oxwrt-debug-ssh-rootfs — all uci-defaults present)."
+
+# Shared helpers — `define X` gives us macros we call via $(call X).
+# make functions below use $(1), $(2) etc. for positional args.
+
+define imagebuilder_check_dir
+	@if [ ! -d "$(IMAGEBUILDER_DIR)" ]; then \
+		echo "ERROR: $(IMAGEBUILDER_DIR) not found. Download the imagebuilder for mediatek/filogic from"; \
+		echo "  https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/"; \
+		echo "and extract under imagebuilder/."; \
+		exit 1; \
+	fi
+	mkdir -p $(IMAGEBUILDER_DIR)/files
+endef
+
+define imagebuilder_clean_files
+	rm -rf $(IMAGEBUILDER_DIR)/files/*
+endef
+
+define imagebuilder_stage_bare
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
+	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear
+	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
+	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
+	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
+	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
+		cp "$$HOME/.ssh/id_ed25519.pub" $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+		chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+	else \
+		echo "WARNING: ~/.ssh/id_ed25519.pub not found; flashed image will have no SSH keys"; \
+		touch $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
+	fi
+endef
+
+define imagebuilder_stage_init
+	install -d $(IMAGEBUILDER_DIR)/files/etc/init.d
+	cp openwrt-packages/imagebuilder-overlay/files/etc/init.d/oxwrtctl \
+	   $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtctl
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtctl
+endef
+
+# $(1) = uci-defaults script basename (e.g. "99-oxwrtctl"). Wrapped in
+# $(strip) because `$(call F, arg)` — the idiomatic spelling with a
+# space after the comma — passes " arg" with a leading space, which
+# then corrupts the cp path. `$(strip)` canonicalizes.
+define imagebuilder_stage_uci
+	install -d $(IMAGEBUILDER_DIR)/files/etc/uci-defaults
+	cp openwrt-packages/imagebuilder-overlay/files/etc/uci-defaults/$(strip $(1)) \
+	   $(IMAGEBUILDER_DIR)/files/etc/uci-defaults/$(strip $(1))
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/etc/uci-defaults/$(strip $(1))
+endef
+
+# ── stage (full / default) — everything above + service rootfs ──────
+#
+# This is the "real" image. Same behavior as before the bisect
+# scaffolding was added.
 
 # Populate the imagebuilder's files/ overlay from our tracked overlay
 # + the cross-built binaries. Separated from `imagebuilder-image` so an
