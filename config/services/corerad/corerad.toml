@@ -1,0 +1,41 @@
+# CoreRAD — IPv6 Router Advertisement daemon.
+#
+# Sends RAs on br-lan so IPv6-capable clients on the LAN auto-configure
+# an address via SLAAC from a static ULA /64. Paired with coredhcp (DHCPv4
+# for now; DHCPv6 optional later if we want stateful v6 assignment).
+#
+# Bind-mounted read-only into the corerad service container at
+# /etc/corerad.toml. The binary (./corerad) is at the container rootfs-
+# root and gets invoked as `corerad -c /etc/corerad.toml`.
+
+# ULA prefix. fd00::/8 is the ULA block (RFC 4193); fdbe:cafe::/64
+# chosen deterministically rather than randomly so flashes are
+# reproducible. If multiple oxwrt units share a LAN, pick distinct
+# middle bits per unit (or generate from the MAC of br-lan at init
+# time — follow-up work, not needed for a single-router home).
+[[interfaces]]
+  names = ["br-lan"]
+  advertise = true
+  # Send an unsolicited RA every 180s. RFC 4861 default is 600s but
+  # 180s gets clients to pick up changes faster with negligible
+  # overhead on a LAN.
+  max_interval = "180s"
+  min_interval = "auto"          # -> 0.33 * max = 60s
+  # Router lifetime (default in corerad is 3 * max_interval). Pin
+  # explicitly so expectations stay clear.
+  default_lifetime = "1800s"
+  # M=0, O=0 — pure SLAAC. Clients do not attempt DHCPv6. Flip to
+  # M=1 (managed) later when we enable coredhcp v6 stateful.
+  managed = false
+  other_config = false
+
+  [[interfaces.prefix]]
+    prefix = "fdbe:cafe::/64"
+    # on_link = clients treat the prefix as reachable without going
+    # through a router. Standard for a LAN segment.
+    on_link = true
+    # autonomous = SLAAC — clients auto-generate an address from
+    # this prefix + their interface ID.
+    autonomous = true
+    # Lifetimes — how long the prefix/address is valid/preferred.
+    # Defaults (4h preferred, 24h valid) are fine for steady state.

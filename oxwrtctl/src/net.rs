@@ -291,6 +291,20 @@ pub fn enable_ipv4_forwarding() -> Result<(), Error> {
     Ok(())
 }
 
+/// Enable IPv6 forwarding. Required for corerad's RA emission to make
+/// sense — the kernel will emit the "no global IPv6" warning and drop
+/// packets that would need to route otherwise. Also flips
+/// `accept_ra=2` on `all` so forwarding hosts keep learning from
+/// upstream RAs (the default is 1 on non-forwarding, 0 on forwarding).
+/// Idempotent.
+pub fn enable_ipv6_forwarding() -> Result<(), Error> {
+    std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1\n")?;
+    // Best-effort; on a freshly booted box these may not exist for every
+    // interface yet. Ignore errors (the write above is the essential one).
+    let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/accept_ra", "2\n");
+    Ok(())
+}
+
 /// Install the complete nftables ruleset: inet filter (input/forward/
 /// output), NAT masquerade for zones with `masquerade = true`, and DNAT
 /// rules for `action = "dnat"` rules. Everything in one function —

@@ -77,9 +77,36 @@ rust-oxwrtctl:
 BUILD_SERVICES := build-services
 AR_AARCH64     ?= $(shell command -v /Users/c/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v /opt/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v aarch64-linux-gnu-ar 2>/dev/null || echo ar)
 
-.PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh
+.PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh services-corerad
 
-services-stage: services-dns services-ntp services-dhcp services-debug-ssh
+services-stage: services-dns services-ntp services-dhcp services-debug-ssh services-corerad
+
+# ── CoreRAD (IPv6 Router Advertisement daemon) ──────────────────────
+#
+# mdlayher/corerad is the RA half of what odhcpd-ipv6only used to do
+# (coredhcp owns the DHCP half, v4 and v6). Pure Go, no CGO — simpler
+# build than coredhcp. Sends ICMPv6 Router Advertisements so IPv6-
+# capable clients on the LAN can SLAAC an address from a ULA /64.
+#
+# Pinned to a release tag rather than `main` so reproducible builds
+# land in the image, and so we know when to review upstream CHANGES.
+
+COREDHCP_COMMIT  ?= $(shell cd /tmp/coredhcp-src 2>/dev/null && git rev-parse HEAD || echo unknown)
+CORERAD_VERSION  ?= v1.3.1
+
+services-corerad: $(BUILD_SERVICES)/corerad/corerad
+$(BUILD_SERVICES)/corerad/corerad:
+	# Pure Go, no CGO — just cross-compile with GOARCH=arm64. musl is
+	# irrelevant for a statically-linked Go binary.
+	mkdir -p $(BUILD_SERVICES)/corerad /tmp/corerad-src
+	[ -d /tmp/corerad-src/.git ] || git clone --depth=1 --branch $(CORERAD_VERSION) \
+	  https://github.com/mdlayher/corerad.git /tmp/corerad-src
+	cd /tmp/corerad-src && \
+	  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+	  go build -trimpath -ldflags="-s -w" -o $(CURDIR)/$@ ./cmd/corerad
+	@echo ""
+	@echo "Staged corerad $(CORERAD_VERSION) under $(BUILD_SERVICES)/corerad/:"
+	@ls -la $@
 
 # ── Static dropbear for debug-ssh container ─────────────────────────
 #
@@ -459,7 +486,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
 	# Service binaries at the rootfs-root paths the oxwrt.toml
 	# entrypoints expect.
-	for svc in dns ntp dhcp; do \
+	for svc in dns ntp dhcp corerad; do \
 		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc; \
 	done
 	cp -L $(BUILD_SERVICES)/dns/hickory-dns \
@@ -468,7 +495,10 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/rootfs/ntp-daemon
 	cp -L $(BUILD_SERVICES)/dhcp/coredhcp \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/rootfs/coredhcp
+	cp -L $(BUILD_SERVICES)/corerad/corerad \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/rootfs/corerad
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dns/rootfs/hickory-dns \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/rootfs/corerad \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/rootfs/ntp-daemon \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/rootfs/coredhcp
 	# Host-side config bind-mount sources.
@@ -478,6 +508,8 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/ntp/ntp.toml
 	cp config/services/dhcp/coredhcp.yml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
+	cp config/services/corerad/corerad.toml \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/corerad.toml
 	# Writable lease-file dir on the host side.
 	#
 	# DO NOT stage under files/var/ — OpenWrt ships /var as a symlink
@@ -502,7 +534,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/coredhcp/leases.txt
 	# Minimal passwd/group inside service rootfs (see per-package
 	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
-	for svc in dns ntp dhcp; do \
+	for svc in dns ntp dhcp corerad; do \
 		printf 'root:x:0:0:root:/:/bin/false\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
 			> $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc/passwd; \
 		printf 'root:x:0:\nnobody:x:65534:\n' \

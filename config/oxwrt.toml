@@ -328,6 +328,36 @@ caps = [
 # seccomp = true        # default
 # landlock = true       # default
 
+# --- corerad: IPv6 Router Advertisement daemon ---
+#
+# Sends ICMPv6 RAs on br-lan so clients SLAAC from our ULA /64. Pairs
+# with coredhcp (DHCPv4 now, DHCPv6 optional later). Replaces the RA
+# half of odhcpd-ipv6only (which we dropped in Stage 5).
+#
+# net_mode=host: corerad binds a raw ICMPv6 socket on br-lan and reads
+# rtnetlink events for link/addr changes. Both require being in the
+# host netns.
+[[services]]
+name = "corerad"
+rootfs = "/usr/lib/oxwrt/services/corerad/rootfs"
+entrypoint = ["/corerad", "-c", "/etc/corerad.toml"]
+net_mode = "host"
+memory_max = 33554432
+pids_max = 16
+depends_on = []
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/corerad/corerad.toml"
+target = "/etc/corerad.toml"
+
+# corerad needs CAP_NET_RAW for the ICMPv6 raw socket (mandatory) and
+# CAP_NET_ADMIN so it can toggle /proc/sys/net/ipv6/conf/<if>/accept_ra
+# + subscribe to rtnetlink link/addr notifications. Without NET_ADMIN
+# it still runs but won't disable kernel autoconf on the advertising
+# iface.
+[services.security]
+caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_RAW", "NET_ADMIN"]
+
 # --- ntpd-rs: NTP client + server ---
 [[services]]
 name = "ntp"

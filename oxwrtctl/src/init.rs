@@ -502,6 +502,11 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             tracing::error!(error = %e, "enable_ipv4_forwarding failed");
         }
     }
+    // IPv6 forwarding — harmless without v6 connectivity, required for
+    // corerad's RAs on a routing LAN. Idempotent.
+    if let Err(e) = net::enable_ipv6_forwarding() {
+        tracing::error!(error = %e, "enable_ipv6_forwarding failed");
+    }
 
     let supervisor = Supervisor::from_config(&cfg.services);
     let logd = Logd::new();
