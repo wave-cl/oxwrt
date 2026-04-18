@@ -174,7 +174,9 @@ IMAGEBUILDER_PACKAGES := \
         imagebuilder-stage-bare imagebuilder-stage-init \
         imagebuilder-stage-uci99 imagebuilder-stage-uci98 \
         imagebuilder-stage-uci97 imagebuilder-stage-pid1 \
-        imagebuilder-image-pid1 .imagebuilder-build
+        imagebuilder-stage-pid1-standalone \
+        imagebuilder-image-pid1 imagebuilder-image-pid1-standalone \
+        .imagebuilder-build
 
 # ── Bisect targets for the post-flash boot-hang investigation ───────
 #
@@ -465,7 +467,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
 
-# ── stage-pid1: full stage + PID-1 takeover ─────────────────────────
+# ── stage-pid1: full stage + PID-1 takeover (procd COEXIST) ────────
 #
 # Runs imagebuilder-stage, then layers the /sbin/procd override on top.
 #
@@ -504,6 +506,47 @@ imagebuilder-stage-pid1: imagebuilder-stage
 	# install, leaving the device without networking (pre-takeover
 	# procd isn't there to do it either).
 	echo init > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
+
+# ── stage-pid1-standalone: full stage + DIRECT pid1 takeover ───────
+#
+# Beyond stage-pid1: ALSO replaces /sbin/init with oxwrtctl, so the
+# kernel hands control to our Rust binary DIRECTLY at boot. procd-
+# init never runs; neither do /etc/preinit or /lib/preinit/*.sh. All
+# responsibilities they owned (kmodloader via finit_module + modules.
+# dep, netdev rename from DTS labels, mount_root with loop0+f2fs+
+# overlayfs+pivot_root, config-backup restore from DEADCODE marker)
+# are owned by init::run() in src/init.rs.
+#
+# Safety changes vs stage-pid1:
+#   - NO procd-init failsafe net. If our mount_root bugs out, the
+#     device can't read /etc/oxwrt.toml, can't start the control
+#     plane, can't be recovered over LAN.
+#   - debug-ssh is still built into the rootfs, but it only spawns
+#     AFTER mount_root (its rootfs lives in /usr/lib/oxwrt/services/
+#     debug-ssh/, which is on the squashfs — readable, but its
+#     dropbearkey-generated hostkeys live in /etc/oxwrt-ssh which is
+#     on overlay). So debug-ssh is effectively tied to mount_root's
+#     success.
+#   - U-Boot web recovery (reset held at power-on) is the only
+#     fallback for a broken boot.
+#
+# For the first deploy, the sensible path is: keep the currently-
+# booted `stage-pid1` image installed, deploy `stage-pid1-standalone`
+# via native-sysupgrade, and have U-Boot recovery staged.
+imagebuilder-stage-pid1-standalone: imagebuilder-stage-pid1
+	# Overwrite procd-init at /sbin/init. The kernel's default
+	# init= argument resolves to /sbin/init; replacing that binary
+	# (not a symlink — the stock image ships it as a 65KB ELF) with
+	# oxwrtctl makes us pid 1 from the very first user-space
+	# instruction.
+	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/sbin/init
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/sbin/init
+	@echo ""
+	@echo "⚠️  pid1-standalone staged."
+	@echo "    Self-update from a working pid1 image ONLY, and keep"
+	@echo "    U-Boot recovery ready."
+
+imagebuilder-image-pid1-standalone: imagebuilder-stage-pid1-standalone .imagebuilder-build
 	@echo ""
 	@echo "PID-1 takeover layer applied:"
 	@echo "  /sbin/procd  → oxwrtctl ($$(du -h $(IMAGEBUILDER_DIR)/files/sbin/procd | cut -f1))"
