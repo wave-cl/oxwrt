@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             println!("oxwrtctl {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("--help") | Some("-h") => {
+        Some("--help") => {
             print_usage();
             ExitCode::SUCCESS
         }
