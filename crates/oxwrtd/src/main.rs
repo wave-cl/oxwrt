@@ -20,9 +20,13 @@ fn main() -> ExitCode {
     // may be closed or pointed at /dev/null — procd-init does this
     // normally in early_console(); stock OpenWrt gives us nothing
     // when we replace procd-init.
+    // init module is linux-only; the console hand-off + panic hook
+    // only matter when we're actually pid 1 on the device. On non-
+    // linux hosts there's nothing to do.
+    #[cfg(target_os = "linux")]
     if is_pid1 {
-        early_console();
-        install_panic_hook();
+        init::console::early_console();
+        init::console::install_panic_hook();
     }
     init_tracing();
     let mut args = std::env::args().skip(1);
@@ -651,73 +655,5 @@ fn run_attach_netns(_args: Vec<String>) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Open /dev/console and dup it to stdin/stdout/stderr. When the
-/// kernel execs /sbin/init as pid 1 directly, fds 0/1/2 may be
-/// closed or pointed at the wrong place depending on kernel config.
-/// Without this step every eprintln / tracing::error goes into the
-/// void — and a panicking init loses its backtrace, making bootloop
-/// diagnosis impossible.
-///
-/// Procd-init's `early_console()` in procd/initd/early.c does the
-/// equivalent. Best-effort: if /dev/console is missing (early
-/// boot, /dev not yet populated by devtmpfs), silently continue —
-/// the rest of the boot may still succeed and we can read logs via
-/// /dev/kmsg later.
-#[cfg(target_os = "linux")]
-fn early_console() {
-    use std::os::fd::{AsRawFd, IntoRawFd};
-    let Ok(console) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/console")
-    else {
-        return;
-    };
-    let fd = console.as_raw_fd();
-    // dup3 to get each target fd (0, 1, 2). Safe because the target
-    // fds are either closed or ones we can clobber (we're pid 1,
-    // there's nothing else running to care).
-    for target in 0..=2 {
-        if target != fd {
-            unsafe {
-                // Use dup2 — simpler than dup3, no O_CLOEXEC needed
-                // (we want these to survive execve into children).
-                let _ = libc::dup2(fd, target);
-            }
-        }
-    }
-    // Intentionally leak the console file so the original fd stays
-    // open even if the temporary File is dropped. Without this, the
-    // console fd can close underneath our stdio.
-    let _ = console.into_raw_fd();
-}
-
-#[cfg(not(target_os = "linux"))]
-fn early_console() {}
-
-/// Install a panic hook that prints the panic to stderr (now
-/// console-attached) AND writes to /dev/kmsg so a bootloop's UART
-/// output has the panic details. Without this hook, a Rust panic
-/// in pid 1 produces just "panicked at ..." to stderr and the
-/// kernel immediately reboots without dmesg capturing anything.
-#[cfg(target_os = "linux")]
-fn install_panic_hook() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // Write to stderr first (our console).
-        eprintln!("===== OXWRTCTL PANIC =====");
-        default_hook(info);
-        eprintln!("===== /OXWRTCTL PANIC =====");
-        // Then try /dev/kmsg so dmesg captures it too.
-        use std::io::Write as _;
-        if let Ok(mut kmsg) = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/kmsg")
-        {
-            let _ = writeln!(kmsg, "oxwrtd PANIC: {info}");
-        }
-    }));
-}
-
-#[cfg(not(target_os = "linux"))]
-fn install_panic_hook() {}
+// early_console + install_panic_hook moved to init/console.rs during
+// step 6 of the workspace refactor. Invoked above in `main()`.
