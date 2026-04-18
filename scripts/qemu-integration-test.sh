@@ -344,6 +344,38 @@ else
     echo "       got: $(echo "$R" | head -3)"
 fi
 
+echo "-- backup / restore --"
+BACKUP_PATH="$BUILD_DIR/backup.tar.gz"
+# Take a backup, redirect to file. Backup response writes raw bytes
+# to stdout (not the normal text-formatted path).
+if $CLIENT 127.0.0.1:51820 backup > "$BACKUP_PATH" 2>/dev/null; then
+    # Validate it's a real gzipped tar.
+    if file "$BACKUP_PATH" 2>/dev/null | grep -q "gzip compressed"; then
+        PASS=$((PASS + 1))
+        echo "  OK   backup (gzip output)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL backup — wrong file type: $(file "$BACKUP_PATH")"
+    fi
+    # Should contain oxwrt.toml.
+    if tar -tzf "$BACKUP_PATH" 2>/dev/null | grep -q "^oxwrt.toml$"; then
+        PASS=$((PASS + 1))
+        echo "  OK   backup contains oxwrt.toml"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL backup missing oxwrt.toml"
+    fi
+else
+    FAIL=$((FAIL + 2))
+    echo "  FAIL backup — RPC failed"
+fi
+# Restore without --confirm is rejected.
+R=$(run_cmd restore "$BACKUP_PATH")
+check_err "restore without confirm" "confirm" "$R"
+# Restore with --confirm succeeds (roundtrip the same backup back in).
+R=$(run_cmd restore "$BACKUP_PATH" --confirm)
+check_ok "restore with confirm" "$R"
+
 echo "-- ddns CRUD --"
 R=$(run_cmd ddns list); check "ddns list (empty)" "[]" "$R"
 R=$(run_cmd ddns add '{"provider":"duckdns","name":"home","domain":"myrouter","token":"tok"}')

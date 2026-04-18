@@ -104,6 +104,32 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
                     }
                     continue;
                 }
+                // Backup response is base64-encoded tar.gz — decode
+                // and write raw bytes to stdout so the operator can
+                // redirect: `oxctl .. backup > backup.tar.gz`. For
+                // any other Value response, fall through to the
+                // normal text-formatting path.
+                if matches!(request, Request::Backup) {
+                    if let Response::Value { value } = &resp {
+                        use base64::Engine as _;
+                        match base64::engine::general_purpose::STANDARD.decode(value) {
+                            Ok(bytes) => {
+                                use std::io::Write as _;
+                                let mut out = std::io::stdout().lock();
+                                if let Err(e) = out.write_all(&bytes) {
+                                    eprintln!("oxctl: write stdout: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("oxctl: backup decode: {e}");
+                            }
+                        }
+                        if last {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let formatted = format_response(&resp);
                 print!("{formatted}");
                 if !formatted.ends_with('\n') {

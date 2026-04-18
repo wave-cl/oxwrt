@@ -23,6 +23,10 @@ serde.workspace = true
 # computes the SHA-256 up-front so the server can verify on receipt.
 sha2.workspace = true
 hex.workspace = true
+# Used by `parse_request("restore", ...)` to base64-encode the
+# tarball so it fits into a single rmp-serde frame as a string
+# (raw bytes in a tagged-enum field would need extra rmp cfg).
+base64.workspace = true
 # `default_config_text` renders into TOML and we want a round-trip
 # test that parses it back via oxwrt-api::Config.
 [dev-dependencies]

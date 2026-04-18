@@ -1329,6 +1329,7 @@ dependencies = [
 name = "oxwrt-proto"
 version = "0.1.1"
 dependencies = [
+ "base64",
  "hex",
  "oxwrt-api",
  "rmp-serde",
@@ -1343,6 +1344,7 @@ dependencies = [
 name = "oxwrtctl-cli"
 version = "0.1.1"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "hex",
  "oxwrt-api",
@@ -1358,6 +1360,7 @@ dependencies = [
 name = "oxwrtd"
 version = "0.1.1"
 dependencies = [
+ "base64",
  "bytes",
  "ed25519-dalek",
  "flate2",

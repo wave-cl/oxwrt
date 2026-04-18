@@ -35,3 +35,6 @@ hex.workspace = true
 # Used only by the `--print-server-key` subcommand.
 ed25519-dalek.workspace = true
 tracing-subscriber.workspace = true
+# Used to decode the Backup response's Value into raw bytes so
+# `oxctl .. backup > file.tar.gz` produces a valid archive.
+base64.workspace = true

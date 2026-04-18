@@ -186,6 +186,22 @@ impl Server {
                 continue;
             }
 
+            // Backup: stream /etc/oxwrt/ + /etc/oxwrt.toml as a
+            // base64-encoded tar.gz.
+            if let Request::Backup = &request {
+                let resp = backup::handle_backup();
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+            // Restore: extract + swap, then reload to apply.
+            if let Request::Restore { data_b64, confirm } = &request {
+                let resp = backup::handle_restore(&self.state, data_b64, *confirm).await;
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+
             // WireGuard enroll: server-generated client keypair + a
             // rendered [Interface]+[Peer] .conf text for the operator
             // to hand off. Handled here (not in sync dispatch) because
@@ -220,6 +236,7 @@ impl Server {
 
 // Submodules split out of this file during step 7 of the
 // workspace refactor. See each file's header for scope.
+mod backup;
 mod crud;
 mod diag;
 mod logs;
@@ -302,6 +319,12 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::WgEnroll { .. } => vec![Response::Err {
             message: "BUG: WgEnroll should be handled async upstream".to_string(),
+        }],
+        Request::Backup => vec![Response::Err {
+            message: "BUG: Backup should be handled async upstream".to_string(),
+        }],
+        Request::Restore { .. } => vec![Response::Err {
+            message: "BUG: Restore should be handled async upstream".to_string(),
         }],
         Request::ConfigPush { .. } => vec![Response::Err {
             message: "BUG: ConfigPush should be handled upstream".to_string(),

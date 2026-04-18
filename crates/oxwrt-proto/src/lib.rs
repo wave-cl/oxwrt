@@ -181,6 +181,19 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             Ok(Request::Collection { collection: cmd.to_string(), action })
         }
         "config-dump" => Ok(Request::ConfigDump),
+        "backup" => Ok(Request::Backup),
+        "restore" => {
+            let path = args.first().ok_or("restore: missing <backup-file>")?;
+            let confirm = args.iter().any(|a| a == "--confirm");
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("restore: read {path}: {e}"))?;
+            use base64::Engine as _;
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(Request::Restore {
+                data_b64,
+                confirm,
+            })
+        }
         "config-push" => {
             let path = args.first().ok_or("config-push: missing TOML file path")?;
             let toml = std::fs::read_to_string(path)

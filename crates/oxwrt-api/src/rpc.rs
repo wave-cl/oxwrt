@@ -67,6 +67,23 @@ pub enum Request {
     /// The client's private key is returned in the response and NOT
     /// persisted on the router — if the operator loses it the only
     /// fix is re-enroll (which regenerates).
+    /// Bundle `/etc/oxwrt.toml` + everything under `/etc/oxwrt/`
+    /// into a gzipped tar and return it in the response. Lets an
+    /// operator grab a point-in-time snapshot before risky changes
+    /// (new firmware, config experiments) and restore it later. The
+    /// payload includes the sQUIC signing seed, WG private key,
+    /// authorized_keys, and debug-ssh host keys — restoring it on
+    /// the same device recovers full identity; restoring to a fresh
+    /// device impersonates the original.
+    Backup,
+    /// Replace `/etc/oxwrt.toml` + `/etc/oxwrt/` with the contents
+    /// of a backup tarball. Extracts to a staging dir first, then
+    /// atomically replaces the live tree. Triggers a reload so the
+    /// new config takes effect without a reboot. `confirm` MUST be
+    /// true — accidental restore with a stale backup would roll
+    /// back everything including the sQUIC key (locking the client
+    /// out until UART recovery).
+    Restore { data_b64: String, confirm: bool },
     WgEnroll {
         /// Peer name (unique under `[[wireguard.peers]]`).
         name: String,

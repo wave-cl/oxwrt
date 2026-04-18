@@ -44,6 +44,13 @@ sha2.workspace = true
 # src/ddns.rs for provider list + rationale. rustls-native-roots
 # avoids bundling a webpki-roots.rs into firmware.
 reqwest.workspace = true
+# Backup/restore serializes a tar.gz over the sQUIC control plane
+# as a base64-encoded Value. Raw bytes in a tagged-enum field
+# wouldn't round-trip cleanly through rmp-serde without extra cfg.
+base64.workspace = true
+# Backup uses tempfile to stage the restore extraction before
+# swapping the live /etc/oxwrt/ tree atomically.
+tempfile.workspace = true
 flate2.workspace = true
 tar.workspace = true
 
