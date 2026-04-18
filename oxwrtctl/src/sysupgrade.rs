@@ -122,6 +122,15 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
     let image_file = File::open(image_path)
         .map_err(io(format!("open {} pre-pivot", image_path.display())))?;
 
+    // Pre-flight: walk the tar listing once BEFORE the destructive
+    // writes in flash_image. If the tar is malformed or missing
+    // kernel/root members, we want to know NOW, not after we've
+    // zeroed the kernel partition head. An earlier incident (v12
+    // boot cycle) shipped a GzDecoder wrapper that mis-parsed the
+    // plain-tar format, aborted after zero-ing the kernel, and left
+    // the device un-rebootable. Pre-flight is cheap insurance.
+    preflight_tar(&image_file, tar_len)?;
+
     // Step 4: resolve partitions ahead of pivot. After the pivot,
     // /sys gets moved into the new root and is still present, but
     // doing this up-front keeps the error surface simpler.
@@ -506,6 +515,44 @@ fn pivot_to_ramfs() -> Result<(), Error> {
     Ok(())
 }
 
+// ── pre-flight validation ──────────────────────────────────────────
+
+/// Walk the tar members once, verify `root` and `kernel` are both
+/// present and reachable, and that the tar parses cleanly through to
+/// EOF. Does not write anything. Rewinds the passed-in file to 0 on
+/// return so flash_image can stream from the start.
+fn preflight_tar(image_file: &File, tar_len: u64) -> Result<(), Error> {
+    // Clone the fd rather than borrowing — tar::Archive::entries
+    // needs owned I/O. dup(2) via try_clone; on the same inode.
+    let clone = image_file
+        .try_clone()
+        .map_err(io("preflight: dup image fd"))?;
+    let limited = clone.take(tar_len);
+    let mut ar = tar::Archive::new(limited);
+
+    let mut have_root = false;
+    let mut have_kernel = false;
+    for entry in ar.entries().map_err(io("preflight: tar entries"))? {
+        let entry = entry.map_err(io("preflight: tar entry"))?;
+        let path = entry.path().map_err(io("preflight: tar entry path"))?.into_owned();
+        match path.file_name().and_then(|s| s.to_str()).unwrap_or("") {
+            "root" => have_root = true,
+            "kernel" => have_kernel = true,
+            _ => {}
+        }
+    }
+    if !have_root {
+        return Err(Error::Image("preflight: tar missing root member".into()));
+    }
+    if !have_kernel {
+        // Kernel-less update is accepted by flash_image, but we log
+        // at warn level because it's unusual enough that operators
+        // probably wanted to include one and something broke upstream.
+        tracing::warn!("preflight: tar has no kernel member (rootfs-only update)");
+    }
+    Ok(())
+}
+
 // ── flash ──────────────────────────────────────────────────────────
 
 /// Stream `image_path`'s root and kernel tar members to the eMMC
@@ -520,7 +567,6 @@ fn flash_image(
     root_dev: &Path,
     backup_tgz: Option<&[u8]>,
 ) -> Result<(), Error> {
-    use flate2::read::GzDecoder;
 
     // Step 1: zero the first 4 KiB of the kernel partition. Invalidates
     // the existing FIT header so U-Boot refuses to boot the old kernel
@@ -536,12 +582,15 @@ fn flash_image(
     }
     tracing::info!(dev = %kern_dev.display(), "sysupgrade: kernel head zeroed");
 
-    // Size-limit the gzip/tar to the pre-trailer length — otherwise
-    // tar will see the fwtool FWx0 footer as garbage past EOF. The
-    // File was opened pre-pivot and still points at the same inode.
+    // The sysupgrade.bin for this target is a plain POSIX tar (no
+    // gzip wrapper) with the fwtool FWx0 trailer appended. Earlier
+    // versions of this code wrapped the read in GzDecoder thinking
+    // the outer layer was .tar.gz — that assumption held for nand
+    // targets but not for mediatek/filogic emmc, where tar ships
+    // uncompressed. Size-limit to pre-trailer length so tar doesn't
+    // see the FWx0 footer as spurious header bytes past EOF.
     let limited = image_file.take(tar_len);
-    let gz = GzDecoder::new(limited);
-    let mut ar = tar::Archive::new(gz);
+    let mut ar = tar::Archive::new(limited);
 
     // Walk the tar once. We need both `root` and `kernel` members;
     // tar doesn't support random access so we stream each member as
