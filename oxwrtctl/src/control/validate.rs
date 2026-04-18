@@ -201,7 +201,7 @@ mod tests {
                 phy: "phy0".to_string(),
                 band: "2g".to_string(),
                 channel: 1,
-                disabled: false,
+                ..Default::default()
             }],
             wifi: vec![Wifi {
                 radio: "phy0".to_string(),
@@ -209,7 +209,7 @@ mod tests {
                 security: WifiSecurity::Wpa3Sae,
                 passphrase: "pw".to_string(),
                 network: "lan".to_string(),
-                hidden: false,
+                ..Default::default()
             }],
             services: vec![
                 Service {
@@ -373,6 +373,19 @@ mod tests {
             passphrase: "pw".to_string(),
             network: "guest".to_string(),
             hidden: false,
+            bridge: None,
+            wpa_key_mgmt: None,
+            rsn_pairwise: None,
+            ieee80211w: None,
+            sae_require_mfp: None,
+            macaddr_acl: None,
+            auth_algs: None,
+            ap_isolate: None,
+            max_num_sta: None,
+            wmm_enabled: None,
+            ft_over_ds: None,
+            sae_pwe: None,
+            extra: Vec::new(),
         };
         assert!(check_wifi_refs(&wifi, &cfg).is_ok());
     }
@@ -386,7 +399,7 @@ mod tests {
             security: WifiSecurity::Wpa3Sae,
             passphrase: "pw".to_string(),
             network: "lan".to_string(),
-            hidden: false,
+            ..Default::default()
         };
         let err = check_wifi_refs(&wifi, &cfg).unwrap_err();
         assert!(err.contains("phy99"));
@@ -401,7 +414,7 @@ mod tests {
             security: WifiSecurity::Wpa3Sae,
             passphrase: "pw".to_string(),
             network: "nowhere".to_string(),
-            hidden: false,
+            ..Default::default()
         };
         let err = check_wifi_refs(&wifi, &cfg).unwrap_err();
         assert!(err.contains("nowhere"));

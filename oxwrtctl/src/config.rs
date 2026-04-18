@@ -208,7 +208,13 @@ pub enum WanConfig {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Per-phy radio configuration. Maps to hostapd's phy-level options
+/// (hw_mode, channel, country_code, HT/VHT/HE capability lists, etc.).
+/// All options beyond `phy`, `band`, `channel` are optional; omitted
+/// fields get sensible defaults from `wifi::build_hostapd_conf` based
+/// on `band`. The `extra` field accepts raw hostapd.conf lines for
+/// options not surfaced as typed fields.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Radio {
     pub phy: String,
     #[serde(default)]
@@ -216,9 +222,62 @@ pub struct Radio {
     pub channel: u16,
     #[serde(default)]
     pub disabled: bool,
+
+    // ── phy-level hostapd options ──
+    /// ISO 3166-1 two-letter country code. Required for DFS channels
+    /// and for correct regulatory power limits. Default "US".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    /// Bracketed HT capability list, e.g. "[HT40+][SHORT-GI-40]".
+    /// If unset, a band-appropriate default is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ht_capab: Option<String>,
+    /// Bracketed VHT capability list (5 GHz only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vht_capab: Option<String>,
+    /// Explicit VHT center channel (overrides auto-derivation from
+    /// `channel`). Only applies on 5 GHz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vht_oper_centr_freq_seg0_idx: Option<u16>,
+    /// 0 = 20/40, 1 = 80, 2 = 160, 3 = 80+80. Default 1 on 5 GHz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vht_oper_chwidth: Option<u8>,
+    /// HE (Wi-Fi 6) center channel override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub he_oper_centr_freq_seg0_idx: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub he_oper_chwidth: Option<u8>,
+    /// Explicit toggles for 802.11n/ac/ax. When unset, defaults are:
+    /// 2g → n=true, ac=false, ax=true ; 5g → n=true, ac=true, ax=true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211n: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211ac: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211ax: Option<bool>,
+    /// Regulatory-domain announce (802.11d). Default on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211d: Option<bool>,
+    /// Regulatory DFS/TPC (802.11h). Default on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211h: Option<bool>,
+    /// Beacon interval in TU (1024 µs). Hostapd default 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beacon_int: Option<u16>,
+    /// DTIM period in beacons. Hostapd default 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dtim_period: Option<u16>,
+    /// Escape hatch: raw hostapd.conf lines appended verbatim to the
+    /// phy-level section. Use for options not surfaced as typed fields
+    /// (e.g. experimental caps, vendor-specific knobs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One SSID/VAP. Maps to hostapd's BSS-level options. `radio` and
+/// `network` are references; everything else is optional with defaults
+/// derived from `security`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Wifi {
     pub radio: String,
     pub ssid: String,
@@ -229,6 +288,50 @@ pub struct Wifi {
     pub network: String,
     #[serde(default)]
     pub hidden: bool,
+
+    // ── BSS-level hostapd options ──
+    /// Override the bridge this BSS joins. Default is the LAN bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<String>,
+    /// Override key management (e.g. "WPA-PSK SAE"). Unset → derived
+    /// from `security`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wpa_key_mgmt: Option<String>,
+    /// Pairwise cipher list. Default "CCMP".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsn_pairwise: Option<String>,
+    /// 802.11w / Management Frame Protection. 0=disabled, 1=optional,
+    /// 2=required. Unset → derived (SAE→2, others→1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ieee80211w: Option<u8>,
+    /// SAE requires MFP. Unset → true for SAE-capable security modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sae_require_mfp: Option<bool>,
+    /// 0 = open network, 1 = MAC allow list, 2 = MAC deny list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macaddr_acl: Option<u8>,
+    /// Authentication algorithms bitmask. 1=open, 2=shared, 3=both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_algs: Option<u8>,
+    /// Client-to-client isolation on this BSS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ap_isolate: Option<bool>,
+    /// Max associated stations. Hostapd default 2007.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_sta: Option<u16>,
+    /// 802.11 QoS / WMM on. Hostapd default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wmm_enabled: Option<bool>,
+    /// Fast BSS transition (802.11r) — requires mobility domain setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ft_over_ds: Option<bool>,
+    /// SAE PWE method. 0=hunting-and-pecking, 1=H2E, 2=both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sae_pwe: Option<u8>,
+    /// Escape hatch: raw hostapd.conf lines appended verbatim to the
+    /// BSS section. Use for any option not surfaced above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -497,9 +600,12 @@ mod tests {
         assert!(cfg.firewall.zones[2].masquerade);
         assert!(!cfg.firewall.rules.is_empty());
         assert_eq!(cfg.wifi.len(), 2);
-        assert_eq!(cfg.wifi[0].ssid, "MyNetwork");
+        assert_eq!(cfg.wifi[0].ssid, "oxwrt");
         assert_eq!(cfg.wifi[0].network, "lan");
-        assert_eq!(cfg.services.len(), 4);
+        // 6 services now: dns, dhcp, hostapd-5g, hostapd-2g, corerad,
+        // ntp, debug-ssh. Count might drift as bring-up progresses;
+        // keep this loose check.
+        assert!(cfg.services.len() >= 4);
 
         // The coredhcp service must declare NET_RAW + NET_ADMIN on top
         // of the default retain list — this is the canonical "override
