@@ -1804,16 +1804,25 @@ fn early_mounts() -> Result<(), Error> {
     // populate_dev_from_sys(). That fallback does what procd's
     // `early_dev()` does: walks /sys/dev/{block,char}/M:N/uevent for
     // each device, mknod's the corresponding /dev/<name>.
-    let mounts: &[(&str, &str, &str, MountFlags)] = &[
-        ("proc", "/proc", "proc", nsnd),
-        ("sysfs", "/sys", "sysfs", nsnd),
-        ("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID),
-        ("devpts", "/dev/pts", "devpts", MountFlags::NOSUID | MountFlags::NOEXEC),
-        ("cgroup2", "/sys/fs/cgroup", "cgroup2", nsnd),
+    // devpts needs ptmxmode=666,gid=5 so /dev/pts/ptmx is usable
+    // outside root (dropbear drops to logged-in user before calling
+    // openpty). Without these options the kernel defaults ptmxmode to
+    // 0000 and ptmx opens return EACCES — the exact failure mode seen
+    // in the debug-ssh container ("PTY allocation request failed").
+    let devpts_opts = std::ffi::CString::new("ptmxmode=666,gid=5").unwrap();
+    let mounts: &[(&str, &str, &str, MountFlags, Option<&CStr>)] = &[
+        ("proc", "/proc", "proc", nsnd, None),
+        ("sysfs", "/sys", "sysfs", nsnd, None),
+        ("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID, None),
+        (
+            "devpts", "/dev/pts", "devpts",
+            MountFlags::NOSUID | MountFlags::NOEXEC,
+            Some(devpts_opts.as_c_str()),
+        ),
+        ("cgroup2", "/sys/fs/cgroup", "cgroup2", nsnd, None),
     ];
 
-    let no_data: Option<&CStr> = None;
-    for (source, target, fstype, flags) in mounts {
+    for (source, target, fstype, flags, data) in mounts {
         // mkdir the target. Two tolerant cases:
         //   AlreadyExists: fine.
         //   EROFS (no such dir on the ro squashfs): log + try mount
@@ -1836,7 +1845,7 @@ fn early_mounts() -> Result<(), Error> {
                 _ => return Err(Error::Io(e)),
             }
         }
-        match mount(*source, *target, *fstype, *flags, no_data) {
+        match mount(*source, *target, *fstype, *flags, *data) {
             Ok(()) => {
                 tracing::info!(target = target, fstype = fstype, "early_mounts: mounted");
             }

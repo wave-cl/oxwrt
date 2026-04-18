@@ -1434,13 +1434,23 @@ impl PreparedContainer {
         if !self.user_namespace {
             rustix::fs::mkdir(self.devpts_target.as_c_str(), rustix::fs::Mode::from(0o755))
                 .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mkdir /dev/pts", e)))?;
+            // ptmxmode=666,gid=5 makes /dev/pts/ptmx openable by non-root
+            // users (dropbear drops to the logged-in user before calling
+            // openpty). Without this the kernel defaults ptmxmode to 0000
+            // and PTY allocation fails with EACCES — seen in debug-ssh as
+            // "PTY allocation request failed on channel 0".
             mount(
                 c"devpts",
                 self.devpts_target.as_c_str(),
                 c"devpts",
                 MountFlags::NOSUID | MountFlags::NOEXEC,
-                none,
+                Some(c"ptmxmode=666,gid=5"),
             ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount devpts", e)))?;
+            // /dev is a fresh tmpfs — whatever the rootfs image staged at
+            // /dev/ptmx is hidden. openpty(3) / dropbear open /dev/ptmx
+            // (not /dev/pts/ptmx), so materialize the conventional symlink
+            // inside the container's tmpfs /dev.
+            let _ = rustix::fs::symlink(c"pts/ptmx", c"/dev/ptmx");
         }
 
         unmount(self.put_old_after_pivot.as_c_str(), UnmountFlags::DETACH)

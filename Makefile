@@ -558,6 +558,12 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	mkdir -p $(R)/sbin $(R)/bin $(R)/lib $(R)/etc/dropbear \
 	         $(R)/dev/pts $(R)/proc $(R)/sys $(R)/tmp $(R)/var/log $(R)/root
 	chmod 1777 $(R)/tmp
+	# /dev/ptmx -> pts/ptmx symlink. dropbear opens /dev/ptmx to
+	# allocate a new pseudoterminal; with /dev/pts bind-mounted and
+	# host devpts mounted with ptmxmode=666, the canonical location
+	# for ptmx is /dev/pts/ptmx. The symlink at /dev/ptmx is how every
+	# program (including musl's openpty) finds it.
+	ln -sf pts/ptmx $(R)/dev/ptmx
 	# Binaries + libs from Alpine stage.
 	cp $(BUILD_SERVICES)/debug-ssh/sbin/dropbear      $(R)/sbin/dropbear
 	cp $(BUILD_SERVICES)/debug-ssh/bin/dropbearkey    $(R)/bin/dropbearkey
