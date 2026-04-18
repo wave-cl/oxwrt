@@ -937,6 +937,28 @@ verity-test:
 	mksquashfs diag-binaries $(BUILD_DIR)/test-rootfs.squashfs -noappend -comp xz
 	./scripts/verity-wrap.sh $(BUILD_DIR)/test-rootfs.squashfs $(BUILD_DIR)/test-rootfs.verity $(BUILD_DIR)/test-verity-cmdline.txt
 
+# ── Integration tests ────────────────────────────────────────────────
+#
+# Two harnesses, both run oxwrtd as PID 1 and exercise the oxctl RPC
+# suite — the Docker one is fast for iteration, the QEMU one boots a
+# real aarch64 kernel so landlock + clone3 userns + nftables + real
+# rtnetlink are actually exercised.
+#
+# The QEMU harness is strictly more accurate (same kernel subsystems
+# as production), but requires a ~30s VM boot per run. Prefer the
+# Docker one while developing; run QEMU before flashing.
+
+.PHONY: test-docker test-qemu
+
+test-docker: rust-oxwrtd
+	cargo build --release -p oxwrtctl-cli
+	cargo build --release -p oxwrtd
+	./scripts/integration-test.sh
+
+test-qemu: rust-oxwrtd
+	cargo build --release -p oxwrtctl-cli
+	./scripts/qemu-integration-test.sh
+
 # ── Clean ────────────────────────────────────────────────────────────
 
 clean:
