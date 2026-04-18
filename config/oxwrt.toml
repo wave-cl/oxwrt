@@ -259,7 +259,16 @@ channel = 6
 [[radios]]
 phy = "phy1"
 band = "5g"
+# Channel 36 + 160 MHz covers the UNII-1/2A band (ch 36-64 @ 5180-5320 MHz).
+# Channels 52-64 are DFS in US so hostapd does a 60-second radar-free
+# CAC at startup before beaconing. For zero-CAC VHT80 use
+# vht_oper_chwidth=1 + seg0=42, OR swap to channel 149 (UNII-3, no DFS)
+# for VHT80-only.
 channel = 36
+vht_oper_chwidth = 2
+vht_oper_centr_freq_seg0_idx = 50
+he_oper_chwidth = 2
+he_oper_centr_freq_seg0_idx = 50
 
 # ── Full-featured radio example (commented) ──
 # [[radios]]
