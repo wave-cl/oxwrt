@@ -86,6 +86,14 @@ pub enum Response {
         /// install?" check without pulling the full dump.
         #[serde(default)]
         firewall_rules: usize,
+        /// Per-AP-iface status for every `[[wifi]]` entry. Each item
+        /// is an expected AP (ssid + backing phy-ap0 iface name) plus
+        /// whether its iface is currently Up. Caught the MT7986 DFS-
+        /// CAC-stuck bug on day one of this field existing — without
+        /// it, operators have no way to notice a silently-down AP
+        /// short of associating a client and seeing it fail.
+        #[serde(default)]
+        aps: Vec<ApStatus>,
     },
     LogLine { line: String },
     /// Non-terminal: firmware upload progress. Sent periodically during
@@ -123,6 +131,29 @@ pub struct WanSummary {
     pub prefix: u8,
     pub gateway: Option<String>,
     pub lease_seconds: u32,
+}
+
+/// One AP (BSS) declared in `[[wifi]]`, with its backing kernel iface
+/// and live iface state. `iface` is derived at status-collect time from
+/// the convention `{phy}-ap0` used by netdev::create_wifi_ap_interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApStatus {
+    pub ssid: String,
+    pub iface: String,
+    /// Phy the AP is hosted on (e.g. "phy0"). Useful to cross-ref
+    /// with `[[radios]]` for band/channel.
+    pub radio_phy: String,
+    /// "2g" | "5g" — pulled from the matching `[[radios]]` entry.
+    /// Empty string if no radio entry exists (misconfigured wifi).
+    pub band: String,
+    /// Primary channel from the matching `[[radios]]` entry. 0 if
+    /// none matched.
+    #[serde(default)]
+    pub channel: u16,
+    /// Raw /sys/class/net/<iface>/operstate string. "up" for a
+    /// beaconing AP, "down" pre-bring-up or post-CAC-fail,
+    /// "unknown" when kernel hasn't classified it yet.
+    pub operstate: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

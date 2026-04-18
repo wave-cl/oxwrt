@@ -269,6 +269,7 @@ pub fn format_response(resp: &Response) -> String {
             supervisor_uptime_secs,
             wan,
             firewall_rules,
+            aps,
         } => {
             let mut out = String::new();
             out.push_str(&format!(
@@ -287,6 +288,27 @@ pub fn format_response(resp: &Response) -> String {
                 }
                 None => {
                     out.push_str("wan:               (no dhcp lease)\n");
+                }
+            }
+            if !aps.is_empty() {
+                out.push_str("access points:\n");
+                for ap in aps {
+                    // Short format: operstate + iface + band/channel
+                    // alongside SSID. Caller can still pull the full
+                    // record via `oxctl ... diag links` if needed.
+                    out.push_str(&format!(
+                        "  {:<16} {:<4} iface={:<10} radio={} {}{}\n",
+                        ap.ssid,
+                        ap.operstate,
+                        ap.iface,
+                        ap.radio_phy,
+                        ap.band,
+                        if ap.channel > 0 {
+                            format!(" ch{}", ap.channel)
+                        } else {
+                            String::new()
+                        },
+                    ));
                 }
             }
             if services.is_empty() {

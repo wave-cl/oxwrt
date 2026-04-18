@@ -245,11 +245,13 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
                 }
             });
             let firewall_rules = state.firewall_dump.read().unwrap().len();
+            let aps = collect_ap_status(&state.config_snapshot());
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
                 wan,
                 firewall_rules,
+                aps,
             }]
         }
         Request::Logs { service, follow } => handle_logs(state, &service, follow),
@@ -454,6 +456,44 @@ fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
                 restarts: s.restarts,
                 uptime_secs: s.uptime().as_secs(),
                 last_log,
+            }
+        })
+        .collect()
+}
+
+/// For each `[[wifi]]` entry, produce an `ApStatus` record by:
+///   1. deriving the expected iface name from the convention used by
+///      `netdev::create_wifi_ap_interfaces` (`{phy}-ap0`),
+///   2. looking up the matching `[[radios]]` entry for band + channel,
+///   3. reading `/sys/class/net/<iface>/operstate` for live state.
+///
+/// Sysfs is the right source here — a single file-read per AP, no
+/// rtnetlink round-trip, no async required. On non-Linux the file is
+/// absent and operstate reports "unknown", which is the right signal
+/// for "can't tell you".
+pub(crate) fn collect_ap_status(cfg: &crate::config::Config) -> Vec<crate::rpc::ApStatus> {
+    cfg.wifi
+        .iter()
+        .map(|w| {
+            let iface = format!("{}-ap0", w.radio);
+            let (band, channel) = cfg
+                .radios
+                .iter()
+                .find(|r| r.phy == w.radio)
+                .map(|r| (r.band.clone(), r.channel))
+                .unwrap_or_else(|| (String::new(), 0));
+            let operstate = std::fs::read_to_string(format!(
+                "/sys/class/net/{iface}/operstate"
+            ))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+            crate::rpc::ApStatus {
+                ssid: w.ssid.clone(),
+                iface,
+                radio_phy: w.radio.clone(),
+                band,
+                channel,
+                operstate,
             }
         })
         .collect()

@@ -545,6 +545,62 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         })
     };
 
+    // AP-state watcher. Fires a warn-log if any expected AP iface
+    // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s
+    // past boot. Caught today's MT7986 DFS-CAC-stuck bug cold; without
+    // this, a silently-down AP produces no log output anywhere — the
+    // only way operators notice is a client failing to associate.
+    //
+    // Fire-and-forget: runs for ~180s, logs once per still-down AP at
+    // each check, then exits. Short-circuit exit the moment all
+    // expected APs are up — no point burning cpu once everything's
+    // healthy.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            use std::time::Instant;
+            let start = Instant::now();
+            let warn_threshold = Duration::from_secs(90);
+            let watcher_deadline = Duration::from_secs(180);
+            let mut already_warned: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let elapsed = start.elapsed();
+                if elapsed >= watcher_deadline {
+                    return;
+                }
+                let cfg = state.config_snapshot();
+                let aps = control::server::collect_ap_status(&cfg);
+                let still_down: Vec<&crate::rpc::ApStatus> = aps
+                    .iter()
+                    .filter(|ap| ap.operstate != "up")
+                    .collect();
+                if still_down.is_empty() {
+                    return; // all healthy — exit early
+                }
+                if elapsed >= warn_threshold {
+                    for ap in &still_down {
+                        if !already_warned.contains(&ap.iface) {
+                            tracing::warn!(
+                                ssid = %ap.ssid,
+                                iface = %ap.iface,
+                                operstate = %ap.operstate,
+                                radio = %ap.radio_phy,
+                                band = %ap.band,
+                                channel = ap.channel,
+                                elapsed_s = elapsed.as_secs(),
+                                "AP iface not up {}s after boot — check hostapd logs, DFS status, regulatory domain",
+                                elapsed.as_secs(),
+                            );
+                            already_warned.insert(ap.iface.clone());
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
