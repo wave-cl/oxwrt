@@ -788,6 +788,23 @@ fn bootstrap_clock_floor() {
 /// Best-effort: any IO error or spawn error is logged, never fatal.
 /// A misbehaving uci-default script MUST NOT prevent the supervisor
 /// from starting — the operator needs the control plane to debug it.
+///
+/// Filter: only scripts whose filename contains "oxwrt" are run.
+/// OpenWrt's stock uci-defaults (05_fix-compat-version, 10_migrate-
+/// shadow, 14_network-generate-duid, 50-dropbear, 15_odhcpd, etc.)
+/// all assume a procd + ubus + board.json world. Running them under
+/// oxwrtctl-as-pid-1 produces a parade of errors — "local: line 47:
+/// not in a function" (dash vs bash), "Failed to parse message data"
+/// (no ubus), "/etc/board.json: No such file" (no board-detect init
+/// script ran), "uci: Entry not found" (no stock uci configs
+/// provisioned). None of these failures do anything useful for oxwrt
+/// because we don't use uci or /etc/config at all — our config lives
+/// in /etc/oxwrt.toml and is reloaded via the control plane.
+///
+/// Our own provisioners (97-oxwrt-debug-ssh-rootfs, 98-oxwrt-diag-
+/// rootfs, 99-oxwrtctl) all have "oxwrt" in the name. Whitelisting
+/// by substring keeps the filter readable and lets operators drop
+/// custom scripts that opt in by naming them with "oxwrt" somewhere.
 fn run_uci_defaults() {
     const DIR: &str = "/etc/uci-defaults";
     let rd = match std::fs::read_dir(DIR) {
@@ -807,11 +824,13 @@ fn run_uci_defaults() {
         .filter_map(|r| r.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.is_file()
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|n| !n.starts_with('.'))
-                    .unwrap_or(false)
+            if !p.is_file() {
+                return false;
+            }
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            // Reject hidden files + stock OpenWrt scripts (see
+            // doc comment above). "oxwrt" must appear in the name.
+            !name.starts_with('.') && name.contains("oxwrt")
         })
         .collect();
     entries.sort();

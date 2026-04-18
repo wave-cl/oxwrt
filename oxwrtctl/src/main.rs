@@ -18,58 +18,9 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     init_tracing();
-    let argv0 = std::env::args().next().unwrap_or_default();
     let mut args = std::env::args().skip(1);
     let mode = args.next();
-
-    // Auto-detect PID 1: when the kernel invokes /sbin/init (our
-    // symlink), there's no --init argument. Detect via getpid() == 1
-    // so the binary works as a direct init replacement without flags.
     let is_pid1 = std::process::id() == 1;
-
-    // OpenWrt's /sbin/init (procd-init) execs /sbin/procd once early
-    // in boot expecting the real procd to do a small chunk of preinit
-    // setup then exit. /sbin/init continues with the shell-driven
-    // /etc/preinit afterward, and finally execve's /sbin/procd a
-    // second time — that second call is where we actually become pid 1.
-    //
-    // We don't implement procd's preinit protocol (real procd writes
-    // state under /tmp/.preinit and returns). Since everything preinit
-    // needs is also done by the shell /etc/preinit hooks, silently
-    // exiting 0 on this non-pid1 invocation is safe. Without this
-    // bypass we print usage to stderr and exit 2 — harmless but noisy
-    // in UART logs and confusing.
-    //
-    // Heuristic: if invoked with no args AND we're not pid 1 AND
-    // stderr is not a tty, assume this is the init chain calling us
-    // and silently exit 0. The "stderr not a tty" half is what
-    // separates "init invoked us" (stderr goes to the kernel console
-    // or /dev/null) from "operator typed `oxwrtctl`" (stderr is the
-    // user's terminal). Earlier attempts used argv[0] == "procd" but
-    // that proved unreliable — on this firmware the stray usage print
-    // persisted even with the argv0 check in place.
-    use std::io::IsTerminal;
-    // Three independent "init invoked us" signals. Any one → silent exit.
-    // We combine them because no single heuristic caught every case
-    // in testing: the argv0=="procd" check missed the stray invocation
-    // on real hardware, stderr.is_terminal() would return true if
-    // /dev/console is inherited, and ppid==1 alone doesn't catch
-    // grandchild-of-init execs.
-    let argv0_base = argv0.rsplit('/').next().unwrap_or("");
-    #[cfg(target_os = "linux")]
-    let ppid_is_init = rustix::process::getppid()
-        .map(|p| p.as_raw_nonzero().get() == 1)
-        .unwrap_or(false);
-    #[cfg(not(target_os = "linux"))]
-    let ppid_is_init = false;
-    let stderr_not_tty = !std::io::stderr().is_terminal();
-    let called_as_procd = argv0_base == "procd";
-    if mode.is_none()
-        && !is_pid1
-        && (ppid_is_init || stderr_not_tty || called_as_procd)
-    {
-        return ExitCode::SUCCESS;
-    }
 
     match mode.as_deref() {
         Some("--init") => run_init(),
@@ -84,22 +35,44 @@ fn main() -> ExitCode {
             println!("oxwrtctl {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        _ if is_pid1 => run_init(),
-        _ => {
-            eprintln!(
-                "usage: oxwrtctl --init\n\
-                        oxwrtctl --control-only\n\
-                        oxwrtctl --services-only\n\
-                        oxwrtctl --client <remote> <cmd> [args...]\n\
-                        oxwrtctl --smoke <rootfs> <entrypoint> [args...]\n\
-                        oxwrtctl --smoke-ns <rootfs> <host_ip> <peer_ip> <entrypoint> [args...]\n\
-                        oxwrtctl --attach-netns <pid> <peer_name> <peer_ip> <prefix> <gateway_ip>\n\
-                        oxwrtctl --print-server-key [path]\n\
-                        oxwrtctl --version"
-            );
-            ExitCode::from(2)
+        Some("--help") | Some("-h") => {
+            print_usage();
+            ExitCode::SUCCESS
         }
+        // No args + PID 1: the kernel invoked /sbin/init (our symlink)
+        // or procd-init execve'd /sbin/procd (us). Either way, run init.
+        _ if is_pid1 => run_init(),
+        // No args + not PID 1: almost always OpenWrt's /sbin/init (or
+        // one of the preinit shell scripts) forking /sbin/procd during
+        // preinit. Real procd has a preinit protocol (/tmp/.preinit
+        // marker, env var signals) we don't implement — the shell
+        // /etc/preinit does the equivalent work before our real pid-1
+        // invocation, so silently exiting here is correct.
+        //
+        // Two earlier attempts tried to distinguish "init invoked us"
+        // from "operator typed `oxwrtctl`" via (argv[0] basename ==
+        // "procd"), (ppid == 1), and (!stderr.is_terminal()). None
+        // caught every case. Simpler to unconditionally no-op on no
+        // args and require an explicit --help/-h for the usage print.
+        // Operators who type `oxwrtctl` bare get a silent exit; they
+        // figure it out from `oxwrtctl --help`.
+        _ => ExitCode::SUCCESS,
     }
+}
+
+fn print_usage() {
+    eprintln!(
+        "usage: oxwrtctl --init\n\
+                oxwrtctl --control-only\n\
+                oxwrtctl --services-only\n\
+                oxwrtctl --client <remote> <cmd> [args...]\n\
+                oxwrtctl --smoke <rootfs> <entrypoint> [args...]\n\
+                oxwrtctl --smoke-ns <rootfs> <host_ip> <peer_ip> <entrypoint> [args...]\n\
+                oxwrtctl --attach-netns <pid> <peer_name> <peer_ip> <prefix> <gateway_ip>\n\
+                oxwrtctl --print-server-key [path]\n\
+                oxwrtctl --version\n\
+                oxwrtctl --help"
+    );
 }
 
 /// Read the Ed25519 signing-key seed from disk and print the derived
