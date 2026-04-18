@@ -13,3 +13,9 @@
 *.swo
 *~
 .DS_Store
+# Per-device provisioning secrets: 32-byte ed25519 seed baked into
+# images as /etc/oxwrt/key.ed25519. Must never be committed — it IS
+# the server identity.
+/provisioning/
+# Operator env: SQUIC_SERVER_KEY (the pubkey pinned by oxctl).
+.env

@@ -738,6 +738,27 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	# — nothing on the squashfs can preserve across that), but that's
 	# a recovery path anyway, not a normal update.
 	echo "/etc/oxwrt/" > $(IMAGEBUILDER_DIR)/files/etc/sysupgrade.conf
+	# Pre-provisioned ed25519 seed for the sQUIC server identity. If a
+	# seed exists at provisioning/key.ed25519 on the build host, bake
+	# it into the image so the pubkey is known out-of-band BEFORE the
+	# device first boots — the operator's .env already has the matching
+	# SQUIC_SERVER_KEY, so `oxctl` works the instant the device comes
+	# up on the network, no UART read required.
+	#
+	# Without a pre-provisioned seed, oxwrtd auto-generates one on
+	# first boot and prints the pubkey to /dev/console; the operator
+	# has to capture it from UART and export SQUIC_SERVER_KEY manually.
+	# That's fine for bring-up but tedious for U-Boot recovery flashes
+	# (which wipe /etc/oxwrt/ unconditionally, so every recovery would
+	# rotate the key).
+	if [ -f provisioning/key.ed25519 ]; then \
+	    mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt; \
+	    cp provisioning/key.ed25519 $(IMAGEBUILDER_DIR)/files/etc/oxwrt/key.ed25519; \
+	    chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/oxwrt/key.ed25519; \
+	    echo "Baked provisioning/key.ed25519 → /etc/oxwrt/key.ed25519"; \
+	else \
+	    echo "No provisioning/key.ed25519 — device will generate on first boot"; \
+	fi
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
 
