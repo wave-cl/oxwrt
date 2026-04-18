@@ -364,7 +364,7 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 [[services]]
 name = "debug-ssh"
 rootfs = "/usr/lib/oxwrt/services/debug-ssh/rootfs"
-entrypoint = ["/sbin/dropbear", "-F", "-E", "-s", "-p", "2222", "-P", "/tmp/dropbear.pid"]
+entrypoint = ["/sbin/dropbear", "-F", "-E", "-R", "-s", "-p", "2222", "-P", "/tmp/dropbear.pid"]
 # `net_mode = host` — dropbear binds on the real LAN bridge. An
 # isolated veth would require exposing port 2222 via DNAT, which is a
 # lot of plumbing for "the operator wants a shell."
@@ -378,6 +378,16 @@ depends_on = []
 [[services.binds]]
 source = "/dev/pts"
 target = "/dev/pts"
+readonly = false
+
+# Host keys at /etc/dropbear/ must be writable (dropbear `-R` auto-
+# generates ed25519/rsa on first start if missing) AND persist across
+# reboots / sysupgrade (clients pin the host key, regen would break
+# every pinned client). Bind-mount a dir under /etc/oxwrt/ — that
+# path is on the overlay and preserved by sysupgrade.conf.
+[[services.binds]]
+source = "/etc/oxwrt/debug-ssh-keys"
+target = "/etc/dropbear"
 readonly = false
 
 # Dropbear is a legacy C codebase that needs more caps than the

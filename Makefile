@@ -77,9 +77,58 @@ rust-oxwrtctl:
 BUILD_SERVICES := build-services
 AR_AARCH64     ?= $(shell command -v /Users/c/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v /opt/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v aarch64-linux-gnu-ar 2>/dev/null || echo ar)
 
-.PHONY: services-stage services-dns services-ntp services-dhcp
+.PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh
 
-services-stage: services-dns services-ntp services-dhcp
+services-stage: services-dns services-ntp services-dhcp services-debug-ssh
+
+# ── Static dropbear for debug-ssh container ─────────────────────────
+#
+# Pulls dropbear + dropbearkey from Alpine's aarch64 repo and stages
+# them under build-services/debug-ssh/. These get copied into
+# files/usr/lib/oxwrt/services/debug-ssh/rootfs/ at image-stage time,
+# so the squashfs ships a self-contained SSH binary and the stock
+# `dropbear` OpenWrt package can be dropped from the base system.
+#
+# Why Alpine and not building from source:
+#   - Alpine already ships dropbear linked against musl (same libc
+#     we already bundle via /lib/ld-musl-aarch64.so.1 in the rootfs)
+#   - apk fetch + tar -xz is 10 seconds vs a multi-minute source build
+#   - No autotools / cross-toolchain setup on the host
+#
+# The binaries are DYNAMIC musl — they need the musl loader + (for
+# dropbear) libcrypto. Alpine's libcrypto is ~3MB; we already ship
+# libgcc_s.so.1. One additional .so is cheap.
+#
+# Output layout:
+#   build-services/debug-ssh/sbin/dropbear
+#   build-services/debug-ssh/bin/dropbearkey
+#   build-services/debug-ssh/lib/libcrypto.so.3     (if needed)
+#
+# Re-running is cheap but not a no-op — `docker run` re-enters the
+# container. Guarded by the target file existing.
+
+services-debug-ssh: $(BUILD_SERVICES)/debug-ssh/sbin/dropbear
+$(BUILD_SERVICES)/debug-ssh/sbin/dropbear:
+	mkdir -p $(BUILD_SERVICES)/debug-ssh/sbin \
+	         $(BUILD_SERVICES)/debug-ssh/bin \
+	         $(BUILD_SERVICES)/debug-ssh/lib
+	docker run --rm --platform linux/arm64 \
+		-v $(CURDIR)/$(BUILD_SERVICES)/debug-ssh:/out \
+		alpine:3.20 sh -c '\
+		apk add --no-cache dropbear busybox && \
+		cp /usr/sbin/dropbear /out/sbin/dropbear && \
+		cp /usr/bin/dropbearkey /out/bin/dropbearkey && \
+		cp /bin/busybox /out/bin/busybox && \
+		cp /lib/ld-musl-aarch64.so.1 /out/lib/ld-musl-aarch64.so.1 && \
+		for lib in $$(ldd /usr/sbin/dropbear 2>/dev/null | awk "/=>/{print \$$3}"); do \
+			case "$$lib" in \
+				/lib/ld-musl-*|/lib/libc.musl-*) ;; \
+				*) [ -f "$$lib" ] && cp "$$lib" /out/lib/ || true ;; \
+			esac; \
+		done'
+	@echo ""
+	@echo "Staged static dropbear under $(BUILD_SERVICES)/debug-ssh/:"
+	@find $(BUILD_SERVICES)/debug-ssh -type f -ls
 
 services-dns: $(BUILD_SERVICES)/dns/hickory-dns
 $(BUILD_SERVICES)/dns/hickory-dns:
@@ -159,7 +208,8 @@ IMAGEBUILDER_PACKAGES := \
 	-logd \
 	-procd-ujail \
 	-e2fsprogs \
-	-f2fsck
+	-f2fsck \
+	-dropbear
 
 # IMAGE PHILOSOPHY (pid1-standalone): oxwrtctl owns userspace. procd,
 # netifd, firewall4, dnsmasq, odhcpd*, dropbear, ppp — all gone.
@@ -182,12 +232,6 @@ IMAGEBUILDER_PACKAGES := \
 #   ca-bundle        — TLS trust store for hickory-dns-over-tls etc.
 #   urandom-seed, urngd — entropy
 #   uboot-envtools   — u-boot env read/write (handy for recovery)
-#   dropbear         — 97-oxwrt-debug-ssh-rootfs copies /usr/sbin/dropbear
-#                      into the debug-ssh container rootfs at first boot.
-#                      Until we bundle a static dropbear in our staging,
-#                      keep this package. The host /etc/init.d/dropbear
-#                      doesn't get invoked (no procd) but the binary's
-#                      still on /usr/sbin for us to clone from.
 #   kmod-* (crypto, nft-offload, leds-gpio, gpio-button, usb3, mt7915e,
 #                mt7986-firmware, mt7986-wo-firmware) — hw drivers
 #
@@ -200,6 +244,11 @@ IMAGEBUILDER_PACKAGES := \
 #   uclient-fetch, libustream-mbedtls — http fetch for opkg, we don't
 #   logd, procd-ujail     — procd helpers, dead without procd
 #   e2fsprogs, f2fsck     — ext4 tools and f2fs check we don't invoke
+#   dropbear              — replaced by an Alpine-built static dropbear
+#                           staged directly into the debug-ssh container
+#                           rootfs (see services-debug-ssh target). The
+#                           base OS has no SSH daemon; SSH only exists
+#                           inside the hardened debug-ssh service.
 #
 # procd + procd-init themselves aren't in the default list — they come
 # in as transitive deps of netifd / dropbear / etc. Once all their
@@ -317,22 +366,16 @@ imagebuilder-stage-uci98: rust-oxwrtctl
 	@echo ""
 	@echo "Staged UCI98 layer (+ 98-oxwrt-diag-rootfs)."
 
-# ── stage-uci97: + 97-oxwrt-debug-ssh-rootfs ────────────────────────
+# ── stage-uci97: retained as alias for -uci98 ───────────────────────
 #
-# The debug-ssh provisioner. Previously buggy (set -e on missing
-# dropbear host keys, fixed in 82f3151). If the full image's hang
-# comes from ANY residual issue with this script's first-boot
-# behavior, this is where it'll surface.
-imagebuilder-stage-uci97: rust-oxwrtctl
-	$(call imagebuilder_check_dir)
-	$(call imagebuilder_clean_files)
-	$(call imagebuilder_stage_bare)
-	$(call imagebuilder_stage_init)
-	$(call imagebuilder_stage_uci, 99-oxwrtctl)
-	$(call imagebuilder_stage_uci, 98-oxwrt-diag-rootfs)
-	$(call imagebuilder_stage_uci, 97-oxwrt-debug-ssh-rootfs)
-	@echo ""
-	@echo "Staged UCI97 layer (+ 97-oxwrt-debug-ssh-rootfs — all uci-defaults present)."
+# Previously layered 97-oxwrt-debug-ssh-rootfs on top — that script was
+# a uci-defaults first-boot provisioner that copied /usr/sbin/dropbear +
+# busybox into the debug-ssh container rootfs. As of the static-dropbear
+# migration, the entire container rootfs is pre-staged in the squashfs
+# at image-build time (see imagebuilder-stage's debug-ssh block). The
+# script is gone, this bisect layer is now identical to -uci98.
+imagebuilder-stage-uci97: imagebuilder-stage-uci98
+	@echo "(alias for -uci98 since 97-oxwrt-debug-ssh-rootfs was removed)"
 
 # Shared helpers — `define X` gives us macros we call via $(call X).
 # make functions below use $(1), $(2) etc. for positional args.
@@ -394,7 +437,7 @@ endef
 # Populate the imagebuilder's files/ overlay from our tracked overlay
 # + the cross-built binaries. Separated from `imagebuilder-image` so an
 # operator can inspect what gets shipped before the Docker build runs.
-imagebuilder-stage: rust-oxwrtctl services-stage
+imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	@if [ ! -d "$(IMAGEBUILDER_DIR)" ]; then \
 		echo "ERROR: $(IMAGEBUILDER_DIR) not found. Download the imagebuilder for mediatek/filogic from"; \
 		echo "  https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/"; \
@@ -488,6 +531,71 @@ imagebuilder-stage: rust-oxwrtctl services-stage
 	# their control key post-flash via the `oxwrtctl --print-server-key`
 	# workflow. The file must exist (server fails to start without it).
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
+	# Pre-stage the debug-ssh container rootfs entirely in the squashfs.
+	#
+	# Rationale: under oxwrtctl-as-pid1 there is no procd-style
+	# /etc/uci-defaults/* first-boot runner. The former
+	# 97-oxwrt-debug-ssh-rootfs script only executed once (on a
+	# stock-OpenWrt image that still had procd + preinit); after a
+	# sysupgrade overlay reset, there was nothing to rebuild the
+	# container rootfs. SSH silently broke.
+	#
+	# Moving everything into the squashfs makes the state deterministic
+	# across every flash:
+	#   - dropbear + dropbearkey + libz.so.1 + musl loader (from Alpine,
+	#     see services-debug-ssh)
+	#   - busybox + ~60 applet symlinks for the login shell
+	#   - /etc/passwd, /etc/group, /etc/shells
+	#   - /etc/dropbear/authorized_keys (operator's ~/.ssh/id_ed25519.pub)
+	#
+	# Per-device host keys are generated at RUNTIME by dropbear's `-R`
+	# flag on startup, into a writable bind-mounted dir at
+	# /etc/oxwrt/debug-ssh-keys/. That path is on the overlay and
+	# preserved across sysupgrade (via /etc/oxwrt/ in sysupgrade.conf),
+	# so host keys stay stable and clients don't get
+	# REMOTE-HOST-IDENTIFICATION-CHANGED warnings after updates.
+	$(eval R := $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/debug-ssh/rootfs)
+	mkdir -p $(R)/sbin $(R)/bin $(R)/lib $(R)/etc/dropbear \
+	         $(R)/dev/pts $(R)/proc $(R)/sys $(R)/tmp $(R)/var/log $(R)/root
+	chmod 1777 $(R)/tmp
+	# Binaries + libs from Alpine stage.
+	cp $(BUILD_SERVICES)/debug-ssh/sbin/dropbear      $(R)/sbin/dropbear
+	cp $(BUILD_SERVICES)/debug-ssh/bin/dropbearkey    $(R)/bin/dropbearkey
+	cp $(BUILD_SERVICES)/debug-ssh/bin/busybox        $(R)/bin/busybox
+	cp $(BUILD_SERVICES)/debug-ssh/lib/libz.so.1      $(R)/lib/libz.so.1
+	cp $(BUILD_SERVICES)/debug-ssh/lib/ld-musl-aarch64.so.1 $(R)/lib/ld-musl-aarch64.so.1
+	chmod 0755 $(R)/sbin/dropbear $(R)/bin/dropbearkey $(R)/bin/busybox
+	# Busybox applet symlinks. Bounded set — "what can an SSH attacker
+	# do?" has a visible answer.
+	cd $(R)/bin && for a in sh ash ls cat mount umount ps kill ip ping traceroute \
+	    dmesg free head tail grep sed awk echo chmod chown stat df du tr find wc \
+	    date touch mkdir rmdir rm cp mv ln readlink uname hostname nslookup netstat \
+	    which env printf id whoami pwd true false xargs sleep clear reset login su \
+	    tty who logger wget vi more less cut sort uniq; do \
+	        ln -sf busybox $$a; done
+	cd $(R)/sbin && for a in ifconfig route arp; do ln -sf /bin/busybox $$a; done
+	# Minimal /etc.
+	printf 'root:x:0:0:root:/root:/bin/sh\n' > $(R)/etc/passwd
+	printf 'root:x:0:\n' > $(R)/etc/group
+	printf '/bin/sh\n/bin/ash\n' > $(R)/etc/shells
+	# authorized_keys at /root/.ssh/authorized_keys — dropbear reads
+	# PER-USER keys from $HOME/.ssh/. We can't use /etc/dropbear/
+	# because that path is about to be bind-mounted away for runtime
+	# host-key storage (see debug-ssh-keys below). Baked from the
+	# operator's ~/.ssh/id_ed25519.pub; empty-file fallback keeps
+	# dropbear startable but refuses all logins.
+	mkdir -p $(R)/root/.ssh
+	chmod 0700 $(R)/root/.ssh
+	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
+		cp "$$HOME/.ssh/id_ed25519.pub" $(R)/root/.ssh/authorized_keys; \
+	else \
+		touch $(R)/root/.ssh/authorized_keys; \
+	fi
+	chmod 0600 $(R)/root/.ssh/authorized_keys
+	# Writable host-key dir on the host side — bind-mounted into the
+	# container at /etc/dropbear/ by oxwrt.toml. Created empty; dropbear
+	# `-R` populates it with ed25519/rsa keys on first start.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt/debug-ssh-keys
 	# Preserve /etc/oxwrt/ across sysupgrade operations. Without this,
 	# every firmware update regenerates the server signing key, changes
 	# the sQUIC server pubkey, and locks out every client that was
