@@ -1183,7 +1183,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxwrtctl"
+name = "oxwrtctl-cli"
+version = "0.1.1"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "oxwrt-api",
+ "oxwrt-proto",
+ "quinn",
+ "squic",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "oxwrtd"
 version = "0.1.1"
 dependencies = [
  "bytes",
@@ -1212,21 +1227,6 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "oxwrtctl-cli"
-version = "0.1.1"
-dependencies = [
- "ed25519-dalek",
- "hex",
- "oxwrt-api",
- "oxwrt-proto",
- "quinn",
- "squic",
- "thiserror 2.0.18",
- "tokio",
  "tracing-subscriber",
 ]
 

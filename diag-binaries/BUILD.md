@@ -1,7 +1,7 @@
 # Diagnostic binary builds
 
 Static aarch64-linux-musl binaries for the `DIAG_BINARIES` whitelist
-in `oxwrtctl/src/control/server.rs`. Each runs inside the standard
+in `oxwrtd/src/control/server.rs`. Each runs inside the standard
 container hardening pipeline (caps drop + no_new_privs + seccomp +
 landlock). The binaries ship at `/usr/lib/oxwrt/diag/bin/` on the
 firmware's squashfs rootfs, protected by dm-verity.
@@ -115,7 +115,7 @@ file diag-binaries/ping
 
 # End-to-end via the supervisor:
 docker run --rm --privileged --cgroupns=private \
-  -v "$PWD/target/aarch64-unknown-linux-musl/release/oxwrtctl:/oxwrtctl:ro" \
+  -v "$PWD/target/aarch64-unknown-linux-musl/release/oxwrtd:/oxwrtd:ro" \
   alpine:latest sh -c '
     mkdir -p /usr/lib/oxwrt/diag/bin
     cp /diag-binaries/ping /usr/lib/oxwrt/diag/bin/ping

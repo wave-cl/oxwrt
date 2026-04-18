@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         Some("--attach-netns") => run_attach_netns(args.collect()),
         Some("--print-server-key") => run_print_server_key(args.collect()),
         Some("--version") => {
-            println!("oxwrtctl {}", env!("CARGO_PKG_VERSION"));
+            println!("oxwrtd {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Some("--help") => {
@@ -56,33 +56,33 @@ fn main() -> ExitCode {
         // invocation, so silently exiting here is correct.
         //
         // Two earlier attempts tried to distinguish "init invoked us"
-        // from "operator typed `oxwrtctl`" via (argv[0] basename ==
+        // from "operator typed `oxwrtd`" via (argv[0] basename ==
         // "procd"), (ppid == 1), and (!stderr.is_terminal()). None
         // caught every case. Simpler to unconditionally no-op on no
         // args and require an explicit --help/-h for the usage print.
-        // Operators who type `oxwrtctl` bare get a silent exit; they
-        // figure it out from `oxwrtctl --help`.
+        // Operators who type `oxwrtd` bare get a silent exit; they
+        // figure it out from `oxwrtd --help`.
         _ => ExitCode::SUCCESS,
     }
 }
 
 fn print_usage() {
     eprintln!(
-        "usage: oxwrtctl --init\n\
-                oxwrtctl --control-only\n\
-                oxwrtctl --services-only\n\
-                oxwrtctl --client <remote> <cmd> [args...]\n\
-                oxwrtctl --smoke <rootfs> <entrypoint> [args...]\n\
-                oxwrtctl --smoke-ns <rootfs> <host_ip> <peer_ip> <entrypoint> [args...]\n\
-                oxwrtctl --attach-netns <pid> <peer_name> <peer_ip> <prefix> <gateway_ip>\n\
-                oxwrtctl --print-server-key [path]\n\
-                oxwrtctl --version\n\
-                oxwrtctl --help"
+        "usage: oxwrtd --init\n\
+                oxwrtd --control-only\n\
+                oxwrtd --services-only\n\
+                oxwrtd --client <remote> <cmd> [args...]\n\
+                oxwrtd --smoke <rootfs> <entrypoint> [args...]\n\
+                oxwrtd --smoke-ns <rootfs> <host_ip> <peer_ip> <entrypoint> [args...]\n\
+                oxwrtd --attach-netns <pid> <peer_name> <peer_ip> <prefix> <gateway_ip>\n\
+                oxwrtd --print-server-key [path]\n\
+                oxwrtd --version\n\
+                oxwrtd --help"
     );
 }
 
 // run_print_server_key moved to oxwrtctl-cli as
-// `oxwrtctl_cli::print_server_key` and is called from both `oxwrtctl
+// `oxwrtctl_cli::print_server_key` and is called from both `oxwrtd
 // --print-server-key` and `oxctl --print-server-key`.
 fn run_print_server_key(args: Vec<String>) -> ExitCode {
     oxwrtctl_cli::print_server_key(args)
@@ -95,7 +95,7 @@ fn init_tracing() {
     // output. Written to stderr so stdout stays clean for subcommands
     // like --version that pipe values.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("oxwrtctl=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -237,7 +237,7 @@ async fn smoke_async(args: Vec<String>) -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn run_smoke(_args: Vec<String>) -> ExitCode {
-    eprintln!("oxwrtctl: --smoke is only supported on Linux");
+    eprintln!("oxwrtd: --smoke is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -246,7 +246,7 @@ fn run_init() -> ExitCode {
     match init::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("oxwrtctl: init failed: {e}");
+            eprintln!("oxwrtd: init failed: {e}");
             ExitCode::FAILURE
         }
     }
@@ -254,7 +254,7 @@ fn run_init() -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn run_init() -> ExitCode {
-    eprintln!("oxwrtctl: --init is only supported on Linux");
+    eprintln!("oxwrtd: --init is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -263,7 +263,7 @@ fn run_control_only() -> ExitCode {
     match init::run_control_only() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("oxwrtctl: control-only failed: {e}");
+            eprintln!("oxwrtd: control-only failed: {e}");
             ExitCode::FAILURE
         }
     }
@@ -271,7 +271,7 @@ fn run_control_only() -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn run_control_only() -> ExitCode {
-    eprintln!("oxwrtctl: --control-only is only supported on Linux");
+    eprintln!("oxwrtd: --control-only is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -280,7 +280,7 @@ fn run_services_only() -> ExitCode {
     match init::run_services_only() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("oxwrtctl: services-only failed: {e}");
+            eprintln!("oxwrtd: services-only failed: {e}");
             ExitCode::FAILURE
         }
     }
@@ -288,7 +288,7 @@ fn run_services_only() -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn run_services_only() -> ExitCode {
-    eprintln!("oxwrtctl: --services-only is only supported on Linux");
+    eprintln!("oxwrtd: --services-only is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -448,7 +448,7 @@ async fn smoke_ns_async(args: Vec<String>) -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn run_smoke_ns(_args: Vec<String>) -> ExitCode {
-    eprintln!("oxwrtctl: --smoke-ns is only supported on Linux");
+    eprintln!("oxwrtd: --smoke-ns is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -647,7 +647,7 @@ async fn link_index(
 
 #[cfg(not(target_os = "linux"))]
 fn run_attach_netns(_args: Vec<String>) -> ExitCode {
-    eprintln!("oxwrtctl: --attach-netns is only supported on Linux");
+    eprintln!("oxwrtd: --attach-netns is only supported on Linux");
     ExitCode::FAILURE
 }
 
@@ -714,7 +714,7 @@ fn install_panic_hook() {
             .write(true)
             .open("/dev/kmsg")
         {
-            let _ = writeln!(kmsg, "oxwrtctl PANIC: {info}");
+            let _ = writeln!(kmsg, "oxwrtd PANIC: {info}");
         }
     }));
 }

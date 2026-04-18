@@ -37,9 +37,9 @@ impl Server {
         // /etc/oxwrt/ is regenerated on every full sysupgrade and the
         // client needs this value as SQUIC_SERVER_KEY. Without this
         // log, the only way to get the key is to read
-        // /etc/oxwrt/key.ed25519 over a shell (impossible if oxwrtctl
+        // /etc/oxwrt/key.ed25519 over a shell (impossible if oxwrtd
         // replaces dropbear) or via the --print-server-key mode
-        // (impossible if oxwrtctl is pid 1).
+        // (impossible if oxwrtd is pid 1).
         let verifying = signing_key.verifying_key();
         tracing::info!(
             server_pubkey = %hex::encode(verifying.to_bytes()),
@@ -865,7 +865,7 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
             // /usr/sbin/nft (shipped by the `nftables` package in the
             // base image), runs in-process from pid-1 context — no
             // container / namespace dance needed, it's just looking at
-            // the same kernel state oxwrtctl installed.
+            // the same kernel state oxwrtd installed.
             use std::process::Command;
             let out = Command::new("/usr/sbin/nft")
                 .args(["list", "ruleset"])

@@ -1,12 +1,12 @@
 # oxwrt top-level build orchestrator.
 #
-# This Makefile ties together the Rust workspace (oxwrtctl + services),
+# This Makefile ties together the Rust workspace (oxwrtd + services),
 # the OpenWRT buildroot (kernel + image packaging), and the cross-built
 # diag/service binaries into a single firmware image.
 #
 # Usage:
 #   make setup        — clone openwrt, install feeds, copy config
-#   make rust          — cross-build oxwrtctl + all Rust services
+#   make rust          — cross-build oxwrtd + all Rust services
 #   make image         — build the OpenWRT firmware image
 #   make all           — setup + rust + image (full build)
 #   make clean         — clean Rust + OpenWRT build artifacts
@@ -54,10 +54,10 @@ $(OPENWRT_DIR)/.config: $(OPENWRT_DIR)/feeds.conf openwrt-config/.config
 
 # ── Rust builds ──────────────────────────────────────────────────────
 
-rust: rust-oxwrtctl
+rust: rust-oxwrtd
 
-rust-oxwrtctl:
-	cargo zigbuild --release --target $(TARGET_ARCH) -p oxwrtctl
+rust-oxwrtd:
+	cargo zigbuild --release --target $(TARGET_ARCH) -p oxwrtd
 
 # ── Service binaries (cross-built out-of-band) ──────────────────────
 #
@@ -287,17 +287,17 @@ IMAGEBUILDER_PACKAGES := \
 	-f2fsck \
 	-dropbear
 
-# IMAGE PHILOSOPHY (pid1-standalone): oxwrtctl owns userspace. procd,
+# IMAGE PHILOSOPHY (pid1-standalone): oxwrtd owns userspace. procd,
 # netifd, firewall4, dnsmasq, odhcpd*, dropbear, ppp — all gone.
 # Our Rust services (hickory-dns, coredhcp, ntpd-rs, debug-ssh) run
 # under our supervisor, nftables rules are installed by net::
-# install_firewall, WAN comes up via wan_dhcp, /sbin/init = oxwrtctl.
+# install_firewall, WAN comes up via wan_dhcp, /sbin/init = oxwrtd.
 #
 # Earlier we coexisted with the stock stack ("pid1-coexist") to reduce
-# bring-up risk — oxwrtctl ran as /sbin/procd with procd-init handling
+# bring-up risk — oxwrtd ran as /sbin/procd with procd-init handling
 # preinit, /sbin/init still being stock. Stage 4 of the migration
-# replaced /sbin/init with oxwrtctl and implemented mount_root +
-# modules.dep + netdev rename in Rust (see oxwrtctl/src/init.rs).
+# replaced /sbin/init with oxwrtd and implemented mount_root +
+# modules.dep + netdev rename in Rust (see oxwrtd/src/init.rs).
 # Stage 5 (this list) removes the packages that are now dead weight.
 #
 # Kept:
@@ -365,66 +365,66 @@ IMAGEBUILDER_PACKAGES := \
 # because make's mtime-based up-to-date logic would skip the rm-rf
 # and leak artifacts from a previous layer.
 
-# ── stage-bare: minimal image (oxwrtctl binary only) ────────────────
+# ── stage-bare: minimal image (oxwrtd binary only) ────────────────
 #
 # Populates files/ with:
-#   /usr/bin/oxwrtctl
+#   /usr/bin/oxwrtd
 #   /etc/oxwrt.toml
 #   /etc/oxwrt/mode                (= "control-only" default)
 #   /etc/oxwrt/authorized_keys     (empty — accept all MAC1 clients)
 #   /etc/dropbear/authorized_keys  (operator's ~/.ssh/id_ed25519.pub)
 #
 # Deliberately OMITS:
-#   /etc/init.d/oxwrtctl           (no procd integration)
+#   /etc/init.d/oxwrtd           (no procd integration)
 #   /etc/uci-defaults/97, 98, 99   (no first-boot scripts)
 #   /usr/lib/oxwrt/services/*      (no service rootfs, no binaries)
 #
 # Expected behavior post-flash: device boots stock OpenWrt with an
 # unused binary present but no auto-start. Operator SSHes in, runs
-# `/usr/bin/oxwrtctl --control-only` manually to confirm the binary
+# `/usr/bin/oxwrtd --control-only` manually to confirm the binary
 # works. This baseline proves the flash mechanism itself is fine
 # (same assumption as stock OpenWrt).
-imagebuilder-stage-bare: rust-oxwrtctl
+imagebuilder-stage-bare: rust-oxwrtd
 	$(call imagebuilder_check_dir)
 	$(call imagebuilder_clean_files)
 	$(call imagebuilder_stage_bare)
 	@echo ""
 	@echo "Staged BARE layer (binary + /etc/oxwrt + ssh keys). No init.d, no uci-defaults, no service rootfs."
 
-# ── stage-init: + /etc/init.d/oxwrtctl ──────────────────────────────
+# ── stage-init: + /etc/init.d/oxwrtd ──────────────────────────────
 #
 # Everything in -bare, plus the procd init script. Still no
 # uci-defaults, so the init script is shipped but NOT enabled at
 # boot — it doesn't appear in /etc/rc.d/S* on first boot. The
-# operator has to `/etc/init.d/oxwrtctl enable; start` from a shell.
+# operator has to `/etc/init.d/oxwrtd enable; start` from a shell.
 #
 # Tests whether the init.d shell script itself (the one with the
 # mode dispatcher) has a syntax / sourcing bug that breaks boot.
 # Even unenabled, procd scans /etc/init.d/ at boot for metadata —
 # a broken START=/STOP= directive or shellfail could in principle
 # upset preinit.
-imagebuilder-stage-init: rust-oxwrtctl
+imagebuilder-stage-init: rust-oxwrtd
 	$(call imagebuilder_check_dir)
 	$(call imagebuilder_clean_files)
 	$(call imagebuilder_stage_bare)
 	$(call imagebuilder_stage_init)
 	@echo ""
-	@echo "Staged INIT layer (+ /etc/init.d/oxwrtctl). Still no uci-defaults."
+	@echo "Staged INIT layer (+ /etc/init.d/oxwrtd). Still no uci-defaults."
 
-# ── stage-uci99: + 99-oxwrtctl uci-defaults ─────────────────────────
+# ── stage-uci99: + 99-oxwrtd uci-defaults ─────────────────────────
 #
 # Adds only the enable-on-first-boot hook. If the full image's hang
-# is caused by a misbehavior in /etc/init.d/oxwrtctl enable (which
+# is caused by a misbehavior in /etc/init.d/oxwrtd enable (which
 # procd runs via uci-defaults at preinit), this layer should
 # reproduce it — the 99 script's only action is `enable`.
-imagebuilder-stage-uci99: rust-oxwrtctl
+imagebuilder-stage-uci99: rust-oxwrtd
 	$(call imagebuilder_check_dir)
 	$(call imagebuilder_clean_files)
 	$(call imagebuilder_stage_bare)
 	$(call imagebuilder_stage_init)
-	$(call imagebuilder_stage_uci, 99-oxwrtctl)
+	$(call imagebuilder_stage_uci, 99-oxwrtd)
 	@echo ""
-	@echo "Staged UCI99 layer (+ 99-oxwrtctl uci-default = enable on first boot)."
+	@echo "Staged UCI99 layer (+ 99-oxwrtd uci-default = enable on first boot)."
 
 # ── stage-uci98: + 98-oxwrt-diag-rootfs ─────────────────────────────
 #
@@ -432,12 +432,12 @@ imagebuilder-stage-uci99: rust-oxwrtctl
 # /usr/lib/oxwrt/diag at first boot). Pure filesystem work — no
 # service registration or netlink — but it's the largest of our
 # uci-defaults scripts and touches many files.
-imagebuilder-stage-uci98: rust-oxwrtctl
+imagebuilder-stage-uci98: rust-oxwrtd
 	$(call imagebuilder_check_dir)
 	$(call imagebuilder_clean_files)
 	$(call imagebuilder_stage_bare)
 	$(call imagebuilder_stage_init)
-	$(call imagebuilder_stage_uci, 99-oxwrtctl)
+	$(call imagebuilder_stage_uci, 99-oxwrtd)
 	$(call imagebuilder_stage_uci, 98-oxwrt-diag-rootfs)
 	@echo ""
 	@echo "Staged UCI98 layer (+ 98-oxwrt-diag-rootfs)."
@@ -474,8 +474,8 @@ define imagebuilder_stage_bare
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear
 	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
-	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
-	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
 	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
@@ -489,12 +489,12 @@ endef
 
 define imagebuilder_stage_init
 	install -d $(IMAGEBUILDER_DIR)/files/etc/init.d
-	cp openwrt-packages/imagebuilder-overlay/files/etc/init.d/oxwrtctl \
-	   $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtctl
-	chmod 0755 $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtctl
+	cp openwrt-packages/imagebuilder-overlay/files/etc/init.d/oxwrtd \
+	   $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtd
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/etc/init.d/oxwrtd
 endef
 
-# $(1) = uci-defaults script basename (e.g. "99-oxwrtctl"). Wrapped in
+# $(1) = uci-defaults script basename (e.g. "99-oxwrtd"). Wrapped in
 # $(strip) because `$(call F, arg)` — the idiomatic spelling with a
 # space after the comma — passes " arg" with a leading space, which
 # then corrupts the cp path. `$(strip)` canonicalizes.
@@ -513,7 +513,7 @@ endef
 # Populate the imagebuilder's files/ overlay from our tracked overlay
 # + the cross-built binaries. Separated from `imagebuilder-image` so an
 # operator can inspect what gets shipped before the Docker build runs.
-imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
+imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	@if [ ! -d "$(IMAGEBUILDER_DIR)" ]; then \
 		echo "ERROR: $(IMAGEBUILDER_DIR) not found. Download the imagebuilder for mediatek/filogic from"; \
 		echo "  https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/"; \
@@ -531,8 +531,8 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin
 	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
-	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
-	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
+	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	# Service binaries at the rootfs-root paths the oxwrt.toml
 	# entrypoints expect.
 	for svc in dns ntp dhcp corerad hostapd; do \
@@ -558,7 +558,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	# host-side dir needed. Previously staged under /etc/oxwrt/ but
 	# that broke sysupgrade's config-backup tar step (UNIX domain
 	# sockets can't be archived as tar members).
-	# Stage `iw` at a host path too. oxwrtctl init uses it to pre-
+	# Stage `iw` at a host path too. oxwrtd init uses it to pre-
 	# create the AP-mode netdev on phy1 BEFORE hostapd spawns
 	# (hostapd's nl80211 driver doesn't auto-create from the
 	# "phyN-ifaceM" naming convention; OpenWrt's netifd did that).
@@ -595,7 +595,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	cp config/services/corerad/corerad.toml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/corerad.toml
 	# Pre-create the generated-hostapd-conf dir as writable state.
-	# Content is written at boot by oxwrtctl wifi::write_all() from the
+	# Content is written at boot by oxwrtd wifi::write_all() from the
 	# [[radios]] + [[wifi]] entries. Staging the dir empty here avoids
 	# a first-boot race where hostapd's bind-mount source doesn't exist
 	# yet (bind of a missing path fails hard).
@@ -650,12 +650,12 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	# Control-plane authorized_keys file is intentionally empty in the
 	# default image — an empty file makes the sQUIC server accept any
 	# valid MAC1 client. Operators who want pubkey pinning should push
-	# their control key post-flash via the `oxwrtctl --print-server-key`
+	# their control key post-flash via the `oxwrtd --print-server-key`
 	# workflow. The file must exist (server fails to start without it).
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
 	# Pre-stage the debug-ssh container rootfs entirely in the squashfs.
 	#
-	# Rationale: under oxwrtctl-as-pid1 there is no procd-style
+	# Rationale: under oxwrtd-as-pid1 there is no procd-style
 	# /etc/uci-defaults/* first-boot runner. The former
 	# 97-oxwrt-debug-ssh-rootfs script only executed once (on a
 	# stock-OpenWrt image that still had procd + preinit); after a
@@ -750,17 +750,17 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 #   execve("/sbin/procd")
 # So /sbin/procd is pid 1 *after* preinit has already mounted the
 # overlay, pivot_root'd, loaded modules, etc. By overwriting
-# /sbin/procd with oxwrtctl, we inherit pid 1 with the filesystem
+# /sbin/procd with oxwrtd, we inherit pid 1 with the filesystem
 # fully set up — no need to reimplement mount_root in Rust.
 #
 # Safety properties:
-#   - /sbin/init (procd-init) stays intact. If oxwrtctl fails to
+#   - /sbin/init (procd-init) stays intact. If oxwrtd fails to
 #     start, procd-init's internal failsafe still runs (the rootfs
 #     is already up, operator can boot into failsafe via uart and
 #     inspect).
 #   - debug-ssh service on :2222 (baked in via 97-oxwrt-debug-ssh-
 #     rootfs) provides a recovery shell without procd-supervised
-#     dropbear. Login works independently of oxwrtctl's own state.
+#     dropbear. Login works independently of oxwrtd's own state.
 #   - Mode is pinned to "init" so the supervisor activates the full
 #     async_main path (network, firewall, WAN DHCP, containers).
 #
@@ -769,12 +769,12 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 # case the device wedges. The first successful boot here is the
 # demo of "we replaced procd."
 imagebuilder-stage-pid1: imagebuilder-stage
-	# Overwrite stock procd binary with oxwrtctl. When /sbin/init
+	# Overwrite stock procd binary with oxwrtd. When /sbin/init
 	# execve's /sbin/procd at the end of preinit, our binary takes
 	# pid 1 — detected via getpid()==1 in main.rs and routed to
 	# run_init() automatically (no CLI flag needed).
 	mkdir -p $(IMAGEBUILDER_DIR)/files/sbin
-	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/sbin/procd
+	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/sbin/procd
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/sbin/procd
 	# Force mode=init. services-only would skip netlink + firewall
 	# install, leaving the device without networking (pre-takeover
@@ -783,7 +783,7 @@ imagebuilder-stage-pid1: imagebuilder-stage
 
 # ── stage-pid1-standalone: full stage + DIRECT pid1 takeover ───────
 #
-# Beyond stage-pid1: ALSO replaces /sbin/init with oxwrtctl, so the
+# Beyond stage-pid1: ALSO replaces /sbin/init with oxwrtd, so the
 # kernel hands control to our Rust binary DIRECTLY at boot. procd-
 # init never runs; neither do /etc/preinit or /lib/preinit/*.sh. All
 # responsibilities they owned (kmodloader via finit_module + modules.
@@ -811,9 +811,9 @@ imagebuilder-stage-pid1-standalone: imagebuilder-stage-pid1
 	# Overwrite procd-init at /sbin/init. The kernel's default
 	# init= argument resolves to /sbin/init; replacing that binary
 	# (not a symlink — the stock image ships it as a 65KB ELF) with
-	# oxwrtctl makes us pid 1 from the very first user-space
+	# oxwrtd makes us pid 1 from the very first user-space
 	# instruction.
-	cp $(RUST_TARGET_DIR)/oxwrtctl $(IMAGEBUILDER_DIR)/files/sbin/init
+	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/sbin/init
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/sbin/init
 	@echo ""
 	@echo "⚠️  pid1-standalone staged."
@@ -823,7 +823,7 @@ imagebuilder-stage-pid1-standalone: imagebuilder-stage-pid1
 imagebuilder-image-pid1-standalone: imagebuilder-stage-pid1-standalone .imagebuilder-build
 	@echo ""
 	@echo "PID-1 takeover layer applied:"
-	@echo "  /sbin/procd  → oxwrtctl ($$(du -h $(IMAGEBUILDER_DIR)/files/sbin/procd | cut -f1))"
+	@echo "  /sbin/procd  → oxwrtd ($$(du -h $(IMAGEBUILDER_DIR)/files/sbin/procd | cut -f1))"
 	@echo "  /etc/oxwrt/mode = init"
 	@echo ""
 	@echo "⚠️  FLASH WITH RECOVERY READY:"

@@ -1,7 +1,7 @@
 #!/bin/sh
 # integration-test.sh — end-to-end RPC test over sQUIC.
 #
-# Boots oxwrtctl as PID 1 in Docker, then exercises every RPC command
+# Boots oxwrtd as PID 1 in Docker, then exercises every RPC command
 # via the --client mode. Validates responses and exits with a summary.
 #
 # Usage:
@@ -9,22 +9,22 @@
 #
 # Prerequisites:
 #   - Docker Desktop
-#   - oxwrtctl built: target/aarch64-unknown-linux-musl/release/oxwrtctl
+#   - oxwrtd built: target/aarch64-unknown-linux-musl/release/oxwrtd
 
 set -eu
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # aarch64 binary for the Docker container (PID 1 server)
-BIN_LINUX="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtctl"
+BIN_LINUX="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtd"
 # macOS binary for the client (runs on the host)
-BIN_HOST="$PROJ_ROOT/target/release/oxwrtctl"
+BIN_HOST="$PROJ_ROOT/target/release/oxwrtd"
 
 if [ ! -f "$BIN_LINUX" ]; then
-    echo "Error: aarch64 oxwrtctl not found. Run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtctl" >&2
+    echo "Error: aarch64 oxwrtd not found. Run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtd" >&2
     exit 1
 fi
 if [ ! -f "$BIN_HOST" ]; then
-    echo "Error: host oxwrtctl not found. Run: cargo build --release -p oxwrtctl" >&2
+    echo "Error: host oxwrtd not found. Run: cargo build --release -p oxwrtd" >&2
     exit 1
 fi
 
@@ -100,9 +100,9 @@ dd if=/dev/urandom of="$TMPDIR/key.ed25519" bs=32 count=1 2>/dev/null
 # Retry once if Docker is flaky.
 derive_key() {
     docker run --rm \
-        -v "$BIN_LINUX:/oxwrtctl:ro" \
+        -v "$BIN_LINUX:/oxwrtd:ro" \
         -v "$TMPDIR/key.ed25519:/key:ro" \
-        alpine:latest /oxwrtctl --print-server-key /key 2>/dev/null
+        alpine:latest /oxwrtd --print-server-key /key 2>/dev/null
 }
 SERVER_KEY=$(derive_key || { sleep 2; derive_key; } || echo "KEYFAIL")
 if [ "$SERVER_KEY" = "KEYFAIL" ] || [ -z "$SERVER_KEY" ]; then
@@ -112,18 +112,18 @@ fi
 echo "Server key: $SERVER_KEY"
 
 echo ""
-echo "=== Starting oxwrtctl in Docker ==="
+echo "=== Starting oxwrtd in Docker ==="
 
-# Start the container in the background. oxwrtctl runs as PID 1.
+# Start the container in the background. oxwrtd runs as PID 1.
 # We use --network=host so the client can reach 127.0.0.1:51820.
 CONTAINER=$(docker run -d --rm --privileged --cgroupns=private \
     --network=host \
-    -v "$BIN_LINUX:/sbin/oxwrtctl:ro" \
+    -v "$BIN_LINUX:/sbin/oxwrtd:ro" \
     -v "$TMPDIR/oxwrt.toml:/etc/oxwrt.toml:ro" \
     -v "$TMPDIR/key.ed25519:/etc/oxwrt/key.ed25519:ro" \
     -e OXWRT_CONFIG=/etc/oxwrt.toml \
     alpine:latest \
-    /sbin/oxwrtctl --init)
+    /sbin/oxwrtd --init)
 
 echo "Container: $CONTAINER"
 

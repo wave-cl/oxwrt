@@ -1,15 +1,15 @@
 #!/bin/sh
 # Build a minimal diag rootfs at /usr/lib/oxwrt/diag/ from the stock
-# OpenWrt tree so `oxwrtctl diag ping/traceroute` works out of the box.
+# OpenWrt tree so `oxwrtd diag ping/traceroute` works out of the box.
 #
-# The oxwrtctl Diag RPC pivots the diagnostic binary into its own mount
+# The oxwrtd Diag RPC pivots the diagnostic binary into its own mount
 # namespace (see container::oneshot_exec). The rootfs only needs the
 # binary + the dynamic loader + any libs the binary links against. On
 # an OpenWrt stock build, ping and traceroute are BusyBox applets —
 # dispatch happens on argv[0] so the copied "ping" / "traceroute"
 # files are just busybox under different names.
 #
-# Runs before 99-oxwrtctl (alphabetical order) so the diag bins exist
+# Runs before 99-oxwrtd (alphabetical order) so the diag bins exist
 # before the control plane comes up.
 #
 # In a real firmware build this setup is replaced by the

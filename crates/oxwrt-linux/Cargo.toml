@@ -11,7 +11,7 @@ publish = false
 # native sysupgrade, in-memory service log ring buffer.
 #
 # Why one crate for six modules: every one of these has exactly one
-# consumer (the oxwrtctl daemon). Six Cargo.toml's + a combinatorial
+# consumer (the oxwrtd daemon). Six Cargo.toml's + a combinatorial
 # feature-flag matrix would be zero isolation benefit over a single
 # `pub mod {container, net, dhcp, wifi, sysupgrade, logd}` layout.
 # All six already share most of their deps (rustix, netlink, libc) so

@@ -1,20 +1,28 @@
 [package]
-name = "oxwrtctl"
+name = "oxwrtd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# The PID-1 daemon. Installed as /usr/bin/oxwrtd on-device; the kernel
+# execs it via the /sbin/init → oxwrtd symlink at boot. Everything
+# userspace on this router runs under this one process: early mounts,
+# module loading, mount_root, netdev rename, service supervision, the
+# sQUIC control plane.
+#
+# Companion binaries are in sibling crates:
+# - `oxctl` (crates/oxwrtctl-cli) — operator-facing CLI client
+# - diag-only helpers ship from upstream OpenWrt packages
 [[bin]]
-name = "oxwrtctl"
+name = "oxwrtd"
 path = "src/main.rs"
 
 [dependencies]
 oxwrt-api.workspace = true
 oxwrt-proto.workspace = true
-# Daemon's `--client` subcommand calls into oxwrtctl-cli's run() so
-# operator muscle memory (`oxwrtctl --client …`) keeps working after
-# the CLI got extracted into its own bin/lib crate.
+# Daemon's `--client` subcommand shares the oxwrtctl-cli lib so
+# `oxwrtd --client …` and `oxctl …` hit the same code path.
 oxwrtctl-cli.workspace = true
 squic.workspace = true
 tokio.workspace = true

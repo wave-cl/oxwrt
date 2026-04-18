@@ -3,7 +3,7 @@
 //!
 //! Why native: the stock /sbin/sysupgrade is a shell script that calls
 //! `ubus call system sysupgrade` to hand off to procd's stage2. When
-//! oxwrtctl replaces procd, no ubus broker is running and the hand-off
+//! oxwrtd replaces procd, no ubus broker is running and the hand-off
 //! fails. Rather than ship ubusd + fake ubus shims just to satisfy a
 //! shell script, we reimplement the ~200 lines of logic that actually
 //! matter for this board in Rust.

@@ -15,7 +15,7 @@ define Package/oxwrt-ntp
   SECTION:=oxwrt
   CATEGORY:=oxwrt services
   TITLE:=ntpd-rs NTP client+server
-  DEPENDS:=+oxwrtctl
+  DEPENDS:=+oxwrtd
 endef
 
 OXWRT_ROOT:=$(CURDIR)/../..

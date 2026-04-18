@@ -18,7 +18,7 @@
 //!
 //! ## Split history
 //!
-//! Moved out of `oxwrtctl/src/control.rs` during the workspace split
+//! Moved out of `oxwrtd/src/control.rs` during the workspace split
 //! (step 3 of the plan). The daemon-specific pieces — `ControlState`,
 //! `SharedLease`, `pub mod {client,server,validate}` — stay there.
 
@@ -120,7 +120,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             })
         }
         "update" => {
-            // `oxwrtctl --client <remote> update <firmware.bin>`
+            // `oxwrtd --client <remote> update <firmware.bin>`
             // The path is used by the client to read the file and compute
             // SHA-256. The Request carries size + hash; the file bytes
             // are streamed separately on the sQUIC bi-stream.
@@ -199,7 +199,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
 /// reset over the control plane would immediately drop its only
 /// management path.
 ///
-/// The reset handler in `oxwrtctl::control::server::reset` calls this
+/// The reset handler in `oxwrtd::control::server::reset` calls this
 /// via `oxwrt_proto::default_config_text`.
 pub fn default_config_text(control: &Control) -> String {
     let listen_lines = control
@@ -210,7 +210,7 @@ pub fn default_config_text(control: &Control) -> String {
         .join(",\n");
     let authorized_keys = control.authorized_keys.display();
     format!(
-        r#"# oxwrt.toml — written by `oxwrtctl reset`. Edit freely.
+        r#"# oxwrt.toml — written by `oxwrtd reset`. Edit freely.
 hostname = "oxwrt"
 
 [[networks]]
@@ -300,7 +300,7 @@ pub fn format_response(resp: &Response) -> String {
                     ));
                     // Indented last-log line if the server sent one —
                     // makes crash causes visible at a glance instead
-                    // of forcing an `oxwrtctl logs <service>` follow-up.
+                    // of forcing an `oxwrtd logs <service>` follow-up.
                     if let Some(line) = &s.last_log {
                         if !line.is_empty() {
                             out.push_str(&format!("    ↳ {}\n", line.trim_end()));

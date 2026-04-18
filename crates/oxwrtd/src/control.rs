@@ -48,7 +48,7 @@ pub struct ControlState {
     /// few hundred ms of early mounts / netlink setup before this
     /// fires — but close enough for operational use.
     pub boot_time: std::time::Instant,
-    /// True when `oxwrtctl` was started with `--control-only`. In this
+    /// True when `oxwrtd` was started with `--control-only`. In this
     /// mode the control plane is the only subsystem running — no early
     /// mounts, no netlink, no firewall, no supervisor. `reload` honors
     /// this flag by re-parsing + swapping the in-memory config but

@@ -16,11 +16,11 @@ pub enum Request {
     /// preservation, a reset over the control plane would immediately
     /// drop the only management path. `confirm` MUST be true; the
     /// server rejects any Reset without it so an accidental
-    /// `oxwrtctl reset` typo can't wipe the operator's config.
+    /// `oxwrtd reset` typo can't wipe the operator's config.
     Reset { confirm: bool },
     /// In-process diagnostic operation. Replaces the "ssh in and run
     /// `ip addr`" recovery loop on traditional routers — every diag
-    /// runs inside `oxwrtctl` against the host network namespace
+    /// runs inside `oxwrtd` against the host network namespace
     /// using the existing rtnetlink/rustables deps, so the appliance
     /// model survives (no shell, no extra binaries shipped). The
     /// known ops are a fixed string-keyed enum; unknown ops return an
@@ -103,7 +103,7 @@ pub struct ServiceStatus {
     pub uptime_secs: u64,
     /// Most recent log line captured from the service's stderr, if
     /// any. Populated from the per-service ring in `logd` — so an
-    /// operator looking at `oxwrtctl --client <addr> status` gets a
+    /// operator looking at `oxwrtd --client <addr> status` gets a
     /// one-line hint about *why* a Crashed service crashed, without
     /// needing to shell into the device or call `logs <name>`.
     ///

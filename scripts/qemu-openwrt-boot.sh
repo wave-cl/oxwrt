@@ -1,10 +1,10 @@
 #!/bin/sh
 # qemu-openwrt-boot.sh — boot OpenWrt 25.12.2 armsr/armv8 in QEMU with
-# our overlay injected. Used to verify that our overlay (oxwrtctl
+# our overlay injected. Used to verify that our overlay (oxwrtd
 # binary + /etc/init.d + /etc/uci-defaults + /etc/oxwrt.toml) doesn't
 # introduce a boot-blocking bug.
 #
-# Complementary to qemu-boot.sh, which smoke-tests `oxwrtctl --init`
+# Complementary to qemu-boot.sh, which smoke-tests `oxwrtd --init`
 # as PID 1 in a minimal initramfs. This script runs the FULL OpenWrt
 # preinit + procd + netifd boot sequence with our overlay files in
 # place, exactly as they'd be on a flashed device — just on a
@@ -18,8 +18,8 @@
 # Prerequisites:
 #   - Docker Desktop (for ext4 mount + overlay injection)
 #   - qemu-system-aarch64 (brew install qemu)
-#   - aarch64 oxwrtctl built:
-#       cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtctl
+#   - aarch64 oxwrtd built:
+#       cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtd
 #
 # Output:
 #   /tmp/armvirt-qemu/img-with-overlay.img (the boot image)
@@ -32,13 +32,13 @@ KEEP=0
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="/tmp/armvirt-qemu"
-OXWRTCTL="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtctl"
+OXWRTCTL="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtd"
 IMG_URL_BASE="https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8"
 IMG_NAME="openwrt-25.12.2-armsr-armv8-generic-ext4-combined-efi.img"
 
 if [ ! -f "$OXWRTCTL" ]; then
-    echo "Error: oxwrtctl not built for aarch64. Run:" >&2
-    echo "  cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtctl" >&2
+    echo "Error: oxwrtd not built for aarch64. Run:" >&2
+    echo "  cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtd" >&2
     exit 1
 fi
 
@@ -91,19 +91,19 @@ mount -o loop,offset=$OFFSET img-with-overlay.img /mnt/root
 
 # Binary + config (bare layer)
 mkdir -p /mnt/root/etc/oxwrt /mnt/root/usr/bin
-cp /repo/target/aarch64-unknown-linux-musl/release/oxwrtctl /mnt/root/usr/bin/oxwrtctl
-chmod 755 /mnt/root/usr/bin/oxwrtctl
+cp /repo/target/aarch64-unknown-linux-musl/release/oxwrtd /mnt/root/usr/bin/oxwrtd
+chmod 755 /mnt/root/usr/bin/oxwrtd
 cp /repo/config/oxwrt.toml /mnt/root/etc/oxwrt.toml
 echo control-only > /mnt/root/etc/oxwrt/mode
 touch /mnt/root/etc/oxwrt/authorized_keys
 
 # init.d
-cp /repo/openwrt-packages/imagebuilder-overlay/files/etc/init.d/oxwrtctl \
-   /mnt/root/etc/init.d/oxwrtctl
-chmod 755 /mnt/root/etc/init.d/oxwrtctl
+cp /repo/openwrt-packages/imagebuilder-overlay/files/etc/init.d/oxwrtd \
+   /mnt/root/etc/init.d/oxwrtd
+chmod 755 /mnt/root/etc/init.d/oxwrtd
 
 # uci-defaults
-for f in 99-oxwrtctl 98-oxwrt-diag-rootfs 97-oxwrt-debug-ssh-rootfs; do
+for f in 99-oxwrtd 98-oxwrt-diag-rootfs 97-oxwrt-debug-ssh-rootfs; do
     cp /repo/openwrt-packages/imagebuilder-overlay/files/etc/uci-defaults/\$f \
        /mnt/root/etc/uci-defaults/\$f
     chmod 755 /mnt/root/etc/uci-defaults/\$f
@@ -117,7 +117,7 @@ fi
 
 echo 'overlay injected:'
 ls /mnt/root/etc/uci-defaults/ | grep oxwrt
-ls -la /mnt/root/usr/bin/oxwrtctl
+ls -la /mnt/root/usr/bin/oxwrtd
 
 sync
 umount /mnt/root

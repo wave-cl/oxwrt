@@ -1,6 +1,6 @@
 # oxwrt example configuration.
 #
-# This file is parsed by `config::Config` (oxwrtctl/src/config.rs). Every
+# This file is parsed by `config::Config` (oxwrtd/src/config.rs). Every
 # knob the firmware supports today appears somewhere below — use it as a
 # cookbook. Fields with defaults can be omitted; the commented-out lines
 # show the default value where relevant.

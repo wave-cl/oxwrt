@@ -93,7 +93,7 @@ pub fn run() -> Result<(), Error> {
     if let Err(e) = mount_root_if_needed() {
         // Non-fatal: if we fail to set up the overlay here AND
         // procd-init didn't set it up either, /etc is read-only
-        // squashfs and config-reload will fail. But oxwrtctl can
+        // squashfs and config-reload will fail. But oxwrtd can
         // still start the control plane on the in-memory config,
         // so operators have a recovery path.
         tracing::error!(error = %e, "mount_root_if_needed failed");
@@ -164,7 +164,7 @@ pub fn run_control_only() -> Result<(), Error> {
 /// between `--control-only` (supervisor empty) and full `--init`
 /// (supervisor + netlink + firewall + PID 1 duties). Used during
 /// bring-up to exercise the supervisor on a stock OpenWrt device:
-/// procd/netifd/fw4 stay in charge of the network, oxwrtctl only
+/// procd/netifd/fw4 stay in charge of the network, oxwrtd only
 /// runs the declared services.
 ///
 /// Prerequisite on the host: `/dev/pts` already mounted (procd does
@@ -191,7 +191,7 @@ async fn services_only_main(cfg: Config) -> Result<(), Error> {
     tracing::info!(
         hostname = %cfg.hostname,
         services = cfg.services.len(),
-        "oxwrtctl: services-only mode"
+        "oxwrtd: services-only mode"
     );
 
     // cgroup controller enable is idempotent and cheap — even if procd
@@ -263,11 +263,11 @@ async fn services_only_main(cfg: Config) -> Result<(), Error> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("oxwrtctl: SIGINT → shutdown");
+                tracing::info!("oxwrtd: SIGINT → shutdown");
                 break;
             }
             _ = term.recv() => {
-                tracing::info!("oxwrtctl: SIGTERM → shutdown");
+                tracing::info!("oxwrtd: SIGTERM → shutdown");
                 break;
             }
         }
@@ -284,7 +284,7 @@ async fn control_only_main(cfg: Config) -> Result<(), Error> {
     tracing::info!(
         hostname = %cfg.hostname,
         services = cfg.services.len(),
-        "oxwrtctl: control-plane-only mode"
+        "oxwrtd: control-plane-only mode"
     );
 
     // Empty state: no firewall dump, no WAN lease, empty supervisor.
@@ -327,10 +327,10 @@ async fn control_only_main(cfg: Config) -> Result<(), Error> {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("oxwrtctl: SIGINT → shutdown");
+            tracing::info!("oxwrtd: SIGINT → shutdown");
         }
         _ = term.recv() => {
-            tracing::info!("oxwrtctl: SIGTERM → shutdown");
+            tracing::info!("oxwrtd: SIGTERM → shutdown");
         }
     }
 
@@ -347,7 +347,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     tracing::info!(
         hostname = %cfg.hostname,
         services = cfg.services.len(),
-        "oxwrtctl: supervisor starting"
+        "oxwrtd: supervisor starting"
     );
 
     // Apply the hostname to the kernel so `gethostname(2)` returns what
@@ -385,7 +385,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // every few seconds to keep the timer from firing. When we replace
     // procd, the watchdog is still on but nobody's petting it, so the
     // device reboots ~30s into every boot. That reboot loop is
-    // indistinguishable from an oxwrtctl crash unless you squint at
+    // indistinguishable from an oxwrtd crash unless you squint at
     // UART logs for "mtk-wdt ... Watchdog enabled".
     //
     // Best-effort: opens /dev/watchdog, writes a byte, sleeps 5s, loops
@@ -404,7 +404,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // Run once-per-boot first-boot scripts under /etc/uci-defaults/.
     // Normally procd executes these as part of its boot sequence; since
     // we replace procd, we have to do it ourselves — otherwise
-    // /etc/init.d/oxwrtctl never gets enabled (irrelevant under our own
+    // /etc/init.d/oxwrtd never gets enabled (irrelevant under our own
     // supervision) and more importantly the per-service rootfs
     // provisioners (97-oxwrt-debug-ssh-rootfs, 98-oxwrt-diag-rootfs)
     // never run, leaving those services with empty rootfs dirs and
@@ -583,11 +583,11 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("oxwrtctl: SIGINT → shutdown");
+                tracing::info!("oxwrtd: SIGINT → shutdown");
                 break;
             }
             _ = term.recv() => {
-                tracing::info!("oxwrtctl: SIGTERM → shutdown");
+                tracing::info!("oxwrtd: SIGTERM → shutdown");
                 break;
             }
             _ = hup.recv() => {
@@ -597,7 +597,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 // rebuild supervisor → publish new state. Useful when an
                 // operator edits /etc/oxwrt.toml via TFTP/serial
                 // recovery and wants to apply without a reboot.
-                tracing::info!("oxwrtctl: SIGHUP → reload");
+                tracing::info!("oxwrtd: SIGHUP → reload");
                 let resp = control::server::handle_reload_async(&state).await;
                 match &resp {
                     crate::rpc::Response::Ok => {
@@ -882,7 +882,7 @@ fn bootstrap_clock_floor() {
 /// we tolerate).
 ///
 /// No udev-rule processing, no permission tweaking — every node gets
-/// mode 0600, owner root. That's enough for oxwrtctl's needs.
+/// mode 0600, owner root. That's enough for oxwrtd's needs.
 fn populate_dev_from_sys() {
     use std::ffi::CString;
     for (kind, mode_bits) in [("block", libc::S_IFBLK), ("char", libc::S_IFCHR)] {
@@ -1459,7 +1459,7 @@ fn overlay_is_attached() -> Result<bool, Error> {
 ///
 /// Best-effort: a missing .ko file or a genuine finit_module error
 /// is logged at warn level and the loop continues. A missing
-/// kernel module is almost never fatal for oxwrtctl's own needs,
+/// kernel module is almost never fatal for oxwrtd's own needs,
 /// and a panicked init makes diagnosis much harder than a running
 /// init with one missing driver.
 ///
@@ -1680,7 +1680,7 @@ fn parse_modules_dep(
 /// Why byte-scan instead of proper ELF parsing: `.modinfo` contents are
 /// always a sequence of NUL-terminated `key=value` strings, and "depends="
 /// is a sufficiently distinctive prefix that a raw memmem search is
-/// correct for every real kernel .ko. This keeps oxwrtctl dependency-free
+/// correct for every real kernel .ko. This keeps oxwrtd dependency-free
 /// (no `object` / `goblin` / `elf` crate).
 fn parse_modinfo_deps(
     modules_root: &Path,
@@ -1955,7 +1955,7 @@ fn find_ko_under(root: &Path, candidates: &[String]) -> Option<PathBuf> {
 /// OpenWrt's stock uci-defaults (05_fix-compat-version, 10_migrate-
 /// shadow, 14_network-generate-duid, 50-dropbear, 15_odhcpd, etc.)
 /// all assume a procd + ubus + board.json world. Running them under
-/// oxwrtctl-as-pid-1 produces a parade of errors — "local: line 47:
+/// oxwrtd-as-pid-1 produces a parade of errors — "local: line 47:
 /// not in a function" (dash vs bash), "Failed to parse message data"
 /// (no ubus), "/etc/board.json: No such file" (no board-detect init
 /// script ran), "uci: Entry not found" (no stock uci configs
@@ -1964,7 +1964,7 @@ fn find_ko_under(root: &Path, candidates: &[String]) -> Option<PathBuf> {
 /// in /etc/oxwrt.toml and is reloaded via the control plane.
 ///
 /// Our own provisioners (97-oxwrt-debug-ssh-rootfs, 98-oxwrt-diag-
-/// rootfs, 99-oxwrtctl) all have "oxwrt" in the name. Whitelisting
+/// rootfs, 99-oxwrtd) all have "oxwrt" in the name. Whitelisting
 /// by substring keeps the filter readable and lets operators drop
 /// custom scripts that opt in by naming them with "oxwrt" somewhere.
 fn run_uci_defaults() {

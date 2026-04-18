@@ -1,7 +1,7 @@
 # OpenWRT package: hickory-dns service rootfs.
 #
 # Installs the pre-built hickory-dns binary + its config file into the
-# service rootfs directory that oxwrtctl pivot_roots into.
+# service rootfs directory that oxwrtd pivot_roots into.
 
 include $(TOPDIR)/rules.mk
 
@@ -15,7 +15,7 @@ define Package/oxwrt-dns
   SECTION:=oxwrt
   CATEGORY:=oxwrt services
   TITLE:=hickory-dns forwarding resolver
-  DEPENDS:=+oxwrtctl
+  DEPENDS:=+oxwrtd
 endef
 
 OXWRT_ROOT:=$(CURDIR)/../..

@@ -110,7 +110,7 @@ printf "  U-Boot    "; grep -c -E "^U-Boot |bootargs=|Loading Environment" "$LOG
 printf "  Kernel    "; grep -c -E "^\[ *[0-9]+\.[0-9]+\]" "$LOGFILE" 2>/dev/null || echo 0
 printf "  procd     "; grep -c -E "procd:" "$LOGFILE" 2>/dev/null || echo 0
 printf "  uci-def.. "; grep -c -E "uci-default" "$LOGFILE" 2>/dev/null || echo 0
-printf "  oxwrtctl  "; grep -c -E "oxwrtctl" "$LOGFILE" 2>/dev/null || echo 0
+printf "  oxwrtd  "; grep -c -E "oxwrtd" "$LOGFILE" 2>/dev/null || echo 0
 
 echo ""
 echo "=== tail of capture (last 20 lines) ==="

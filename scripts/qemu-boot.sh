@@ -1,7 +1,7 @@
 #!/bin/sh
-# qemu-boot.sh — boot oxwrtctl as PID 1 in QEMU aarch64-virt.
+# qemu-boot.sh — boot oxwrtd as PID 1 in QEMU aarch64-virt.
 #
-# Builds a minimal initramfs containing oxwrtctl + a stub config,
+# Builds a minimal initramfs containing oxwrtd + a stub config,
 # downloads an Alpine aarch64 kernel, and boots QEMU. This proves the
 # full PID-1 init flow (early mounts, config load, hostname, cgroup
 # setup, supervisor start) in a real kernel — not just Docker pre_exec.
@@ -12,19 +12,19 @@
 # Prerequisites:
 #   - Docker (for initramfs assembly — aarch64 native on Apple Silicon)
 #   - qemu-system-aarch64 (brew install qemu)
-#   - oxwrtctl built: target/aarch64-unknown-linux-musl/release/oxwrtctl
+#   - oxwrtd built: target/aarch64-unknown-linux-musl/release/oxwrtd
 #
 # The QEMU instance runs for ~5 seconds, captures serial output, and
-# exits. Success = "oxwrtctl: supervisor starting" in the output.
+# exits. Success = "oxwrtd: supervisor starting" in the output.
 
 set -eu
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJ_ROOT/build/qemu"
-OXWRTCTL="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtctl"
+OXWRTCTL="$PROJ_ROOT/target/aarch64-unknown-linux-musl/release/oxwrtd"
 
 if [ ! -f "$OXWRTCTL" ]; then
-    echo "Error: oxwrtctl not found. Run 'cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtctl' first." >&2
+    echo "Error: oxwrtd not found. Run 'cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtd' first." >&2
     exit 1
 fi
 
@@ -39,7 +39,7 @@ echo "=== Step 1: Build initramfs ==="
 # QEMU step below.
 docker run --rm \
     --platform linux/arm64 \
-    -v "$OXWRTCTL:/oxwrtctl:ro" \
+    -v "$OXWRTCTL:/oxwrtd:ro" \
     -v "$BUILD_DIR:/out" \
     alpine:latest sh -ec '
     # Install cpio for initramfs creation
@@ -51,12 +51,12 @@ docker run --rm \
         mkdir -p $INITRD/$d
     done
 
-    # Install oxwrtctl as /sbin/init AND /init (kernel looks for
+    # Install oxwrtd as /sbin/init AND /init (kernel looks for
     # /init in initramfs, /sbin/init on disk-based rootfs).
-    cp /oxwrtctl $INITRD/sbin/oxwrtctl
-    ln -sf oxwrtctl $INITRD/sbin/init
-    ln -sf sbin/oxwrtctl $INITRD/init
-    chmod +x $INITRD/sbin/oxwrtctl
+    cp /oxwrtd $INITRD/sbin/oxwrtd
+    ln -sf oxwrtd $INITRD/sbin/init
+    ln -sf sbin/oxwrtd $INITRD/init
+    chmod +x $INITRD/sbin/oxwrtd
 
     # Minimal config — no services, just enough to boot as PID 1 in
     # QEMU. Uses the unified `[[networks]]` array format (type-tagged
@@ -136,9 +136,9 @@ wait $QEMU_PID 2>/dev/null || true
 echo ""
 echo "=== Boot log analysis ==="
 if grep -q "supervisor starting" "$BUILD_DIR/boot.log"; then
-    echo "✅ oxwrtctl started as PID 1"
+    echo "✅ oxwrtd started as PID 1"
 else
-    echo "❌ oxwrtctl did not reach supervisor start"
+    echo "❌ oxwrtd did not reach supervisor start"
 fi
 
 if grep -q "sethostname" "$BUILD_DIR/boot.log" || grep -q "qemu-test" "$BUILD_DIR/boot.log"; then

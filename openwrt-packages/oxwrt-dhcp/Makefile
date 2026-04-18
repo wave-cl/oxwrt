@@ -15,7 +15,7 @@ define Package/oxwrt-dhcp
   SECTION:=oxwrt
   CATEGORY:=oxwrt services
   TITLE:=coredhcp DHCPv4 server
-  DEPENDS:=+oxwrtctl
+  DEPENDS:=+oxwrtd
 endef
 
 OXWRT_ROOT:=$(CURDIR)/../..

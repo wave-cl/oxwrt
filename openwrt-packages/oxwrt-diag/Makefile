@@ -17,7 +17,7 @@ define Package/oxwrt-diag
   SECTION:=oxwrt
   CATEGORY:=oxwrt services
   TITLE:=diagnostic binaries (ping, traceroute, dig)
-  DEPENDS:=+oxwrtctl
+  DEPENDS:=+oxwrtd
 endef
 
 OXWRT_ROOT:=$(CURDIR)/../..

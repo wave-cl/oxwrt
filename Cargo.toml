@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-    "oxwrtctl",
     "crates/oxwrt-api",
     "crates/oxwrt-linux",
     "crates/oxwrt-proto",
     "crates/oxwrtctl-cli",
+    "crates/oxwrtd",
 ]
 
 [workspace.package]

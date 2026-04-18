@@ -444,7 +444,7 @@ fn build_request(
 /// hardware.
 ///
 /// Requires `CAP_NET_RAW` in the caller's effective set. PID 1 has
-/// the full cap set (hardening applies to children, not to oxwrtctl
+/// the full cap set (hardening applies to children, not to oxwrtd
 /// itself), so this works from `init::async_main`.
 fn send_raw_dhcp_broadcast(
     iface_idx: u32,
