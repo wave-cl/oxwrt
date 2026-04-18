@@ -125,11 +125,14 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
     // Pre-flight: walk the tar listing once BEFORE the destructive
     // writes in flash_image. If the tar is malformed or missing
     // kernel/root members, we want to know NOW, not after we've
-    // zeroed the kernel partition head. An earlier incident (v12
-    // boot cycle) shipped a GzDecoder wrapper that mis-parsed the
-    // plain-tar format, aborted after zero-ing the kernel, and left
-    // the device un-rebootable. Pre-flight is cheap insurance.
-    preflight_tar(&image_file, tar_len)?;
+    // zeroed the kernel partition head.
+    //
+    // Crucial: open a SEPARATE File for the scan — try_clone shares
+    // the underlying offset, so reading through the clone would
+    // advance the "real" file's offset too, and the subsequent
+    // flash_image stream would find an empty tar. (Lesson paid for
+    // in a v13 live test.)
+    preflight_tar(image_path)?;
 
     // Step 4: resolve partitions ahead of pivot. After the pivot,
     // /sys gets moved into the new root and is still present, but
@@ -518,27 +521,39 @@ fn pivot_to_ramfs() -> Result<(), Error> {
 // ── pre-flight validation ──────────────────────────────────────────
 
 /// Walk the tar members once, verify `root` and `kernel` are both
-/// present and reachable, and that the tar parses cleanly through to
-/// EOF. Does not write anything. Rewinds the passed-in file to 0 on
-/// return so flash_image can stream from the start.
-fn preflight_tar(image_file: &File, tar_len: u64) -> Result<(), Error> {
-    // Clone the fd rather than borrowing — tar::Archive::entries
-    // needs owned I/O. dup(2) via try_clone; on the same inode.
-    let clone = image_file
-        .try_clone()
-        .map_err(io("preflight: dup image fd"))?;
-    let limited = clone.take(tar_len);
-    let mut ar = tar::Archive::new(limited);
+/// present and reachable, and that the tar parses cleanly. Opens an
+/// independent File (not a clone of the flash-time fd) so the scan
+/// has its own read offset — try_clone shares offset on Linux, which
+/// would empty the flash-time stream before it starts.
+fn preflight_tar(image_path: &Path) -> Result<(), Error> {
+    let f = File::open(image_path)
+        .map_err(io(format!("preflight: open {}", image_path.display())))?;
+    // Note: no tar_len cap here — we don't need one for preflight.
+    // Reading past the fwtool trailer will cause tar to hit "bad
+    // archive" eventually, but we'll have already seen both members
+    // by then. Be defensive: break out of iteration on the first
+    // error, not mid-scan.
+    let mut ar = tar::Archive::new(f);
 
     let mut have_root = false;
     let mut have_kernel = false;
     for entry in ar.entries().map_err(io("preflight: tar entries"))? {
-        let entry = entry.map_err(io("preflight: tar entry"))?;
+        let entry = match entry {
+            Ok(e) => e,
+            // Hitting the fwtool trailer past tar_len will surface as
+            // a tar parse error. If we already have both members by
+            // then, short-circuit — no point propagating.
+            Err(_) if have_root && have_kernel => break,
+            Err(e) => return Err(io("preflight: tar entry")(e)),
+        };
         let path = entry.path().map_err(io("preflight: tar entry path"))?.into_owned();
         match path.file_name().and_then(|s| s.to_str()).unwrap_or("") {
             "root" => have_root = true,
             "kernel" => have_kernel = true,
             _ => {}
+        }
+        if have_root && have_kernel {
+            break;
         }
     }
     if !have_root {
