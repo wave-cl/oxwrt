@@ -14,28 +14,22 @@
 //! hourly polls would be wasteful. Providers' rate limits are much
 //! higher than this so we're nowhere near throttled.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use oxwrt_api::config::Ddns;
 
-use crate::control::SharedLease;
+use crate::control::{ControlState, SharedLease};
 
 /// Spawn the DDNS updater task. Returns the JoinHandle in case the
-/// caller wants to abort on shutdown. Safe to call with an empty
-/// `entries` Vec — the task immediately returns.
-pub fn spawn(entries: Vec<Ddns>, lease: SharedLease) -> tokio::task::JoinHandle<()> {
+/// caller wants to abort on shutdown. Safe to call when `cfg.ddns`
+/// is empty — the task still runs a tick loop (cheap) and picks up
+/// any entries added via CRUD + reload, instead of requiring a
+/// reboot to start ddns for the first time.
+pub fn spawn(state: Arc<ControlState>, lease: SharedLease) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if entries.is_empty() {
-            return;
-        }
-        // Per-entry memory of the last-pushed IP so we only fire the
-        // update call when it's actually changed. Otherwise we'd
-        // spam the provider on every poll with an unchanged address.
-        let last_pushed: Arc<Mutex<Vec<Option<Ipv4Addr>>>> =
-            Arc::new(Mutex::new(vec![None; entries.len()]));
-
         let client = match build_client() {
             Ok(c) => c,
             Err(e) => {
@@ -44,34 +38,33 @@ pub fn spawn(entries: Vec<Ddns>, lease: SharedLease) -> tokio::task::JoinHandle<
             }
         };
 
+        // Per-entry memory of the last-pushed IP, keyed by the
+        // entry's `name` (CRUD-stable). Persisting the state across
+        // CRUD updates keeps us from re-pushing after an unrelated
+        // cfg reload: the name stays the same, the last-pushed IP
+        // stays mapped, no needless provider hit.
+        let mut last_pushed: HashMap<String, Ipv4Addr> = HashMap::new();
+
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            let cfg = state.config_snapshot();
+            if cfg.ddns.is_empty() {
+                continue;
+            }
             let Some(current_ip) = lease.read().ok().and_then(|l| l.as_ref().map(|x| x.address))
             else {
-                continue; // no WAN lease yet
+                continue;
             };
-            for (idx, entry) in entries.iter().enumerate() {
-                let prev = last_pushed
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.get(idx).copied().flatten());
-                if prev == Some(current_ip) {
+            for entry in &cfg.ddns {
+                if last_pushed.get(entry.name()) == Some(&current_ip) {
                     continue;
                 }
                 match push(&client, entry, current_ip).await {
                     Ok(()) => {
-                        tracing::info!(
-                            name = entry.name(),
-                            ip = %current_ip,
-                            "ddns push ok"
-                        );
-                        if let Ok(mut g) = last_pushed.lock() {
-                            if let Some(slot) = g.get_mut(idx) {
-                                *slot = Some(current_ip);
-                            }
-                        }
+                        tracing::info!(name = entry.name(), ip = %current_ip, "ddns push ok");
+                        last_pushed.insert(entry.name().to_string(), current_ip);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -83,6 +76,10 @@ pub fn spawn(entries: Vec<Ddns>, lease: SharedLease) -> tokio::task::JoinHandle<
                     }
                 }
             }
+            // Forget entries that are no longer in the config — stops
+            // the HashMap from growing across many CRUD add/remove
+            // churns. O(n log n) but n is tiny.
+            last_pushed.retain(|name, _| cfg.ddns.iter().any(|d| d.name() == name));
         }
     })
 }

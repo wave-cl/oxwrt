@@ -344,6 +344,20 @@ else
     echo "       got: $(echo "$R" | head -3)"
 fi
 
+echo "-- ddns CRUD --"
+R=$(run_cmd ddns list); check "ddns list (empty)" "[]" "$R"
+R=$(run_cmd ddns add '{"provider":"duckdns","name":"home","domain":"myrouter","token":"tok"}')
+check_ok "ddns add duckdns" "$R"
+R=$(run_cmd ddns get home); check "ddns get" "myrouter" "$R"
+R=$(run_cmd ddns list); check "ddns list (has home)" "home" "$R"
+R=$(run_cmd ddns add '{"provider":"cloudflare","name":"cf","zone_id":"z","record_id":"r","domain":"a.example.com","api_token":"tok"}')
+check_ok "ddns add cloudflare" "$R"
+# Dup rejection.
+R=$(run_cmd ddns add '{"provider":"duckdns","name":"home","domain":"x","token":"y"}')
+check_err "ddns add dup name" "already exists" "$R"
+R=$(run_cmd ddns remove home); check_ok "ddns remove" "$R"
+R=$(run_cmd ddns remove cf); check_ok "ddns remove cf" "$R"
+
 echo "-- port-forward CRUD --"
 # Expand minimal test config to include a LAN for auto-detect, via an
 # add-network call. Then exercise port-forward add/list/get/remove.

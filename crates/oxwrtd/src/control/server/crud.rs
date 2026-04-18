@@ -1126,3 +1126,98 @@ fn write_client_conf(
     writeln!(out, "PersistentKeepalive = 25")?;
     Ok(())
 }
+
+pub(super) fn handle_crud_ddns(state: &ControlState, action: &CrudAction) -> Response {
+    use crate::config::Ddns;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.ddns) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => match cfg.ddns.iter().find(|d| d.name() == name) {
+            Some(d) => match serde_json::to_string_pretty(d) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
+                },
+            },
+            None => Response::Err {
+                message: format!("ddns not found: {name}"),
+            },
+        },
+        CrudAction::Add { json } => {
+            let item: Ddns = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            let item_name = item.name().to_string();
+            if cfg.ddns.iter().any(|d| d.name() == item_name) {
+                return Response::Err {
+                    message: format!("ddns already exists: {item_name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.ddns.push(item);
+            persist_and_swap(state, new_cfg, &format!("added ddns {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.ddns.iter().position(|d| d.name() == name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("ddns not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.ddns[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            // Ddns is a tagged enum — the `provider` field must be
+            // present in the merged value for serde to dispatch to
+            // the right variant. json_merge preserves the existing
+            // tag by default unless the partial overrode it.
+            let updated: Ddns = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.ddns[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated ddns {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.ddns.iter().any(|d| d.name() == name) {
+                return Response::Err {
+                    message: format!("ddns not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.ddns.retain(|d| d.name() != name);
+            persist_and_swap(state, new_cfg, &format!("removed ddns {name}"))
+        }
+    }
+}

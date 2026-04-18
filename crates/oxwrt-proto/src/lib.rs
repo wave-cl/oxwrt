@@ -156,7 +156,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             Ok(Request::FwApply { confirm: true, keep_settings })
         }
         "network" | "zone" | "rule" | "wifi" | "radio" | "service" | "port-forward"
-        | "wg-peer" => {
+        | "wg-peer" | "ddns" => {
             let action = match args.first().map(|s| s.as_str()) {
                 Some("list") => CrudAction::List,
                 Some("get") => {

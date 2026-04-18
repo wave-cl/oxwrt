@@ -563,7 +563,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // changes. No-op if the list is empty. Safe to start this
     // before the first DHCP lease lands — the task internally
     // skips ticks where the lease is still None.
-    crate::ddns::spawn(cfg.ddns.clone(), wan_lease.clone());
+    crate::ddns::spawn(state.clone(), wan_lease.clone());
 
     // AP-state watcher. Fires a warn-log if any expected AP iface
     // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s
