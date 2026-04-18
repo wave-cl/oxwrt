@@ -1325,6 +1325,13 @@ fn load_modules() {
         return;
     }
 
+    // Parse modules.dep once up front. Maps module name → list of
+    // dep module names (in bottom-up load order per depmod's
+    // convention). Best-effort: if the file is missing or unparseable
+    // we continue with an empty map; load_one_module then runs without
+    // dep resolution and the /sys/module pre-check keeps it safe.
+    let depmap = parse_modules_dep(&modules_root);
+
     for dir in ["/etc/modules-boot.d", "/etc/modules.d"] {
         let rd = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
@@ -1341,16 +1348,75 @@ fn load_modules() {
             .collect();
         files.sort();
         for f in files {
-            load_modules_file(&f, &modules_root);
+            load_modules_file(&f, &modules_root, &depmap);
         }
     }
+}
+
+/// Parse /lib/modules/<ver>/modules.dep into a map of
+/// `module_name → [dep_names]`. Format:
+///
+///     kernel/fs/f2fs/f2fs.ko: kernel/crypto/crc32c-generic.ko
+///     kernel/net/ipv4/ip_tables.ko:
+///     kernel/net/ipv4/nf_reject_ipv4.ko: kernel/net/nf_tables.ko
+///
+/// Each line: module-path ':' then zero or more dep-paths. We key
+/// by the basename-without-.ko.
+///
+/// Returned deps are in the order they appear, which depmod emits
+/// such that loading them left-to-right produces a valid sequence.
+/// For our use we do a DFS before loading each top-level module, so
+/// order within a single line's deps doesn't matter much — but we
+/// preserve it for predictability.
+fn parse_modules_dep(
+    modules_root: &Path,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let path = modules_root.join("modules.dep");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "modules.dep not read; continuing without dep resolution");
+            return std::collections::HashMap::new();
+        }
+    };
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once(':') else {
+            continue;
+        };
+        let name = module_name_from_ko_path(lhs);
+        let deps: Vec<String> = rhs
+            .split_whitespace()
+            .map(module_name_from_ko_path)
+            .collect();
+        map.insert(name, deps);
+    }
+    tracing::debug!(modules = map.len(), "parsed modules.dep");
+    map
+}
+
+/// "kernel/drivers/net/foo.ko" → "foo"
+/// "kernel/drivers/net/foo.ko.xz" → "foo"
+fn module_name_from_ko_path(p: &str) -> String {
+    let base = p.rsplit('/').next().unwrap_or(p);
+    let base = base.trim_end_matches(".xz").trim_end_matches(".gz").trim_end_matches(".zst");
+    let base = base.trim_end_matches(".ko");
+    base.to_string()
 }
 
 /// Parse one file under /etc/modules{,-boot}.d/ and load each module
 /// listed. Format matches stock ubox/kmodloader:
 ///   # comment
 ///   <module-name> [param1=val1 param2=val2 ...]
-fn load_modules_file(file: &Path, modules_root: &Path) {
+fn load_modules_file(
+    file: &Path,
+    modules_root: &Path,
+    depmap: &std::collections::HashMap<String, Vec<String>>,
+) {
     let content = match std::fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -1366,7 +1432,45 @@ fn load_modules_file(file: &Path, modules_root: &Path) {
         let mut it = line.splitn(2, char::is_whitespace);
         let Some(name) = it.next() else { continue };
         let params = it.next().unwrap_or("").trim();
+        // Depth-first: load all transitive deps before the requested
+        // module. Normalize - → _ for lookup; modules.dep uses the
+        // underscore form canonical to the kernel.
+        let canon = name.replace('-', "_");
+        let mut visited = std::collections::HashSet::new();
+        load_with_deps(&canon, depmap, modules_root, &mut visited);
+        // Now load the requested module (with its params).
         load_one_module(name, params, modules_root);
+    }
+}
+
+/// Walk the dep tree of `name` depth-first, loading each dep exactly
+/// once (params defaulted to empty for dependency loads — they get
+/// the kernel's default settings). `visited` short-circuits cycles
+/// and repeat visits.
+fn load_with_deps(
+    name: &str,
+    depmap: &std::collections::HashMap<String, Vec<String>>,
+    modules_root: &Path,
+    visited: &mut std::collections::HashSet<String>,
+) {
+    if !visited.insert(name.to_string()) {
+        return;
+    }
+    if let Some(deps) = depmap.get(name) {
+        for d in deps {
+            load_with_deps(d, depmap, modules_root, visited);
+        }
+        // Finally load this module (no params — deps don't get the
+        // config line's params). Skip if this is the top-level caller,
+        // which load_modules_file will load with its own params.
+        // Detect "top level" by checking: if the module has no deps
+        // at all, is_empty is true — but that doesn't uniquely mark
+        // us. Use visited.len() instead: exactly 1 means we're the
+        // first node to land in the set and load_modules_file will
+        // do the final load with params.
+        if visited.len() > 1 {
+            load_one_module(name, "", modules_root);
+        }
     }
 }
 
