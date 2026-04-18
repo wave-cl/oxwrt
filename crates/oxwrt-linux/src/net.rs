@@ -99,7 +99,14 @@ impl Net {
     }
 
     async fn setup_lan(&self, net: &Network) -> Result<(), Error> {
-        let Network::Lan { bridge, members, address, prefix, .. } = net else {
+        let Network::Lan {
+            bridge,
+            members,
+            address,
+            prefix,
+            ..
+        } = net
+        else {
             return Ok(());
         };
         if matches!(self.link_index(bridge).await, Err(Error::LinkNotFound(_))) {
@@ -366,8 +373,11 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // Gated on WAN being in DHCP mode — static WAN doesn't need it,
     // and inserting it on a static WAN would needlessly accept DHCP
     // chatter arriving on that iface.
-    if let Some(Network::Wan { iface: wan_if, wan: WanConfig::Dhcp, .. }) =
-        cfg.primary_wan()
+    if let Some(Network::Wan {
+        iface: wan_if,
+        wan: WanConfig::Dhcp,
+        ..
+    }) = cfg.primary_wan()
     {
         let mut r = Rule::new(&input)
             .map_err(|e| Error::Firewall(e.to_string()))?
@@ -442,11 +452,14 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         let ports = port_spec_to_list(&rule.dest_port);
         let is_icmp = rule.proto == Some(Proto::Icmp);
 
-        let emit_rule = |chain: &Chain, batch: &mut Batch, iif: Option<&str>, oif: Option<&str>| -> Result<(), Error> {
+        let emit_rule = |chain: &Chain,
+                         batch: &mut Batch,
+                         iif: Option<&str>,
+                         oif: Option<&str>|
+         -> Result<(), Error> {
             if is_icmp {
                 // ICMP rules: no port, just iif match + accept/drop.
-                let mut r = Rule::new(chain)
-                    .map_err(|e| Error::Firewall(e.to_string()))?;
+                let mut r = Rule::new(chain).map_err(|e| Error::Firewall(e.to_string()))?;
                 if let Some(iif) = iif {
                     r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
                 }
@@ -459,8 +472,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             }
             if ports.is_empty() && protos.is_empty() {
                 // No port, no proto — just iif/oif match.
-                let mut r = Rule::new(chain)
-                    .map_err(|e| Error::Firewall(e.to_string()))?;
+                let mut r = Rule::new(chain).map_err(|e| Error::Firewall(e.to_string()))?;
                 if let Some(iif) = iif {
                     r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
                 }
@@ -477,8 +489,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             } else {
                 for &proto in &protos {
                     for &port in &ports {
-                        let mut r = Rule::new(chain)
-                            .map_err(|e| Error::Firewall(e.to_string()))?;
+                        let mut r = Rule::new(chain).map_err(|e| Error::Firewall(e.to_string()))?;
                         if let Some(iif) = iif {
                             r = r.iiface(iif).map_err(|e| Error::Firewall(e.to_string()))?;
                         }
@@ -851,11 +862,13 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
             for src_if in &src_ifaces {
                 if is_icmp {
                     out.push(format!(
-                        "    iif \"{src_if}\" {action_str}   # {}", rule.name
+                        "    iif \"{src_if}\" {action_str}   # {}",
+                        rule.name
                     ));
                 } else if ports.is_empty() && protos.is_empty() {
                     out.push(format!(
-                        "    iif \"{src_if}\" {action_str}   # {}", rule.name
+                        "    iif \"{src_if}\" {action_str}   # {}",
+                        rule.name
                     ));
                 } else {
                     for proto in &protos {
@@ -1091,9 +1104,7 @@ mod tests {
     //! inputs, so the tests don't need any mock netlink / cgroup /
     //! seccomp infrastructure.
     use super::*;
-    use oxwrt_api::config::{
-        Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone,
-    };
+    use oxwrt_api::config::{Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone};
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
@@ -1290,9 +1301,6 @@ mod tests {
             Some("trusted".to_string())
         );
         // Outside any subnet.
-        assert_eq!(
-            find_dest_zone_for_ip(&cfg, Ipv4Addr::new(8, 8, 8, 8)),
-            None
-        );
+        assert_eq!(find_dest_zone_for_ip(&cfg, Ipv4Addr::new(8, 8, 8, 8)), None);
     }
 }

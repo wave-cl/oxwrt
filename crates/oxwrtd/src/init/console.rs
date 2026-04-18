@@ -65,10 +65,7 @@ pub fn install_panic_hook() {
         eprintln!("===== /OXWRTD PANIC =====");
         // Then try /dev/kmsg so dmesg captures it too.
         use std::io::Write as _;
-        if let Ok(mut kmsg) = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/kmsg")
-        {
+        if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
             let _ = writeln!(kmsg, "oxwrtd PANIC: {info}");
         }
     }));

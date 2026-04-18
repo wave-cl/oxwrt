@@ -43,8 +43,7 @@ fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     // Default to warn so the CLI stays quiet; operators can set
     // RUST_LOG=oxwrtctl_cli=debug for verbose output.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

@@ -30,20 +30,16 @@ pub(super) async fn handle_fw_update(
     size: u64,
     expected_sha256: &str,
 ) -> Response {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     if size == 0 || size > FW_MAX_SIZE {
         return Response::Err {
-            message: format!(
-                "fw_update: size {size} out of range (1..{FW_MAX_SIZE})"
-            ),
+            message: format!("fw_update: size {size} out of range (1..{FW_MAX_SIZE})"),
         };
     }
 
     // Validate the expected hash is a valid hex string.
-    if expected_sha256.len() != 64
-        || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
         return Response::Err {
             message: "fw_update: sha256 must be 64 hex chars".to_string(),
         };
@@ -73,9 +69,7 @@ pub(super) async fn handle_fw_update(
                 // Stream closed before we got all bytes.
                 let _ = tokio::fs::remove_file(FW_STAGING_TMP).await;
                 return Response::Err {
-                    message: format!(
-                        "fw_update: stream closed after {received}/{size} bytes"
-                    ),
+                    message: format!("fw_update: stream closed after {received}/{size} bytes"),
                 };
             }
             Err(e) => {
@@ -161,9 +155,7 @@ pub(super) fn handle_fw_apply(confirm: bool, keep_settings: bool) -> Response {
         Ok(m) => m,
         Err(e) => {
             return Response::Err {
-                message: format!(
-                    "fw_apply: no staged image at {FW_STAGING_PATH}: {e}"
-                ),
+                message: format!("fw_apply: no staged image at {FW_STAGING_PATH}: {e}"),
             };
         }
     };

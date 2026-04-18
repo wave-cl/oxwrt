@@ -43,7 +43,10 @@ pub fn check_zone_network_refs(zone: &Zone, cfg: &Config) -> Result<(), String> 
 pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
     if let Some(src) = &rule.src {
         if !cfg.firewall.zones.iter().any(|z| z.name == *src) {
-            return Err(format!("rule {} references unknown src zone: {src}", rule.name));
+            return Err(format!(
+                "rule {} references unknown src zone: {src}",
+                rule.name
+            ));
         }
     }
     if let Some(dest) = &rule.dest {
@@ -57,10 +60,7 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-pub fn check_port_forward(
-    pf: &crate::config::PortForward,
-    cfg: &Config,
-) -> Result<(), String> {
+pub fn check_port_forward(pf: &crate::config::PortForward, cfg: &Config) -> Result<(), String> {
     // Source zone must exist. We don't default to "wan" silently
     // here — the config field defaulted when parsed; by the time
     // validation runs `src` is populated.
@@ -105,10 +105,12 @@ pub fn check_port_forward(
         let hit = cfg.networks.iter().any(|n| {
             use crate::config::Network;
             match n {
-                Network::Lan { address, prefix, .. }
-                | Network::Simple { address, prefix, .. } => {
-                    ipv4_in_subnet(ip, *address, *prefix)
+                Network::Lan {
+                    address, prefix, ..
                 }
+                | Network::Simple {
+                    address, prefix, ..
+                } => ipv4_in_subnet(ip, *address, *prefix),
                 Network::Wan { .. } => false,
             }
         });
@@ -209,8 +211,8 @@ pub fn json_merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
 mod tests {
     use super::*;
     use crate::config::{
-        Action, ChainPolicy, Config, Control, Firewall, Network, Radio, Rule,
-        Service, Wifi, WifiSecurity, Zone,
+        Action, ChainPolicy, Config, Control, Firewall, Network, Radio, Rule, Service, Wifi,
+        WifiSecurity, Zone,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -354,7 +356,10 @@ mod tests {
         };
         let err = check_zone_network_refs(&zone, &cfg).unwrap_err();
         assert!(err.contains("dmz"), "error should name the zone: {err}");
-        assert!(err.contains("ghost"), "error should name the bad ref: {err}");
+        assert!(
+            err.contains("ghost"),
+            "error should name the bad ref: {err}"
+        );
     }
 
     #[test]

@@ -66,7 +66,10 @@ pub(super) fn spawn_watchdog_pet() {
             // No inherited fd — either we're not pid 1 yet (side-binary
             // mode / tests) or /sbin/init didn't open one. Fall back to
             // opening fresh, which works in QEMU / test envs.
-            match std::fs::OpenOptions::new().write(true).open("/dev/watchdog") {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/watchdog")
+            {
                 Ok(f) => f,
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {

@@ -7,10 +7,7 @@ use super::*;
 
 pub(super) fn load_modules() {
     // Resolve the running kernel release once — matches `uname -r`.
-    let kernel_release = match rustix::system::uname()
-        .release()
-        .to_str()
-    {
+    let kernel_release = match rustix::system::uname().release().to_str() {
         Ok(s) => s.to_string(),
         Err(_) => {
             tracing::warn!("load_modules: cannot read kernel release; skipping");
@@ -69,9 +66,7 @@ pub(super) fn load_modules() {
 /// For our use we do a DFS before loading each top-level module, so
 /// order within a single line's deps doesn't matter much — but we
 /// preserve it for predictability.
-fn parse_modules_dep(
-    modules_root: &Path,
-) -> std::collections::HashMap<String, Vec<String>> {
+fn parse_modules_dep(modules_root: &Path) -> std::collections::HashMap<String, Vec<String>> {
     // Preferred: read modules.dep if present (built by depmod, e.g. on
     // Debian/Ubuntu). OpenWrt's imagebuilder does NOT generate this
     // file — it relies on each .ko's embedded `depends=` modinfo field
@@ -116,9 +111,7 @@ fn parse_modules_dep(
 /// is a sufficiently distinctive prefix that a raw memmem search is
 /// correct for every real kernel .ko. This keeps oxwrtd dependency-free
 /// (no `object` / `goblin` / `elf` crate).
-fn parse_modinfo_deps(
-    modules_root: &Path,
-) -> std::collections::HashMap<String, Vec<String>> {
+fn parse_modinfo_deps(modules_root: &Path) -> std::collections::HashMap<String, Vec<String>> {
     let mut map = std::collections::HashMap::new();
     let rd = match std::fs::read_dir(modules_root) {
         Ok(rd) => rd,
@@ -159,10 +152,11 @@ fn extract_modinfo_depends(bytes: &[u8]) -> Vec<String> {
     while i + KEY.len() <= bytes.len() {
         if &bytes[i..i + KEY.len()] == KEY {
             let start = i + KEY.len();
-            let end = start + bytes[start..]
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(bytes.len() - start);
+            let end = start
+                + bytes[start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(bytes.len() - start);
             let value = &bytes[start..end];
             if value.is_empty() {
                 return Vec::new();
@@ -184,7 +178,10 @@ fn extract_modinfo_depends(bytes: &[u8]) -> Vec<String> {
 /// "kernel/drivers/net/foo.ko.xz" → "foo"
 fn module_name_from_ko_path(p: &str) -> String {
     let base = p.rsplit('/').next().unwrap_or(p);
-    let base = base.trim_end_matches(".xz").trim_end_matches(".gz").trim_end_matches(".zst");
+    let base = base
+        .trim_end_matches(".xz")
+        .trim_end_matches(".gz")
+        .trim_end_matches(".zst");
     let base = base.trim_end_matches(".ko");
     base.to_string()
 }
@@ -330,10 +327,7 @@ fn load_one_module(name: &str, params: &str, modules_root: &Path) {
             // don't. Treat as debug so the boot log stays clean —
             // when the hot path (Stage 4) runs this function, we'll
             // add modules.dep parsing to drive correct ordering.
-            let is_dep_issue = matches!(
-                e,
-                rustix::io::Errno::NOENT | rustix::io::Errno::NOEXEC
-            );
+            let is_dep_issue = matches!(e, rustix::io::Errno::NOENT | rustix::io::Errno::NOEXEC);
             if is_dep_issue {
                 tracing::debug!(module = name, error = %e, "finit_module failed (probable dep issue)");
             } else {

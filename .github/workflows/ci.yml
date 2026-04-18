@@ -1,0 +1,199 @@
+name: CI
+
+# Pre-merge gate for the oxwrt workspace. Four independent jobs in
+# parallel, ordered by how fast they give signal:
+#
+#   fmt      — cargo fmt --check, <30s. Style regressions.
+#   clippy   — cargo clippy --workspace, ~2 min (cache-warm).
+#   test     — cargo test --workspace, ~3 min (cache-warm).
+#   qemu     — full boot + RPC suite in a real aarch64 VM, ~5-8 min.
+#
+# Clippy and test both compile the whole workspace but with different
+# profiles (debug for test, release for qemu), so they don't share
+# cache effectively. Accepting the duplication — cheap on time, cheap
+# on disk, and cleaner than a tangled target-dir sharing scheme.
+#
+# All four jobs share the two-checkout shape (oxwrt + squic-rust
+# siblings) because every target in this workspace has squic as a
+# path dep.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── fmt ────────────────────────────────────────────────────────────
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: oxwrt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oxwrt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ── clippy ─────────────────────────────────────────────────────────
+  # Runs without `-D warnings` for now because existing code has ~16
+  # harmless warnings (unused imports after the workspace refactor,
+  # unused constants, an unnecessary unsafe). A follow-up cleanup pass
+  # can tighten this to `-- -D warnings`. Today's value is: catch NEW
+  # clippy issues surfaced by PRs, not retroactively gate on old ones.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: oxwrt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oxwrt
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            oxwrt/target
+          key: ${{ runner.os }}-clippy-${{ hashFiles('oxwrt/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-
+      - run: cargo clippy --workspace --all-targets
+
+  # ── test ───────────────────────────────────────────────────────────
+  # Host-target only (x86_64-unknown-linux-gnu on the runner). The
+  # oxwrt-linux crate has `#![cfg(target_os = "linux")]` so all its
+  # inner unit tests compile + run here — better than a macOS dev
+  # box where that crate is entirely skipped.
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: oxwrt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oxwrt
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            oxwrt/target
+          key: ${{ runner.os }}-test-${{ hashFiles('oxwrt/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+      - run: cargo test --workspace --all-targets
+
+  # ── qemu ───────────────────────────────────────────────────────────
+  # Real-kernel integration: boots oxwrtd in a QEMU aarch64 VM via
+  # TCG and runs the 61-assertion oxctl RPC suite against it. The
+  # pre-flash gate.
+  qemu:
+    name: QEMU aarch64 RPC suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: oxwrt
+    env:
+      # Bump VM boot budget — TCG aarch64 on x86_64 is ~20-40x
+      # slower than native HVF (ours on M1). 300s is comfortable.
+      BOOT_TIMEOUT_S: 300
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oxwrt
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            oxwrt/target
+          key: ${{ runner.os }}-qemu-cargo-${{ hashFiles('oxwrt/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-qemu-cargo-
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: install qemu
+        run: |
+          sudo apt-get update
+          # ipxe-qemu provides efi-virtio.rom; virtio-net-pci won't
+          # init without it. --no-install-recommends for speed.
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-efi-aarch64 ipxe-qemu
+
+      - name: cache OpenWrt image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/armvirt-qemu
+          key: openwrt-armsr-armv8-25.12.2
+
+      - name: build oxwrtd (aarch64-musl)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p oxwrtd
+
+      - name: build oxctl (host)
+        run: cargo build --release -p oxwrtctl-cli
+
+      - name: qemu integration test
+        run: ./scripts/qemu-integration-test.sh
+
+      - name: dump boot log
+        if: failure() || cancelled()
+        run: |
+          echo "=== tail of /tmp/armvirt-qemu/boot.log ==="
+          tail -300 /tmp/armvirt-qemu/boot.log || true
+
+      - name: upload boot log
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-boot-log
+          path: /tmp/armvirt-qemu/boot.log
+          if-no-files-found: ignore

@@ -32,7 +32,9 @@ pub(super) async fn handle_reset(state: &ControlState, confirm: bool) -> Respons
     }
 
     if let Err(e) = atomic_write_config(&default_text) {
-        return Response::Err { message: format!("reset: {e}") };
+        return Response::Err {
+            message: format!("reset: {e}"),
+        };
     }
 
     tracing::warn!("factory reset: config wiped to defaults");

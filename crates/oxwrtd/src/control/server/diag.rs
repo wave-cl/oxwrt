@@ -154,8 +154,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             // means egress worked but no return.
             match std::fs::read_to_string("/proc/net/nf_conntrack") {
                 Ok(s) if s.is_empty() => Response::Value {
-                    value: "(conntrack table empty — is nf_conntrack loaded?)\n"
-                        .to_string(),
+                    value: "(conntrack table empty — is nf_conntrack loaded?)\n".to_string(),
                 },
                 Ok(s) => Response::Value { value: s },
                 Err(e) => Response::Err {
@@ -169,15 +168,10 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             // the default kmsg sizes. Output is one message per line.
             let mut buf = vec![0u8; 256 * 1024];
             // SYSLOG_ACTION_READ_ALL = 3
-            let n = unsafe {
-                libc::klogctl(3, buf.as_mut_ptr() as *mut _, buf.len() as _)
-            };
+            let n = unsafe { libc::klogctl(3, buf.as_mut_ptr() as *mut _, buf.len() as _) };
             if n < 0 {
                 Response::Err {
-                    message: format!(
-                        "diag dmesg: klogctl: {}",
-                        std::io::Error::last_os_error()
-                    ),
+                    message: format!("diag dmesg: klogctl: {}", std::io::Error::last_os_error()),
                 }
             } else {
                 buf.truncate(n as usize);
@@ -199,8 +193,7 @@ async fn diag_links() -> Result<String, String> {
     use futures_util::stream::TryStreamExt;
     use rtnetlink::packet_route::link::{LinkAttribute, State};
 
-    let (connection, handle, _messages) =
-        rtnetlink::new_connection().map_err(|e| e.to_string())?;
+    let (connection, handle, _messages) = rtnetlink::new_connection().map_err(|e| e.to_string())?;
     let conn_task = tokio::spawn(connection);
 
     let mut links = handle.link().get().execute();
@@ -353,11 +346,11 @@ pub fn build_traceroute_args(args: &[String]) -> Result<Vec<String>, String> {
         _ => return Err("traceroute: max_hops must be 1..=30".to_string()),
     };
     Ok(vec![
-        "-n".to_string(),                // numeric, no reverse DNS
+        "-n".to_string(), // numeric, no reverse DNS
         "-m".to_string(),
         max_hops.to_string(),
         "-w".to_string(),
-        "2".to_string(),                  // per-hop timeout 2s
+        "2".to_string(), // per-hop timeout 2s
         target_s.clone(),
     ])
 }
@@ -420,9 +413,8 @@ pub fn build_ss_args(args: &[String]) -> Result<Vec<String>, String> {
     }
     // Allow a curated set of single-letter flag groups.
     let allowed_flags = [
-        "-t", "-u", "-l", "-a", "-n", "-p", "-s", "-e", "-m", "-o",
-        "-tl", "-ul", "-tu", "-tul", "-tunl", "-tunlp", "-tan", "-uan",
-        "-tlnp", "-ulnp", "-s",
+        "-t", "-u", "-l", "-a", "-n", "-p", "-s", "-e", "-m", "-o", "-tl", "-ul", "-tu", "-tul",
+        "-tunl", "-tunlp", "-tan", "-uan", "-tlnp", "-ulnp", "-s",
     ];
     let flag = &args[0];
     if flag.starts_with('-') {
@@ -437,9 +429,19 @@ pub fn build_ss_args(args: &[String]) -> Result<Vec<String>, String> {
         // Treat as a filter expression: "state listening" etc.
         // Only allow safe filter keywords, not arbitrary strings.
         let safe_words = [
-            "state", "listening", "established", "connected", "synchronized",
-            "close-wait", "time-wait", "fin-wait-1", "fin-wait-2",
-            "sport", "dport", "src", "dst",
+            "state",
+            "listening",
+            "established",
+            "connected",
+            "synchronized",
+            "close-wait",
+            "time-wait",
+            "fin-wait-1",
+            "fin-wait-2",
+            "sport",
+            "dport",
+            "src",
+            "dst",
         ];
         for word in args {
             if word.starts_with('-') {
@@ -520,10 +522,7 @@ async fn diag_exec(entry: &DiagBinary, args: &[String]) -> Result<String, String
         Ok(Ok(out)) => out,
         Ok(Err(e)) => return Err(format!("oneshot_exec: {e}")),
         Err(_) => {
-            return Err(format!(
-                "timeout after {}s",
-                entry.timeout_secs
-            ));
+            return Err(format!("timeout after {}s", entry.timeout_secs));
         }
     };
 
@@ -570,13 +569,11 @@ fn clip_output(bytes: &[u8], max: usize) -> String {
     s
 }
 
-
 async fn diag_addresses() -> Result<String, String> {
     use futures_util::stream::TryStreamExt;
-    use rtnetlink::packet_route::{address::AddressAttribute, AddressFamily};
+    use rtnetlink::packet_route::{AddressFamily, address::AddressAttribute};
 
-    let (connection, handle, _messages) =
-        rtnetlink::new_connection().map_err(|e| e.to_string())?;
+    let (connection, handle, _messages) = rtnetlink::new_connection().map_err(|e| e.to_string())?;
     let conn_task = tokio::spawn(connection);
 
     let mut addrs = handle.address().get().execute();
@@ -615,12 +612,11 @@ async fn diag_addresses() -> Result<String, String> {
 async fn diag_routes() -> Result<String, String> {
     use futures_util::stream::TryStreamExt;
     use rtnetlink::packet_route::{
-        route::{RouteAddress, RouteAttribute, RouteMessage},
         AddressFamily,
+        route::{RouteAddress, RouteAttribute, RouteMessage},
     };
 
-    let (connection, handle, _messages) =
-        rtnetlink::new_connection().map_err(|e| e.to_string())?;
+    let (connection, handle, _messages) = rtnetlink::new_connection().map_err(|e| e.to_string())?;
     let conn_task = tokio::spawn(connection);
 
     // Empty RouteMessage with INET family triggers an IPv4 dump.
@@ -635,12 +631,8 @@ async fn diag_routes() -> Result<String, String> {
         let mut prio: Option<u32> = None;
         for attr in &msg.attributes {
             match attr {
-                RouteAttribute::Destination(RouteAddress::Inet(a)) => {
-                    dst = Some(a.to_string())
-                }
-                RouteAttribute::Gateway(RouteAddress::Inet(a)) => {
-                    gw = Some(a.to_string())
-                }
+                RouteAttribute::Destination(RouteAddress::Inet(a)) => dst = Some(a.to_string()),
+                RouteAttribute::Gateway(RouteAddress::Inet(a)) => gw = Some(a.to_string()),
                 RouteAttribute::Oif(i) => oif = Some(*i),
                 RouteAttribute::Priority(p) => prio = Some(*p),
                 _ => {}

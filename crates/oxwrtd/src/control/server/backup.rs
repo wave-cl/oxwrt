@@ -209,9 +209,7 @@ fn extract_to(bytes: &[u8], dst: &Path) -> Result<(), String> {
             .parent()
             .ok_or_else(|| format!("no parent for {target:?}"))?;
         std::fs::create_dir_all(target_parent).map_err(|e| e.to_string())?;
-        let parent_canon = target_parent
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let parent_canon = target_parent.canonicalize().map_err(|e| e.to_string())?;
         if !parent_canon.starts_with(&dst_canon) {
             return Err(format!("tarball entry escapes stage: {path_in_tar:?}"));
         }
@@ -219,18 +217,11 @@ fn extract_to(bytes: &[u8], dst: &Path) -> Result<(), String> {
         entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
         std::fs::write(&target, &data).map_err(|e| format!("write {target:?}: {e}"))?;
         // Preserve mode from the header.
-        let mode = entry
-            .header()
-            .mode()
-            .ok()
-            .unwrap_or(0o644);
+        let mode = entry.header().mode().ok().unwrap_or(0o644);
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &target,
-                std::fs::Permissions::from_mode(mode),
-            );
+            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
         }
     }
     Ok(())
@@ -240,8 +231,7 @@ fn swap_live(stage: &Path) -> Result<(), String> {
     // /etc/oxwrt.toml
     let src_toml = stage.join("oxwrt.toml");
     if src_toml.exists() {
-        std::fs::copy(&src_toml, OXWRT_TOML)
-            .map_err(|e| format!("copy toml: {e}"))?;
+        std::fs::copy(&src_toml, OXWRT_TOML).map_err(|e| format!("copy toml: {e}"))?;
     }
     // /etc/oxwrt/ — clobber existing files. We do NOT rm the entire
     // dir first: some files (e.g. debug-ssh host keys) may legit

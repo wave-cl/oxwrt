@@ -22,8 +22,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use dhcproto::v4::{DhcpOption, Flags, HType, Message, MessageType, OptionCode};
+use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::packet_route::link::LinkAttribute;
 use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder};
@@ -103,8 +103,8 @@ pub async fn acquire(
     let offer = recv_expected(&socket, xid, MessageType::Offer, deadline).await?;
 
     let offered_ip = offer.yiaddr();
-    let server_id = find_server_id(&offer)
-        .ok_or(Error::MissingOption(OptionCode::ServerIdentifier))?;
+    let server_id =
+        find_server_id(&offer).ok_or(Error::MissingOption(OptionCode::ServerIdentifier))?;
     tracing::info!(iface = %iface_name, %offered_ip, %server_id, "wan dhcp: OFFER received");
 
     let request = build_request(xid, &hw_addr, offered_ip, server_id);
@@ -118,7 +118,8 @@ pub async fn acquire(
 fn encode_dhcp(msg: &Message) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::with_capacity(1024);
     let mut enc = Encoder::new(&mut buf);
-    msg.encode(&mut enc).map_err(|e| Error::Encode(e.to_string()))?;
+    msg.encode(&mut enc)
+        .map_err(|e| Error::Encode(e.to_string()))?;
     Ok(buf)
 }
 
@@ -428,7 +429,6 @@ fn build_request(
     msg
 }
 
-
 /// RFC 2131 compliant broadcast send: builds the full Ethernet+IP+UDP
 /// frame and sends via `AF_PACKET SOCK_RAW`. This is the ONLY way on
 /// Linux to emit a packet with IP source `0.0.0.0` — `SOCK_RAW +
@@ -446,11 +446,7 @@ fn build_request(
 /// Requires `CAP_NET_RAW` in the caller's effective set. PID 1 has
 /// the full cap set (hardening applies to children, not to oxwrtd
 /// itself), so this works from `init::async_main`.
-fn send_raw_dhcp_broadcast(
-    iface_idx: u32,
-    hw_addr: &[u8; 6],
-    payload: &[u8],
-) -> Result<(), Error> {
+fn send_raw_dhcp_broadcast(iface_idx: u32, hw_addr: &[u8; 6], payload: &[u8]) -> Result<(), Error> {
     // -------- Ethernet header (14 bytes) --------
     // dst = ff:ff:ff:ff:ff:ff (L2 broadcast)
     // src = iface MAC
@@ -591,13 +587,14 @@ async fn recv_expected(
 ) -> Result<Message, Error> {
     let mut buf = vec![0u8; 2048];
     loop {
-        let remaining = deadline.checked_duration_since(Instant::now()).ok_or_else(
-            || match want {
-                MessageType::Offer => Error::Timeout("OFFER"),
-                MessageType::Ack => Error::Timeout("ACK"),
-                _ => Error::Timeout("reply"),
-            },
-        )?;
+        let remaining =
+            deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| match want {
+                    MessageType::Offer => Error::Timeout("OFFER"),
+                    MessageType::Ack => Error::Timeout("ACK"),
+                    _ => Error::Timeout("reply"),
+                })?;
         let res = tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await;
         let (n, _) = match res {
             Ok(Ok((n, peer))) => (n, peer),

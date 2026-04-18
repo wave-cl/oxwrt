@@ -145,15 +145,9 @@ fn bring_up_one(wg: &Wireguard) -> Result<(), Error> {
         .status()
         .map_err(|e| Error::Firewall(format!("wg setconf {iface}: {e}")))?;
     if !st.success() {
-        return Err(Error::Firewall(format!(
-            "wg setconf {iface}: exit {st:?}"
-        )));
+        return Err(Error::Firewall(format!("wg setconf {iface}: exit {st:?}")));
     }
-    tracing::info!(
-        iface,
-        peers = wg.peers.len(),
-        "wireguard config applied"
-    );
+    tracing::info!(iface, peers = wg.peers.len(), "wireguard config applied");
 
     // 4. Bring the link up. Address assignment happens via the
     //    matching [[networks]] type="simple" entry elsewhere.

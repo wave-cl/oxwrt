@@ -100,8 +100,8 @@ fn init_tracing() {
     // so e.g. rtnetlink's internal debug chatter doesn't drown the real
     // output. Written to stderr so stdout stays clean for subcommands
     // like --version that pipe values.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -196,7 +196,11 @@ async fn smoke_async(args: Vec<String>) -> ExitCode {
         eprintln!("smoke: spawn failed: {e}");
         return ExitCode::FAILURE;
     }
-    eprintln!("smoke: spawn ok, pid={:?}, state={:?}", sup.pid(), sup.state);
+    eprintln!(
+        "smoke: spawn ok, pid={:?}, state={:?}",
+        sup.pid(),
+        sup.state
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let exit_code = loop {
@@ -626,23 +630,14 @@ async fn attach_netns_async(args: Vec<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    eprintln!(
-        "attach-netns: ok pid={pid} peer={peer_name} ip={peer_ip}/{prefix} gw={gateway_ip}"
-    );
+    eprintln!("attach-netns: ok pid={pid} peer={peer_name} ip={peer_ip}/{prefix} gw={gateway_ip}");
     ExitCode::SUCCESS
 }
 
 #[cfg(target_os = "linux")]
-async fn link_index(
-    handle: &rtnetlink::Handle,
-    name: &str,
-) -> Result<u32, rtnetlink::Error> {
+async fn link_index(handle: &rtnetlink::Handle, name: &str) -> Result<u32, rtnetlink::Error> {
     use futures_util::stream::TryStreamExt;
-    let mut stream = handle
-        .link()
-        .get()
-        .match_name(name.to_string())
-        .execute();
+    let mut stream = handle.link().get().match_name(name.to_string()).execute();
     match stream.try_next().await? {
         Some(msg) => Ok(msg.header.index),
         None => Err(rtnetlink::Error::NamespaceError(format!(

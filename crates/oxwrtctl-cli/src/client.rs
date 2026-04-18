@@ -54,9 +54,7 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
     write_frame(&mut send, &request).await?;
 
     // For FwUpdate: stream the raw firmware bytes before finishing.
-    if let (Request::FwUpdate { size, .. }, Some(path)) =
-        (&request, &fw_image_path)
-    {
+    if let (Request::FwUpdate { size, .. }, Some(path)) = (&request, &fw_image_path) {
         eprintln!("uploading {path} ({size} bytes)...");
         let mut file = tokio::fs::File::open(path)
             .await
@@ -98,7 +96,9 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
                 // FwProgress: display inline progress, don't print as
                 // a normal response line.
                 if let Response::FwProgress { bytes_received } = &resp {
-                    if let Some(Request::FwUpdate { size, .. }) = fw_image_path.as_ref().and(Some(&request)) {
+                    if let Some(Request::FwUpdate { size, .. }) =
+                        fw_image_path.as_ref().and(Some(&request))
+                    {
                         let pct = (*bytes_received as f64 / *size as f64 * 100.0) as u32;
                         eprint!("\r  {bytes_received}/{size} bytes ({pct}%)");
                     }

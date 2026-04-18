@@ -22,12 +22,9 @@ pub(super) fn rename_netdevs_from_dts() {
             Err(_) => continue,
         };
         // Try target-specific name first, then the standard label.
-        let label = std::fs::read_to_string(
-            entry.path().join("of_node").join("openwrt,netdev-name"),
-        )
-        .or_else(|_| {
-            std::fs::read_to_string(entry.path().join("of_node").join("label"))
-        });
+        let label =
+            std::fs::read_to_string(entry.path().join("of_node").join("openwrt,netdev-name"))
+                .or_else(|_| std::fs::read_to_string(entry.path().join("of_node").join("label")));
         let Ok(label) = label else {
             continue;
         };

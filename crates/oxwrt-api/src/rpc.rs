@@ -3,12 +3,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Request {
-    Get { key: String },
-    Set { key: String, value: String },
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: String,
+    },
     Reload,
     Status,
-    Logs { service: String, follow: bool },
-    Restart { service: String },
+    Logs {
+        service: String,
+        follow: bool,
+    },
+    Restart {
+        service: String,
+    },
     /// Factory reset: overwrite `/etc/oxwrt.toml` with a stock default
     /// config and reload. The `[control]` block (listen addrs +
     /// authorized keys path) is preserved across the reset so the
@@ -17,7 +27,9 @@ pub enum Request {
     /// drop the only management path. `confirm` MUST be true; the
     /// server rejects any Reset without it so an accidental
     /// `oxwrtd reset` typo can't wipe the operator's config.
-    Reset { confirm: bool },
+    Reset {
+        confirm: bool,
+    },
     /// In-process diagnostic operation. Replaces the "ssh in and run
     /// `ip addr`" recovery loop on traditional routers — every diag
     /// runs inside `oxwrtd` against the host network namespace
@@ -26,12 +38,18 @@ pub enum Request {
     /// known ops are a fixed string-keyed enum; unknown ops return an
     /// error response listing the supported set. `args` is reserved
     /// for future ops that need parameters (e.g. `ping <target>`).
-    Diag { name: String, args: Vec<String> },
+    Diag {
+        name: String,
+        args: Vec<String>,
+    },
     /// Firmware update phase 1: metadata. The client sends this frame
     /// first, then streams the raw image bytes on the same sQUIC
     /// bi-stream (bypassing write_frame). The server reads `size` bytes,
     /// hashes on the fly, and verifies against `sha256`.
-    FwUpdate { size: u64, sha256: String },
+    FwUpdate {
+        size: u64,
+        sha256: String,
+    },
     /// Firmware update phase 2: apply the staged image. Triggers
     /// `sysupgrade` and reboots. `confirm` MUST be true (same safety
     /// gate as Reset). The sQUIC connection drops on reboot — the
@@ -42,7 +60,10 @@ pub enum Request {
     /// default). If false, wipes everything (`sysupgrade -n`) — a
     /// clean flash. The client defaults to `true` (keep settings);
     /// pass `--clean` to get `false`.
-    FwApply { confirm: bool, keep_settings: bool },
+    FwApply {
+        confirm: bool,
+        keep_settings: bool,
+    },
     Collection {
         collection: String,
         action: CrudAction,
@@ -53,7 +74,9 @@ pub enum Request {
     /// atomically and swaps the in-memory config. Operator must
     /// `reload` to apply. Use with care — no partial validation
     /// beyond "does it parse as a valid Config?"
-    ConfigPush { toml: String },
+    ConfigPush {
+        toml: String,
+    },
     /// Enroll a new WireGuard roadwarrior peer: the server generates
     /// a fresh client keypair, adds the public half to its peer list
     /// (persisted to oxwrt.toml), and returns a complete client
@@ -83,7 +106,10 @@ pub enum Request {
     /// true — accidental restore with a stale backup would roll
     /// back everything including the sQUIC key (locking the client
     /// out until UART recovery).
-    Restore { data_b64: String, confirm: bool },
+    Restore {
+        data_b64: String,
+        confirm: bool,
+    },
     WgEnroll {
         /// Peer name (unique under `[[wireguard.peers]]`).
         name: String,
@@ -116,7 +142,9 @@ pub enum CrudAction {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Response {
     Ok,
-    Value { value: String },
+    Value {
+        value: String,
+    },
     Status {
         services: Vec<ServiceStatus>,
         /// Seconds since `ControlState` was constructed (≈ boot time).
@@ -141,11 +169,17 @@ pub enum Response {
         #[serde(default)]
         aps: Vec<ApStatus>,
     },
-    LogLine { line: String },
+    LogLine {
+        line: String,
+    },
     /// Non-terminal: firmware upload progress. Sent periodically during
     /// `FwUpdate` so the client can display a progress bar.
-    FwProgress { bytes_received: u64 },
-    Err { message: String },
+    FwProgress {
+        bytes_received: u64,
+    },
+    Err {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

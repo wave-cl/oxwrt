@@ -4,14 +4,14 @@
 
 #![allow(clippy::too_many_lines)]
 
-use super::*;
 use super::SIGNING_KEY_PATH;
+use super::clock::bootstrap_clock_floor;
 use super::clock::sntp_bootstrap_clock;
-use super::preinit::*;
 use super::modules::load_modules;
 use super::netdev::{create_wifi_ap_interfaces, rename_netdevs_from_dts};
+use super::preinit::*;
 use super::watchdog::spawn_watchdog_pet;
-use super::clock::bootstrap_clock_floor;
+use super::*;
 
 pub fn run() -> Result<(), Error> {
     early_mounts()?;
@@ -423,11 +423,16 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "wireguard setup failed; tunnels disabled");
     }
 
-    let wan_lease: control::SharedLease =
-        std::sync::Arc::new(std::sync::RwLock::new(None));
+    let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-    if let (Some(net_handle), Some(Network::Wan { iface, wan: WanConfig::Dhcp, .. })) =
-        (&net, cfg.primary_wan())
+    if let (
+        Some(net_handle),
+        Some(Network::Wan {
+            iface,
+            wan: WanConfig::Dhcp,
+            ..
+        }),
+    ) = (&net, cfg.primary_wan())
     {
         let handle = net_handle.handle().clone();
         let iface = iface.clone();
@@ -457,12 +462,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 tracing::error!(iface = %iface, error = %e, "wan dhcp: apply_lease failed");
             }
             *wan_lease_clone.write().unwrap() = Some(lease.clone());
-            let _ = wan_dhcp::spawn_renewal_loop(
-                handle,
-                iface.clone(),
-                lease,
-                wan_lease_clone,
-            );
+            let _ = wan_dhcp::spawn_renewal_loop(handle, iface.clone(), lease, wan_lease_clone);
             // SNTP bootstrap once WAN is up. See historical comment:
             // time.cloudflare.com (162.159.200.1) is anycast, no DNS
             // needed, used only to initialize the clock floor before
@@ -498,7 +498,10 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 );
                 continue;
             };
-            match net.setup_host_veth(&svc.name, veth.host_ip, veth.prefix).await {
+            match net
+                .setup_host_veth(&svc.name, veth.host_ip, veth.prefix)
+                .await
+            {
                 Ok((host, peer)) => {
                     tracing::info!(
                         service = %svc.name,
@@ -592,10 +595,8 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 }
                 let cfg = state.config_snapshot();
                 let aps = control::server::collect_ap_status(&cfg);
-                let still_down: Vec<&crate::rpc::ApStatus> = aps
-                    .iter()
-                    .filter(|ap| ap.operstate != "up")
-                    .collect();
+                let still_down: Vec<&crate::rpc::ApStatus> =
+                    aps.iter().filter(|ap| ap.operstate != "up").collect();
                 if still_down.is_empty() {
                     return; // all healthy — exit early
                 }

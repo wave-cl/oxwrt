@@ -15,7 +15,9 @@ pub(super) async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
     let sock = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
-    sock.connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
+    sock.connect(addr)
+        .await
+        .map_err(|e| format!("connect {addr}: {e}"))?;
 
     timeout(Duration::from_secs(5), sock.send(&req))
         .await

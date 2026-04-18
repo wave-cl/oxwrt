@@ -9,7 +9,9 @@ fn populate_dev_from_sys() {
     use std::ffi::CString;
     for (kind, mode_bits) in [("block", libc::S_IFBLK), ("char", libc::S_IFCHR)] {
         let dir = format!("/sys/dev/{kind}");
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let name = entry.file_name();
             let Some(_mm) = name.to_str() else { continue };
@@ -17,7 +19,9 @@ fn populate_dev_from_sys() {
             // /sys/dev/block/179:7 → ../../devices/...), which we
             // can still read uevent from.
             let uevent_path = entry.path().join("uevent");
-            let Ok(content) = std::fs::read_to_string(&uevent_path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&uevent_path) else {
+                continue;
+            };
             let mut major: Option<u32> = None;
             let mut minor: Option<u32> = None;
             let mut devname: Option<&str> = None;
@@ -39,7 +43,9 @@ fn populate_dev_from_sys() {
             if let Some(parent) = std::path::Path::new(&devpath).parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let Ok(cpath) = CString::new(devpath.as_bytes()) else { continue };
+            let Ok(cpath) = CString::new(devpath.as_bytes()) else {
+                continue;
+            };
             let dev = unsafe { libc::makedev(major, minor) };
             let rc = unsafe { libc::mknod(cpath.as_ptr(), mode_bits | 0o600, dev) };
             if rc != 0 {
@@ -73,9 +79,7 @@ fn populate_dev_from_sys() {
 
 pub(super) fn mount_root_if_needed() -> Result<(), Error> {
     if overlay_is_attached()? {
-        tracing::info!(
-            "mount_root: rootfs overlay already attached upstream; skipping"
-        );
+        tracing::info!("mount_root: rootfs overlay already attached upstream; skipping");
         return Ok(());
     }
 
@@ -166,23 +170,24 @@ fn mount_root_hot_path() -> Result<(), Error> {
     } else if first_le == 0xDEADC0DE || first_le == 0xFFFFFFFF {
         // Stock sysupgrade convention: DEADCODE or FFFFFFFF marker,
         // gzip backup ≤256 KiB forward.
-        tracing::info!(marker = format!("{first_le:#010x}"), "mount_root: unformatted marker; scanning for config backup");
-        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "mount_root: backup scan failed");
-                None
-            });
+        tracing::info!(
+            marker = format!("{first_le:#010x}"),
+            "mount_root: unformatted marker; scanning for config backup"
+        );
+        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "mount_root: backup scan failed");
+            None
+        });
         (true, backup)
     } else if first_le == GZIP_MAGIC_LE {
         // Our native sysupgrade's convention: gzip backup starts
         // directly at overlay_off. Read it and treat overlay as
         // unformatted.
         tracing::info!("mount_root: gzip backup at overlay_off; unformatted overlay");
-        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "mount_root: backup read failed");
-                None
-            });
+        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "mount_root: backup read failed");
+            None
+        });
         (true, backup)
     } else if first_le == 0x00000000 && f2fs_at == 0x00000000 {
         // Freshly-flashed region (U-Boot HTTP recovery writes zeros
@@ -228,17 +233,22 @@ fn mount_root_hot_path() -> Result<(), Error> {
 
     // 6. Mount f2fs at /overlay.
     std::fs::create_dir_all("/overlay").map_err(Error::Io)?;
-    mount(&loop_dev, "/overlay", "f2fs", MountFlags::NOATIME, None::<&std::ffi::CStr>)
-        .map_err(|e| Error::Runtime(format!("mount_root: mount f2fs: {e}")))?;
+    mount(
+        &loop_dev,
+        "/overlay",
+        "f2fs",
+        MountFlags::NOATIME,
+        None::<&std::ffi::CStr>,
+    )
+    .map_err(|e| Error::Runtime(format!("mount_root: mount f2fs: {e}")))?;
 
     // 7. Stack overlayfs.
     std::fs::create_dir_all("/overlay/upper").map_err(Error::Io)?;
     std::fs::create_dir_all("/overlay/work").map_err(Error::Io)?;
     std::fs::create_dir_all("/mnt").map_err(Error::Io)?;
-    let overlay_opts = std::ffi::CString::new(
-        "lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work",
-    )
-    .expect("no NUL in overlay opts");
+    let overlay_opts =
+        std::ffi::CString::new("lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work")
+            .expect("no NUL in overlay opts");
     mount(
         "overlayfs:/overlay",
         "/mnt",
@@ -308,10 +318,7 @@ fn mount_root_hot_path() -> Result<(), Error> {
 /// header (1f 8b 08 00). If found, return the bytes from there to
 /// end-of-scan (gzip is self-delimiting so the tail after the gzip
 /// trailer is ignored by gunzip).
-fn scan_for_backup_tgz(
-    f: &mut std::fs::File,
-    overlay_off: u64,
-) -> Result<Option<Vec<u8>>, Error> {
+fn scan_for_backup_tgz(f: &mut std::fs::File, overlay_off: u64) -> Result<Option<Vec<u8>>, Error> {
     use std::io::{Read, Seek, SeekFrom};
     const MAX_SCAN: usize = 256 * 1024;
     f.seek(SeekFrom::Start(overlay_off)).map_err(Error::Io)?;
@@ -323,7 +330,10 @@ fn scan_for_backup_tgz(
     let needle: [u8; 4] = [0x1f, 0x8b, 0x08, 0x00];
     for i in 0..buf.len().saturating_sub(4) {
         if buf[i..i + 4] == needle {
-            tracing::info!(offset = i, "mount_root: gzip magic located in overlay region");
+            tracing::info!(
+                offset = i,
+                "mount_root: gzip magic located in overlay region"
+            );
             return Ok(Some(buf[i..].to_vec()));
         }
     }
@@ -383,7 +393,14 @@ fn create_loop_device(backing: &std::fs::File, offset: u64) -> Result<PathBuf, E
         .open(&loop_dev)
         .map_err(Error::Io)?;
     // Associate backing fd.
-    if unsafe { libc::ioctl(lf.as_raw_fd(), LOOP_SET_FD as _, backing.as_raw_fd() as libc::c_ulong) } < 0 {
+    if unsafe {
+        libc::ioctl(
+            lf.as_raw_fd(),
+            LOOP_SET_FD as _,
+            backing.as_raw_fd() as libc::c_ulong,
+        )
+    } < 0
+    {
         return Err(Error::Runtime(format!(
             "LOOP_SET_FD: {}",
             std::io::Error::last_os_error()
@@ -393,7 +410,14 @@ fn create_loop_device(backing: &std::fs::File, offset: u64) -> Result<PathBuf, E
     let mut info: LoopInfo64 = unsafe { std::mem::zeroed() };
     info.lo_offset = offset;
     info.lo_flags = LO_FLAGS_AUTOCLEAR;
-    if unsafe { libc::ioctl(lf.as_raw_fd(), LOOP_SET_STATUS64 as _, &info as *const _ as libc::c_ulong) } < 0 {
+    if unsafe {
+        libc::ioctl(
+            lf.as_raw_fd(),
+            LOOP_SET_STATUS64 as _,
+            &info as *const _ as libc::c_ulong,
+        )
+    } < 0
+    {
         return Err(Error::Runtime(format!(
             "LOOP_SET_STATUS64: {}",
             std::io::Error::last_os_error()
@@ -429,8 +453,7 @@ fn extract_tgz_over_root(bytes: &[u8]) -> Result<(), Error> {
 /// the overlay-on-/ signal is the definitive "the whole stack is
 /// set up" marker.
 fn overlay_is_attached() -> Result<bool, Error> {
-    let mounts = std::fs::read_to_string("/proc/mounts")
-        .map_err(Error::Io)?;
+    let mounts = std::fs::read_to_string("/proc/mounts").map_err(Error::Io)?;
     for line in mounts.lines() {
         // Each line: "<src> <mountpoint> <fstype> <opts> <dump> <pass>"
         let mut it = line.split_whitespace();
@@ -495,7 +518,10 @@ fn overlay_is_attached() -> Result<bool, Error> {
 pub(super) fn truncate_stale_dhcp_leases(cfg: &Config) {
     use crate::config::Network;
 
-    let Some(Network::Lan { address, prefix, .. }) = cfg.lan() else {
+    let Some(Network::Lan {
+        address, prefix, ..
+    }) = cfg.lan()
+    else {
         return;
     };
     let cur = format!("{address}/{prefix}");
@@ -563,9 +589,7 @@ pub(super) fn run_uci_defaults() {
         // 755 these, but defensive `chmod +x` via the shell works for
         // hand-dropped operator scripts too. Invoke through /bin/sh so
         // scripts without a shebang still work.
-        let status = std::process::Command::new("/bin/sh")
-            .arg(&script)
-            .status();
+        let status = std::process::Command::new("/bin/sh").arg(&script).status();
         match status {
             Ok(s) if s.success() => {
                 if let Err(e) = std::fs::remove_file(&script) {
@@ -616,7 +640,9 @@ pub(super) fn early_mounts() -> Result<(), Error> {
         ("sysfs", "/sys", "sysfs", nsnd, None),
         ("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID, None),
         (
-            "devpts", "/dev/pts", "devpts",
+            "devpts",
+            "/dev/pts",
+            "devpts",
             MountFlags::NOSUID | MountFlags::NOEXEC,
             Some(devpts_opts.as_c_str()),
         ),
@@ -661,7 +687,9 @@ pub(super) fn early_mounts() -> Result<(), Error> {
             Err(rustix::io::Errno::NODEV) => {
                 // Fallback for /dev: mount tmpfs + populate via mknod.
                 if *target == "/dev" && *fstype == "devtmpfs" {
-                    tracing::warn!("early_mounts: devtmpfs unavailable; falling back to tmpfs + mknod");
+                    tracing::warn!(
+                        "early_mounts: devtmpfs unavailable; falling back to tmpfs + mknod"
+                    );
                     let tmpfs_opts = std::ffi::CString::new("mode=0755,size=512K").unwrap();
                     match mount(
                         "tmpfs",
@@ -679,7 +707,11 @@ pub(super) fn early_mounts() -> Result<(), Error> {
                         }
                     }
                 } else {
-                    tracing::warn!(target = target, fstype = fstype, "early_mounts: ENODEV (kernel lacks fstype?)");
+                    tracing::warn!(
+                        target = target,
+                        fstype = fstype,
+                        "early_mounts: ENODEV (kernel lacks fstype?)"
+                    );
                 }
             }
             // ENOENT = target path doesn't exist AND nothing is
@@ -701,4 +733,3 @@ pub(super) fn early_mounts() -> Result<(), Error> {
     }
     Ok(())
 }
-

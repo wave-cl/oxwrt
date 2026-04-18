@@ -25,11 +25,10 @@ use std::time::{Duration, Instant};
 
 use caps::{CapSet, Capability};
 use landlock::{
-    ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreated, RulesetCreatedAttr,
+    ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
 };
-use rustix::ffi::CStr;
 use rustix::fd::AsFd;
+use rustix::ffi::CStr;
 use rustix::mount::{
     MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change,
     mount_remount, unmount,
@@ -41,8 +40,8 @@ use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetA
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use oxwrt_api::config::{NetMode, SecurityProfile, Service};
 use crate::logd::Logd;
+use oxwrt_api::config::{NetMode, SecurityProfile, Service};
 use oxwrt_api::rpc::ServiceState;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/svc";
@@ -146,7 +145,11 @@ pub struct RawChild {
 
 impl RawChild {
     fn id(&self) -> Option<u32> {
-        if self.reaped { None } else { Some(self.pid as u32) }
+        if self.reaped {
+            None
+        } else {
+            Some(self.pid as u32)
+        }
     }
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
@@ -248,8 +251,7 @@ const SECCOMP_DENY_LIST: &[(&str, i64)] = &[
 /// Called once from `init::async_main` at boot.
 pub fn enable_cgroup_controllers() -> io::Result<()> {
     let root_controllers =
-        std::fs::read_to_string(format!("{CGROUP_UNIFIED}/cgroup.controllers"))
-            .unwrap_or_default();
+        std::fs::read_to_string(format!("{CGROUP_UNIFIED}/cgroup.controllers")).unwrap_or_default();
     let available: Vec<&str> = root_controllers.split_whitespace().collect();
     let wanted = ["memory", "cpu", "pids"];
     let to_enable: Vec<String> = wanted
@@ -320,7 +322,7 @@ impl Supervised {
     }
 
     pub fn pid(&self) -> Option<i32> {
-        self.child.as_ref().and_then(|c| c.id()).map(|p| p as i32 )
+        self.child.as_ref().and_then(|c| c.id()).map(|p| p as i32)
     }
 
     pub fn uptime(&self) -> Duration {
@@ -358,12 +360,11 @@ pub fn spawn(sup: &mut Supervised, logd: &Logd) -> Result<(), Error> {
     sup.state = ServiceState::Starting;
     sup.started_at = Instant::now();
 
-    let (child, stdout_for_drain, stderr_for_drain) =
-        if sup.spec.security.user_namespace {
-            spawn_clone3(prepared, &sup.spec)?
-        } else {
-            spawn_command(prepared, &sup.spec)?
-        };
+    let (child, stdout_for_drain, stderr_for_drain) = if sup.spec.security.user_namespace {
+        spawn_clone3(prepared, &sup.spec)?
+    } else {
+        spawn_command(prepared, &sup.spec)?
+    };
 
     // Place the child in its cgroup.
     if let Some(pid) = child.id() {
@@ -456,19 +457,15 @@ fn spawn_clone3(
     use rustix::pipe::PipeFlags;
 
     // Build clone3 flags: NEWUSER + NEWPID + all the namespace flags.
-    let clone_flags: u64 =
-        libc::CLONE_NEWUSER as u64
+    let clone_flags: u64 = libc::CLONE_NEWUSER as u64
         | libc::CLONE_NEWPID as u64
         | prepared.unshare_flags.bits() as u64;
 
     // Create stdio pipes (CLOEXEC so they don't leak past execve).
-    let (stdout_r, stdout_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
-    let (stderr_r, stderr_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (stdout_r, stdout_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (stderr_r, stderr_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
     // Sync pipe: parent writes 1 byte after uid_map is set to unblock child.
-    let (sync_r, sync_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (sync_r, sync_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
     // Open /dev/null for stdin before clone3 (path resolves in parent ns).
     let devnull = std::fs::File::open("/dev/null").map_err(Error::Io)?;
 
@@ -561,7 +558,9 @@ fn spawn_clone3(
     // the sync pipe until we signal it.
     if let Err(e) = write_uid_gid_map(child_pid) {
         // Child is stuck; kill it.
-        unsafe { libc::kill(child_pid, libc::SIGKILL); }
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
         return Err(Error::Service {
             name: spec.name.clone(),
             message: format!("write_uid_gid_map: {e}"),
@@ -577,22 +576,23 @@ fn spawn_clone3(
 
     // Wrap stdout/stderr as tokio pipe Receivers for async drain.
     let stdout_reader: BoxReader = Box::new(
-        tokio::net::unix::pipe::Receiver::from_owned_fd(stdout_r)
-            .map_err(|e| Error::Service {
-                name: spec.name.clone(),
-                message: format!("tokio pipe stdout: {e}"),
-            })?
+        tokio::net::unix::pipe::Receiver::from_owned_fd(stdout_r).map_err(|e| Error::Service {
+            name: spec.name.clone(),
+            message: format!("tokio pipe stdout: {e}"),
+        })?,
     );
     let stderr_reader: BoxReader = Box::new(
-        tokio::net::unix::pipe::Receiver::from_owned_fd(stderr_r)
-            .map_err(|e| Error::Service {
-                name: spec.name.clone(),
-                message: format!("tokio pipe stderr: {e}"),
-            })?
+        tokio::net::unix::pipe::Receiver::from_owned_fd(stderr_r).map_err(|e| Error::Service {
+            name: spec.name.clone(),
+            message: format!("tokio pipe stderr: {e}"),
+        })?,
     );
 
     Ok((
-        AnyChild::Raw(RawChild { pid: child_pid, reaped: false }),
+        AnyChild::Raw(RawChild {
+            pid: child_pid,
+            reaped: false,
+        }),
         Some(stdout_reader),
         Some(stderr_reader),
     ))
@@ -704,17 +704,13 @@ async fn oneshot_exec_clone3(
 ) -> Result<std::process::Output, Error> {
     use rustix::pipe::PipeFlags;
 
-    let clone_flags: u64 =
-        libc::CLONE_NEWUSER as u64
+    let clone_flags: u64 = libc::CLONE_NEWUSER as u64
         | libc::CLONE_NEWPID as u64
         | prepared.unshare_flags.bits() as u64;
 
-    let (stdout_r, stdout_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
-    let (stderr_r, stderr_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
-    let (sync_r, sync_w) =
-        rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (stdout_r, stdout_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (stderr_r, stderr_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
+    let (sync_r, sync_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
     let devnull = std::fs::File::open("/dev/null").map_err(Error::Io)?;
 
     let child_pid = unsafe { raw_clone3(clone_flags) }.map_err(|e| Error::Service {
@@ -779,7 +775,9 @@ async fn oneshot_exec_clone3(
 
     // Write uid_map, signal child.
     if let Err(e) = write_uid_gid_map(child_pid) {
-        unsafe { libc::kill(child_pid, libc::SIGKILL); }
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
         return Err(Error::Service {
             name: spec.name.clone(),
             message: format!("write_uid_gid_map: {e}"),
@@ -805,22 +803,34 @@ async fn oneshot_exec_clone3(
         // Read pipes until EOF (child closes write ends on exit).
         let mut buf = [0u8; 4096];
         loop {
-            let n = unsafe { libc::read(stdout_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-            if n <= 0 { break; }
+            let n =
+                unsafe { libc::read(stdout_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
             stdout.extend_from_slice(&buf[..n as usize]);
         }
-        unsafe { libc::close(stdout_fd); }
+        unsafe {
+            libc::close(stdout_fd);
+        }
 
         loop {
-            let n = unsafe { libc::read(stderr_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-            if n <= 0 { break; }
+            let n =
+                unsafe { libc::read(stderr_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
             stderr.extend_from_slice(&buf[..n as usize]);
         }
-        unsafe { libc::close(stderr_fd); }
+        unsafe {
+            libc::close(stderr_fd);
+        }
 
         // Reap the child.
         let mut status: libc::c_int = 0;
-        unsafe { libc::waitpid(child_pid, &mut status, 0); }
+        unsafe {
+            libc::waitpid(child_pid, &mut status, 0);
+        }
 
         Ok(std::process::Output {
             status: ExitStatus::from_raw(status),
@@ -905,10 +915,9 @@ pub fn reap(sup: &mut Supervised) -> Result<Option<ExitStatus>, Error> {
 pub fn should_start(sup: &Supervised, now: Instant) -> bool {
     match sup.state {
         ServiceState::Running | ServiceState::Starting => false,
-        ServiceState::Stopped | ServiceState::Crashed => sup
-            .next_restart
-            .map(|t| now >= t)
-            .unwrap_or(true),
+        ServiceState::Stopped | ServiceState::Crashed => {
+            sup.next_restart.map(|t| now >= t).unwrap_or(true)
+        }
     }
 }
 
@@ -1018,8 +1027,8 @@ impl Supervisor {
             .services
             .iter()
             .map(|s| {
-                let is_ready = matches!(s.state, ServiceState::Running)
-                    && s.uptime() >= DEP_STARTUP_GRACE;
+                let is_ready =
+                    matches!(s.state, ServiceState::Running) && s.uptime() >= DEP_STARTUP_GRACE;
                 (s.spec.name.clone(), is_ready)
             })
             .collect();
@@ -1147,8 +1156,8 @@ fn move_to_cgroup(spec: &Service, pid: u32) -> Result<(), Error> {
 #[derive(Debug)]
 struct PreparedContainer {
     rootfs: CString,
-    put_old_in_new_root: CString,  // <rootfs>/.old_root — argument to pivot_root
-    put_old_after_pivot: CString,  // /.old_root         — path after pivot_root
+    put_old_in_new_root: CString, // <rootfs>/.old_root — argument to pivot_root
+    put_old_after_pivot: CString, // /.old_root         — path after pivot_root
     proc_target: CString,
     sys_target: CString,
     dev_target: CString,
@@ -1355,7 +1364,8 @@ impl PreparedContainer {
         mount_change(
             c"/",
             MountPropagationFlags::DOWNSTREAM | MountPropagationFlags::REC,
-        ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount_change /", e)))?;
+        )
+        .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount_change /", e)))?;
 
         mount_bind(self.rootfs.as_c_str(), self.rootfs.as_c_str())
             .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("bind rootfs", e)))?;
@@ -1371,10 +1381,8 @@ impl PreparedContainer {
             }
         }
 
-        pivot_root(
-            self.rootfs.as_c_str(),
-            self.put_old_in_new_root.as_c_str(),
-        ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("pivot_root", e)))?;
+        pivot_root(self.rootfs.as_c_str(), self.put_old_in_new_root.as_c_str())
+            .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("pivot_root", e)))?;
         chdir(c"/")?;
 
         let none: Option<&CStr> = None;
@@ -1403,7 +1411,8 @@ impl PreparedContainer {
                 c"sysfs",
                 nsnd | MountFlags::RDONLY,
                 none,
-            ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount sysfs", e)))?;
+            )
+            .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount sysfs", e)))?;
         }
 
         // In a user namespace, tmpfs mount may return EOVERFLOW unless
@@ -1417,7 +1426,10 @@ impl PreparedContainer {
                 c"tmpfs",
                 MountFlags::NOSUID,
                 Some(c"uid=0,gid=0,mode=0755"),
-            ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount tmpfs /dev (userns)", e)))?;
+            )
+            .map_err(|e| {
+                rustix::io::Errno::from_raw_os_error(map_step_err("mount tmpfs /dev (userns)", e))
+            })?;
         } else {
             mount(
                 c"tmpfs",
@@ -1425,7 +1437,10 @@ impl PreparedContainer {
                 c"tmpfs",
                 MountFlags::NOSUID,
                 none,
-            ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount tmpfs /dev", e)))?;
+            )
+            .map_err(|e| {
+                rustix::io::Errno::from_raw_os_error(map_step_err("mount tmpfs /dev", e))
+            })?;
         }
         // In a userns, mkdir on the freshly-mounted tmpfs may fail with
         // EOVERFLOW (uid overflow check) and devpts mount is also
@@ -1433,7 +1448,9 @@ impl PreparedContainer {
         // a PTY must declare a bind mount for /dev/pts instead.
         if !self.user_namespace {
             rustix::fs::mkdir(self.devpts_target.as_c_str(), rustix::fs::Mode::from(0o755))
-                .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mkdir /dev/pts", e)))?;
+                .map_err(|e| {
+                    rustix::io::Errno::from_raw_os_error(map_step_err("mkdir /dev/pts", e))
+                })?;
             // ptmxmode=666,gid=5 makes /dev/pts/ptmx openable by non-root
             // users (dropbear drops to the logged-in user before calling
             // openpty). Without this the kernel defaults ptmxmode to 0000
@@ -1445,7 +1462,8 @@ impl PreparedContainer {
                 c"devpts",
                 MountFlags::NOSUID | MountFlags::NOEXEC,
                 Some(c"ptmxmode=666,gid=5"),
-            ).map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount devpts", e)))?;
+            )
+            .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("mount devpts", e)))?;
             // /dev is a fresh tmpfs — whatever the rootfs image staged at
             // /dev/ptmx is hidden. openpty(3) / dropbear open /dev/ptmx
             // (not /dev/pts/ptmx), so materialize the conventional symlink
@@ -1457,14 +1475,50 @@ impl PreparedContainer {
             // open /dev/urandom"), and dropbear would also hit it if it
             // ever needed the RNG (dropbear reads /dev/urandom on some
             // crypto paths). Major/minor numbers per Linux mem-major (1).
-            use rustix::fs::{FileType, Mode, mknodat, CWD};
+            use rustix::fs::{CWD, FileType, Mode, mknodat};
             let chr = FileType::CharacterDevice;
-            let _ = mknodat(CWD, c"/dev/null",    chr, Mode::from(0o666), rustix::fs::makedev(1, 3));
-            let _ = mknodat(CWD, c"/dev/zero",    chr, Mode::from(0o666), rustix::fs::makedev(1, 5));
-            let _ = mknodat(CWD, c"/dev/full",    chr, Mode::from(0o666), rustix::fs::makedev(1, 7));
-            let _ = mknodat(CWD, c"/dev/random",  chr, Mode::from(0o666), rustix::fs::makedev(1, 8));
-            let _ = mknodat(CWD, c"/dev/urandom", chr, Mode::from(0o666), rustix::fs::makedev(1, 9));
-            let _ = mknodat(CWD, c"/dev/tty",     chr, Mode::from(0o666), rustix::fs::makedev(5, 0));
+            let _ = mknodat(
+                CWD,
+                c"/dev/null",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(1, 3),
+            );
+            let _ = mknodat(
+                CWD,
+                c"/dev/zero",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(1, 5),
+            );
+            let _ = mknodat(
+                CWD,
+                c"/dev/full",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(1, 7),
+            );
+            let _ = mknodat(
+                CWD,
+                c"/dev/random",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(1, 8),
+            );
+            let _ = mknodat(
+                CWD,
+                c"/dev/urandom",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(1, 9),
+            );
+            let _ = mknodat(
+                CWD,
+                c"/dev/tty",
+                chr,
+                Mode::from(0o666),
+                rustix::fs::makedev(5, 0),
+            );
         }
 
         // Writable /tmp tmpfs — every service needs a scratch area for
@@ -1486,8 +1540,9 @@ impl PreparedContainer {
             Some(c"mode=1777"),
         );
 
-        unmount(self.put_old_after_pivot.as_c_str(), UnmountFlags::DETACH)
-            .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("unmount .old_root", e)))?;
+        unmount(self.put_old_after_pivot.as_c_str(), UnmountFlags::DETACH).map_err(|e| {
+            rustix::io::Errno::from_raw_os_error(map_step_err("unmount .old_root", e))
+        })?;
         Ok(())
     }
 
@@ -1507,14 +1562,12 @@ impl PreparedContainer {
     /// consumes the ruleset — we `.take()` the `Option` to move it out.
     fn harden(&mut self) -> io::Result<()> {
         for cap in &self.drops_non_setpcap {
-            caps::drop(None, CapSet::Bounding, *cap).map_err(|e| {
-                io::Error::other(format!("drop bounding {cap:?}: {e}"))
-            })?;
+            caps::drop(None, CapSet::Bounding, *cap)
+                .map_err(|e| io::Error::other(format!("drop bounding {cap:?}: {e}")))?;
         }
         if self.drop_setpcap {
-            caps::drop(None, CapSet::Bounding, Capability::CAP_SETPCAP).map_err(|e| {
-                io::Error::other(format!("drop bounding SETPCAP: {e}"))
-            })?;
+            caps::drop(None, CapSet::Bounding, Capability::CAP_SETPCAP)
+                .map_err(|e| io::Error::other(format!("drop bounding SETPCAP: {e}")))?;
         }
 
         if self.no_new_privs {
@@ -1586,19 +1639,12 @@ fn build_landlock_ruleset(spec: &Service) -> io::Result<Option<RulesetCreated>> 
         if bind.readonly {
             continue;
         }
-        let fd = PathFd::new(&bind.source).map_err(|e| {
-            io::Error::other(format!(
-                "landlock PathFd({:?}): {e}",
-                bind.source
-            ))
-        })?;
+        let fd = PathFd::new(&bind.source)
+            .map_err(|e| io::Error::other(format!("landlock PathFd({:?}): {e}", bind.source)))?;
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, write_access))
             .map_err(|e| {
-                io::Error::other(format!(
-                    "landlock add writable bind {:?}: {e}",
-                    bind.source
-                ))
+                io::Error::other(format!("landlock add writable bind {:?}: {e}", bind.source))
             })?;
     }
 
@@ -1702,7 +1748,9 @@ fn map_step_err(step: &str, e: rustix::io::Errno) -> i32 {
     // a pipe. The format! allocates, which is technically not async-signal-
     // safe but works in practice after fork on Linux.
     let msg = format!("  → {step}: {e}\n");
-    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()); }
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+    }
     e.raw_os_error()
 }
 

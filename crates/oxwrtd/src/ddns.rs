@@ -53,7 +53,10 @@ pub fn spawn(state: Arc<ControlState>, lease: SharedLease) -> tokio::task::JoinH
             if cfg.ddns.is_empty() {
                 continue;
             }
-            let Some(current_ip) = lease.read().ok().and_then(|l| l.as_ref().map(|x| x.address))
+            let Some(current_ip) = lease
+                .read()
+                .ok()
+                .and_then(|l| l.as_ref().map(|x| x.address))
             else {
                 continue;
             };
@@ -91,11 +94,7 @@ fn build_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-async fn push(
-    client: &reqwest::Client,
-    entry: &Ddns,
-    ip: Ipv4Addr,
-) -> Result<(), String> {
+async fn push(client: &reqwest::Client, entry: &Ddns, ip: Ipv4Addr) -> Result<(), String> {
     match entry {
         Ddns::Duckdns { domain, token, .. } => {
             let url = format!(
@@ -198,7 +197,11 @@ token = "uuid-token"
 "#;
         let d: Ddns = toml::from_str(toml_text).unwrap();
         match d {
-            Ddns::Duckdns { name, domain, token } => {
+            Ddns::Duckdns {
+                name,
+                domain,
+                token,
+            } => {
                 assert_eq!(name, "home");
                 assert_eq!(domain, "myrouter");
                 assert_eq!(token, "uuid-token");

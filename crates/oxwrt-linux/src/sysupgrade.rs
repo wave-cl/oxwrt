@@ -126,8 +126,8 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
     // independent offsets require independent open(2) calls. Files
     // open across pivot_root continue to work — only name lookups
     // break — so opening here is safe and survives the pivot.
-    let img_for_root = File::open(image_path)
-        .map_err(io(format!("open {} (root pass)", image_path.display())))?;
+    let img_for_root =
+        File::open(image_path).map_err(io(format!("open {} (root pass)", image_path.display())))?;
     let img_for_kernel = File::open(image_path)
         .map_err(io(format!("open {} (kernel pass)", image_path.display())))?;
 
@@ -241,10 +241,7 @@ impl FwtoolMeta {
 /// Returns (length of tar.gz data before the trailer, parsed metadata).
 fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
     let mut f = File::open(path).map_err(io(format!("open {}", path.display())))?;
-    let total = f
-        .metadata()
-        .map_err(io("stat image"))?
-        .len();
+    let total = f.metadata().map_err(io("stat image"))?.len();
     if total < 16 {
         return Err(Error::Fwtool(
             "image too small to have 16-byte fwtool trailer".into(),
@@ -252,7 +249,8 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
     }
 
     // Fixed 16-byte trailer: magic (4) + crc (4) + type (4) + size (4).
-    f.seek(SeekFrom::Start(total - 16)).map_err(io("seek trailer"))?;
+    f.seek(SeekFrom::Start(total - 16))
+        .map_err(io("seek trailer"))?;
     let mut footer = [0u8; 16];
     f.read_exact(&mut footer).map_err(io("read trailer"))?;
 
@@ -265,8 +263,8 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
 
     // size is big-endian and covers the *entire* trailer from the
     // metadata-block start through the 16 trailer bytes.
-    let total_trailer_size = u32::from_be_bytes([footer[12], footer[13], footer[14], footer[15]])
-        as u64;
+    let total_trailer_size =
+        u32::from_be_bytes([footer[12], footer[13], footer[14], footer[15]]) as u64;
     if total_trailer_size < 16 || total_trailer_size > 65_536 {
         return Err(Error::Fwtool(format!(
             "fwtool trailer size implausible: {total_trailer_size} bytes"
@@ -350,8 +348,8 @@ fn tar_append_dir_filtered<W: std::io::Write>(
     // Add the directory entry itself first so empty dirs get preserved.
     tb.append_dir(archive_path, disk_path)
         .map_err(io(format!("tar dir {}", disk_path.display())))?;
-    let rd = std::fs::read_dir(disk_path)
-        .map_err(io(format!("read_dir {}", disk_path.display())))?;
+    let rd =
+        std::fs::read_dir(disk_path).map_err(io(format!("read_dir {}", disk_path.display())))?;
     for ent in rd {
         let ent = ent.map_err(io(format!("read_dir entry {}", disk_path.display())))?;
         let sub_disk = ent.path();
@@ -374,8 +372,8 @@ fn tar_append_dir_filtered<W: std::io::Write>(
         } else if ft.is_dir() {
             tar_append_dir_filtered(tb, &sub_archive, &sub_disk)?;
         } else if ft.is_file() {
-            let mut f = File::open(&sub_disk)
-                .map_err(io(format!("open {}", sub_disk.display())))?;
+            let mut f =
+                File::open(&sub_disk).map_err(io(format!("open {}", sub_disk.display())))?;
             tb.append_file(&sub_archive, &mut f)
                 .map_err(io(format!("tar file {}", sub_disk.display())))?;
         } else {
@@ -467,8 +465,7 @@ fn read_keep_list() -> Result<Vec<String>, Error> {
 /// filogic DTS. For GL-MT6000 the labels are fixed: bl2, u-boot-env,
 /// factory, fip, kernel, rootfs, rootfs_data.
 pub fn resolve_partition(name: &str) -> Result<PathBuf, Error> {
-    let rd = std::fs::read_dir("/sys/class/block")
-        .map_err(io("read /sys/class/block"))?;
+    let rd = std::fs::read_dir("/sys/class/block").map_err(io("read /sys/class/block"))?;
     for e in rd.flatten() {
         let dev_name = e.file_name();
         let Some(dev_name) = dev_name.to_str() else {
@@ -507,9 +504,7 @@ pub fn resolve_partition(name: &str) -> Result<PathBuf, Error> {
 ///   5. Remount old root read-only, lazy-unmount it + /overlay to
 ///      release the underlying block devices.
 fn pivot_to_ramfs() -> Result<(), Error> {
-    use rustix::mount::{
-        MountFlags, UnmountFlags, mount_bind, mount_move, mount_remount, unmount,
-    };
+    use rustix::mount::{MountFlags, UnmountFlags, mount_bind, mount_move, mount_remount, unmount};
 
     let new_root = Path::new("/tmp/sysupgrade-root");
     std::fs::create_dir_all(new_root).map_err(io("mkdir new_root"))?;
@@ -517,8 +512,7 @@ fn pivot_to_ramfs() -> Result<(), Error> {
     // mount --bind new_root on itself so pivot_root accepts it as a
     // mount point. On Linux this works even though the underlying fs
     // is already tmpfs: the bind creates a new mount entry.
-    mount_bind(new_root, new_root)
-        .map_err(|e| Error::Pivot(format!("bind new_root: {e}")))?;
+    mount_bind(new_root, new_root).map_err(|e| Error::Pivot(format!("bind new_root: {e}")))?;
 
     // Prepare mount point directories inside the new root.
     for sub in ["proc", "sys", "dev", "tmp", "overlay", "mnt"] {
@@ -537,8 +531,7 @@ fn pivot_to_ramfs() -> Result<(), Error> {
         if !from.exists() {
             continue;
         }
-        mount_move(from, &to)
-            .map_err(|e| Error::Pivot(format!("move {sub}: {e}")))?;
+        mount_move(from, &to).map_err(|e| Error::Pivot(format!("move {sub}: {e}")))?;
     }
     // /tmp is special — it's the parent of our new_root, so we can't
     // move it without surgery. Instead, bind-mount it into the new
@@ -560,8 +553,7 @@ fn pivot_to_ramfs() -> Result<(), Error> {
 
     // Post-pivot: we're in the new root. Chdir to / so relative paths
     // work, and release the old root so the block device is freed.
-    std::env::set_current_dir("/")
-        .map_err(io("chdir / after pivot"))?;
+    std::env::set_current_dir("/").map_err(io("chdir / after pivot"))?;
 
     // Remount old root read-only, then lazy-unmount. Both must happen
     // or we can't write to the partition. Lazy because we may still
@@ -580,7 +572,10 @@ fn pivot_to_ramfs() -> Result<(), Error> {
 
     // Final kick to the page cache so reads of the flashing partition
     // don't return stale data if anything happens to read it.
-    if let Ok(mut f) = OpenOptions::new().write(true).open("/proc/sys/vm/drop_caches") {
+    if let Ok(mut f) = OpenOptions::new()
+        .write(true)
+        .open("/proc/sys/vm/drop_caches")
+    {
         let _ = f.write_all(b"3\n");
     }
 
@@ -596,8 +591,8 @@ fn pivot_to_ramfs() -> Result<(), Error> {
 /// has its own read offset — try_clone shares offset on Linux, which
 /// would empty the flash-time stream before it starts.
 fn preflight_tar(image_path: &Path) -> Result<(), Error> {
-    let f = File::open(image_path)
-        .map_err(io(format!("preflight: open {}", image_path.display())))?;
+    let f =
+        File::open(image_path).map_err(io(format!("preflight: open {}", image_path.display())))?;
     // Note: no tar_len cap here — we don't need one for preflight.
     // Reading past the fwtool trailer will cause tar to hit "bad
     // archive" eventually, but we'll have already seen both members
@@ -616,7 +611,10 @@ fn preflight_tar(image_path: &Path) -> Result<(), Error> {
             Err(_) if have_root && have_kernel => break,
             Err(e) => return Err(io("preflight: tar entry")(e)),
         };
-        let path = entry.path().map_err(io("preflight: tar entry path"))?.into_owned();
+        let path = entry
+            .path()
+            .map_err(io("preflight: tar entry path"))?
+            .into_owned();
         match path.file_name().and_then(|s| s.to_str()).unwrap_or("") {
             "root" => have_root = true,
             "kernel" => have_kernel = true,
@@ -671,9 +669,10 @@ fn extract_and_write(
             .write(true)
             .open(out_dev)
             .map_err(io(format!("open {}", out_dev.display())))?;
-        let n = std::io::copy(&mut entry, &mut out)
-            .map_err(io(format!("write {member_basename}")))?;
-        out.sync_all().map_err(io(format!("fsync {member_basename}")))?;
+        let n =
+            std::io::copy(&mut entry, &mut out).map_err(io(format!("write {member_basename}")))?;
+        out.sync_all()
+            .map_err(io(format!("fsync {member_basename}")))?;
         return Ok(n);
     }
     Err(Error::Image(format!(
@@ -729,22 +728,12 @@ fn flash_image(
 
     // Step 2: extract and write rootfs.
     tracing::info!(dev = %root_dev.display(), "sysupgrade: writing rootfs");
-    let root_bytes_written = extract_and_write(
-        img_for_root,
-        tar_len,
-        "root",
-        root_dev,
-    )?;
+    let root_bytes_written = extract_and_write(img_for_root, tar_len, "root", root_dev)?;
     tracing::info!(bytes = root_bytes_written, "sysupgrade: rootfs written");
 
     // Step 3: extract and write kernel.
     tracing::info!(dev = %kern_dev.display(), "sysupgrade: writing kernel");
-    let kernel_bytes_written = extract_and_write(
-        img_for_kernel,
-        tar_len,
-        "kernel",
-        kern_dev,
-    )?;
+    let kernel_bytes_written = extract_and_write(img_for_kernel, tar_len, "kernel", kern_dev)?;
     tracing::info!(bytes = kernel_bytes_written, "sysupgrade: kernel written");
 
     // Step 3: write the backup tgz past the rootfs, or zero a marker
@@ -769,7 +758,11 @@ fn flash_image(
 
     match backup_tgz {
         Some(bytes) => {
-            tracing::info!(off = overlay_off, size = bytes.len(), "sysupgrade: writing config backup past rootfs");
+            tracing::info!(
+                off = overlay_off,
+                size = bytes.len(),
+                "sysupgrade: writing config backup past rootfs"
+            );
             f.write_all(bytes).map_err(io("write backup"))?;
             f.sync_all().map_err(io("fsync backup"))?;
             tracing::info!(bytes = bytes.len(), "sysupgrade: backup written");
@@ -780,7 +773,10 @@ fn flash_image(
             let zeros = [0u8; 4096];
             f.write_all(&zeros).map_err(io("zero overlay marker"))?;
             f.sync_all().map_err(io("fsync marker"))?;
-            tracing::info!(off = overlay_off, "sysupgrade: overlay marker zeroed (clean flash)");
+            tracing::info!(
+                off = overlay_off,
+                "sysupgrade: overlay marker zeroed (clean flash)"
+            );
         }
     }
 
@@ -902,8 +898,8 @@ mod tests {
             eprintln!("parses_real_sysupgrade_bin: image not staged, skipping");
             return;
         };
-        let (_, meta) = parse_fwtool_trailer(Path::new(real))
-            .expect("real sysupgrade.bin should parse");
+        let (_, meta) =
+            parse_fwtool_trailer(Path::new(real)).expect("real sysupgrade.bin should parse");
         meta.check_board("glinet,gl-mt6000")
             .expect("real image should advertise gl-mt6000");
     }

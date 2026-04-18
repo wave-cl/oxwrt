@@ -56,15 +56,14 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
             ),
         };
     }
-    if let Some(crate::config::Network::Lan { bridge, address, prefix, .. }) = new_cfg.lan() {
-        if let Err(e) = reconcile_iface_address(
-            bridge,
-            *address,
-            *prefix,
-            "lan",
-        )
-        .await
-        {
+    if let Some(crate::config::Network::Lan {
+        bridge,
+        address,
+        prefix,
+        ..
+    }) = new_cfg.lan()
+    {
+        if let Err(e) = reconcile_iface_address(bridge, *address, *prefix, "lan").await {
             return Response::Err {
                 message: format!("reload: lan address reconcile failed: {e}"),
             };
@@ -77,13 +76,13 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
     // its own setup path and isn't reconciled here.
     if let Some(crate::config::Network::Wan {
         iface,
-        wan: crate::config::WanConfig::Static { address, prefix, .. },
+        wan: crate::config::WanConfig::Static {
+            address, prefix, ..
+        },
         ..
     }) = new_cfg.primary_wan()
     {
-        if let Err(e) =
-            reconcile_iface_address(iface, *address, *prefix, "wan").await
-        {
+        if let Err(e) = reconcile_iface_address(iface, *address, *prefix, "wan").await {
             return Response::Err {
                 message: format!("reload: wan static address reconcile failed: {e}"),
             };
@@ -193,19 +192,14 @@ async fn reconcile_iface_address(
     role: &str, // "lan" or "wan", for log tagging
 ) -> Result<(), String> {
     use futures_util::stream::TryStreamExt;
-    use rtnetlink::packet_route::{address::AddressAttribute, AddressFamily};
+    use rtnetlink::packet_route::{AddressFamily, address::AddressAttribute};
 
-    let (connection, handle, _messages) =
-        rtnetlink::new_connection().map_err(|e| e.to_string())?;
+    let (connection, handle, _messages) = rtnetlink::new_connection().map_err(|e| e.to_string())?;
     let conn_task = tokio::spawn(connection);
 
     // Resolve iface → index.
     let idx = {
-        let mut stream = handle
-            .link()
-            .get()
-            .match_name(iface.to_string())
-            .execute();
+        let mut stream = handle.link().get().match_name(iface.to_string()).execute();
         let msg = stream
             .try_next()
             .await
@@ -291,9 +285,7 @@ async fn reconcile_iface_address(
     Ok(())
 }
 
-fn format_v4_from_attrs(
-    attrs: &[rtnetlink::packet_route::address::AddressAttribute],
-) -> String {
+fn format_v4_from_attrs(attrs: &[rtnetlink::packet_route::address::AddressAttribute]) -> String {
     use rtnetlink::packet_route::address::AddressAttribute;
     for attr in attrs {
         if let AddressAttribute::Address(std::net::IpAddr::V4(a)) = attr {

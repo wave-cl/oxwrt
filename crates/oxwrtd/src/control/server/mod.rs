@@ -90,7 +90,9 @@ impl Server {
     }
 
     async fn handle_incoming(self: Arc<Self>, incoming: quinn::Incoming) -> Result<(), Error> {
-        let conn = incoming.await.map_err(|e| Error::Squic(squic::Error::from(e)))?;
+        let conn = incoming
+            .await
+            .map_err(|e| Error::Squic(squic::Error::from(e)))?;
         loop {
             let (mut send, mut recv) = match conn.accept_bi().await {
                 Ok(s) => s,
@@ -177,7 +179,11 @@ impl Server {
             }
 
             // Firmware apply: trigger sysupgrade + reboot.
-            if let Request::FwApply { confirm, keep_settings } = &request {
+            if let Request::FwApply {
+                confirm,
+                keep_settings,
+            } = &request
+            {
                 let resp = handle_fw_apply(*confirm, *keep_settings);
                 write_frame(&mut send, &resp).await?;
                 send.finish().ok();
@@ -256,8 +262,8 @@ pub use reload::handle_reload_async;
 // imports bring the names back into scope so call sites don't change.
 use crud::{
     handle_crud_ddns, handle_crud_network, handle_crud_port_forward, handle_crud_radio,
-    handle_crud_rule, handle_crud_service, handle_crud_wg_peer, handle_crud_wifi,
-    handle_crud_zone, handle_wg_enroll,
+    handle_crud_rule, handle_crud_service, handle_crud_wg_peer, handle_crud_wifi, handle_crud_zone,
+    handle_wg_enroll,
 };
 use diag::handle_diag;
 use logs::{handle_logs, stream_follow_logs};
@@ -277,14 +283,17 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         Request::Status => {
             let services = collect_status(state);
             let supervisor_uptime_secs = state.boot_time.elapsed().as_secs();
-            let wan = state.wan_lease.read().unwrap().as_ref().map(|l| {
-                crate::rpc::WanSummary {
+            let wan = state
+                .wan_lease
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|l| crate::rpc::WanSummary {
                     address: l.address.to_string(),
                     prefix: l.prefix,
                     gateway: l.gateway.map(|g| g.to_string()),
                     lease_seconds: l.lease_seconds,
-                }
-            });
+                });
             let firewall_rules = state.firewall_dump.read().unwrap().len();
             let aps = collect_ap_status(&state.config_snapshot());
             vec![Response::Status {
@@ -332,7 +341,6 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
     }
 }
 
-
 fn handle_get(state: &ControlState, key: &str) -> Response {
     use crate::config::{Network, WanConfig};
     let cfg = state.config_snapshot();
@@ -341,7 +349,10 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
         "timezone" => cfg.timezone.clone(),
         "lan.bridge" => cfg.lan().map(|n| n.iface().to_string()),
         "lan.address" => cfg.lan().map(|n| {
-            if let Network::Lan { address, prefix, .. } = n {
+            if let Network::Lan {
+                address, prefix, ..
+            } = n
+            {
                 format!("{address}/{prefix}")
             } else {
                 unreachable!()
@@ -371,14 +382,24 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
         }),
         "wan.iface" => cfg.primary_wan().map(|n| n.iface().to_string()),
         "wan.address" => cfg.primary_wan().map(|n| {
-            if let Network::Wan { wan: WanConfig::Static { address, prefix, .. }, .. } = n {
+            if let Network::Wan {
+                wan: WanConfig::Static {
+                    address, prefix, ..
+                },
+                ..
+            } = n
+            {
                 format!("{address}/{prefix}")
             } else {
                 "(not static)".to_string()
             }
         }),
         "wan.prefix" => cfg.primary_wan().map(|n| {
-            if let Network::Wan { wan: WanConfig::Static { prefix, .. }, .. } = n {
+            if let Network::Wan {
+                wan: WanConfig::Static { prefix, .. },
+                ..
+            } = n
+            {
                 prefix.to_string()
             } else {
                 "(not static)".to_string()
@@ -389,22 +410,37 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
         // is deliberately NOT exposed: it's settable but never readable,
         // matching the convention of write-only credential fields.
         "wan.username" => cfg.primary_wan().map(|n| {
-            if let Network::Wan { wan: WanConfig::Pppoe { username, .. }, .. } = n {
+            if let Network::Wan {
+                wan: WanConfig::Pppoe { username, .. },
+                ..
+            } = n
+            {
                 username.clone()
             } else {
                 "(not pppoe)".to_string()
             }
         }),
         "wan.gateway" => cfg.primary_wan().map(|n| {
-            if let Network::Wan { wan: WanConfig::Static { gateway, .. }, .. } = n {
+            if let Network::Wan {
+                wan: WanConfig::Static { gateway, .. },
+                ..
+            } = n
+            {
                 gateway.to_string()
             } else {
                 "(not static)".to_string()
             }
         }),
         "wan.dns" => cfg.primary_wan().map(|n| {
-            if let Network::Wan { wan: WanConfig::Static { dns, .. }, .. } = n {
-                dns.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+            if let Network::Wan {
+                wan: WanConfig::Static { dns, .. },
+                ..
+            } = n
+            {
+                dns.iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             } else {
                 "(not static)".to_string()
             }
@@ -532,11 +568,9 @@ pub(crate) fn collect_ap_status(cfg: &crate::config::Config) -> Vec<crate::rpc::
                 .find(|r| r.phy == w.radio)
                 .map(|r| (r.band.clone(), r.channel))
                 .unwrap_or_else(|| (String::new(), 0));
-            let operstate = std::fs::read_to_string(format!(
-                "/sys/class/net/{iface}/operstate"
-            ))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+            let operstate = std::fs::read_to_string(format!("/sys/class/net/{iface}/operstate"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
             crate::rpc::ApStatus {
                 ssid: w.ssid.clone(),
                 iface,
@@ -665,11 +699,7 @@ fn handle_config_push(state: &ControlState, toml_text: &str) -> Response {
 // imported at the top of the CRUD helper section above.)
 
 /// Serialize config to TOML, atomic-write to disk, swap the in-memory Arc.
-fn persist_and_swap(
-    state: &ControlState,
-    new_cfg: crate::config::Config,
-    desc: &str,
-) -> Response {
+fn persist_and_swap(state: &ControlState, new_cfg: crate::config::Config, desc: &str) -> Response {
     let toml_text = match toml::to_string_pretty(&new_cfg) {
         Ok(t) => t,
         Err(e) => {

@@ -46,10 +46,8 @@ where
     W: AsyncWriteExt + Unpin,
     T: serde::Serialize,
 {
-    let body =
-        rmp_serde::to_vec_named(msg).map_err(|e| FrameError::Encode(e.to_string()))?;
-    let len = u32::try_from(body.len())
-        .map_err(|_| FrameError::TooLarge(u32::MAX))?;
+    let body = rmp_serde::to_vec_named(msg).map_err(|e| FrameError::Encode(e.to_string()))?;
+    let len = u32::try_from(body.len()).map_err(|_| FrameError::TooLarge(u32::MAX))?;
     if len > MAX_FRAME {
         return Err(FrameError::TooLarge(len));
     }
@@ -110,10 +108,14 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             Ok(Request::Reset { confirm: true })
         }
         "diag" => {
-            let name = args.first().ok_or(
-                "diag: missing op (try `links`, `routes`)",
-            )?;
-            let rest = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
+            let name = args
+                .first()
+                .ok_or("diag: missing op (try `links`, `routes`)")?;
+            let rest = if args.len() > 1 {
+                args[1..].to_vec()
+            } else {
+                Vec::new()
+            };
             Ok(Request::Diag {
                 name: name.clone(),
                 args: rest,
@@ -124,17 +126,14 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             // The path is used by the client to read the file and compute
             // SHA-256. The Request carries size + hash; the file bytes
             // are streamed separately on the sQUIC bi-stream.
-            let path = args
-                .first()
-                .ok_or("update: missing firmware image path")?;
-            let meta = std::fs::metadata(path)
-                .map_err(|e| format!("update: {path}: {e}"))?;
+            let path = args.first().ok_or("update: missing firmware image path")?;
+            let meta = std::fs::metadata(path).map_err(|e| format!("update: {path}: {e}"))?;
             let size = meta.len();
             // Compute SHA-256 of the image file.
             let sha256 = {
-                use sha2::{Sha256, Digest};
-                let mut file = std::fs::File::open(path)
-                    .map_err(|e| format!("update: open {path}: {e}"))?;
+                use sha2::{Digest, Sha256};
+                let mut file =
+                    std::fs::File::open(path).map_err(|e| format!("update: open {path}: {e}"))?;
                 let mut hasher = Sha256::new();
                 std::io::copy(&mut file, &mut hasher)
                     .map_err(|e| format!("update: hash {path}: {e}"))?;
@@ -153,10 +152,13 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             // --clean = discard all settings (sysupgrade -n).
             // Default (no --clean) = keep /etc/oxwrt.toml + keys.
             let keep_settings = !args.iter().any(|a| a == "--clean");
-            Ok(Request::FwApply { confirm: true, keep_settings })
+            Ok(Request::FwApply {
+                confirm: true,
+                keep_settings,
+            })
         }
-        "network" | "zone" | "rule" | "wifi" | "radio" | "service" | "port-forward"
-        | "wg-peer" | "ddns" => {
+        "network" | "zone" | "rule" | "wifi" | "radio" | "service" | "port-forward" | "wg-peer"
+        | "ddns" => {
             let action = match args.first().map(|s| s.as_str()) {
                 Some("list") => CrudAction::List,
                 Some("get") => {
@@ -170,29 +172,35 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                 Some("update") => {
                     let name = args.get(1).ok_or(format!("{cmd} update: missing name"))?;
                     let json = args.get(2).ok_or(format!("{cmd} update: missing JSON"))?;
-                    CrudAction::Update { name: name.clone(), json: json.clone() }
+                    CrudAction::Update {
+                        name: name.clone(),
+                        json: json.clone(),
+                    }
                 }
                 Some("remove") => {
                     let name = args.get(1).ok_or(format!("{cmd} remove: missing name"))?;
                     CrudAction::Remove { name: name.clone() }
                 }
-                _ => return Err(format!("{cmd}: missing action (list|get|add|update|remove)")),
+                _ => {
+                    return Err(format!(
+                        "{cmd}: missing action (list|get|add|update|remove)"
+                    ));
+                }
             };
-            Ok(Request::Collection { collection: cmd.to_string(), action })
+            Ok(Request::Collection {
+                collection: cmd.to_string(),
+                action,
+            })
         }
         "config-dump" => Ok(Request::ConfigDump),
         "backup" => Ok(Request::Backup),
         "restore" => {
             let path = args.first().ok_or("restore: missing <backup-file>")?;
             let confirm = args.iter().any(|a| a == "--confirm");
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("restore: read {path}: {e}"))?;
+            let bytes = std::fs::read(path).map_err(|e| format!("restore: read {path}: {e}"))?;
             use base64::Engine as _;
             let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(Request::Restore {
-                data_b64,
-                confirm,
-            })
+            Ok(Request::Restore { data_b64, confirm })
         }
         "config-push" => {
             let path = args.first().ok_or("config-push: missing TOML file path")?;
@@ -202,10 +210,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
         }
         "wg-enroll" => {
             // Positional: name allowed_ips endpoint_host [--dns IP]
-            let name = args
-                .first()
-                .ok_or("wg-enroll: missing <name>")?
-                .clone();
+            let name = args.first().ok_or("wg-enroll: missing <name>")?.clone();
             let allowed_ips = args
                 .get(1)
                 .ok_or("wg-enroll: missing <allowed_ips>")?
@@ -457,11 +462,7 @@ mod tests {
 
         let req = parse_request(
             "diag",
-            &[
-                "ping".to_string(),
-                "1.1.1.1".to_string(),
-                "3".to_string(),
-            ],
+            &["ping".to_string(), "1.1.1.1".to_string(), "3".to_string()],
         )
         .unwrap();
         match req {
@@ -495,11 +496,8 @@ mod tests {
     /// `apply --confirm --clean` sets keep_settings = false.
     #[test]
     fn apply_clean_flag() {
-        let req = parse_request(
-            "apply",
-            &["--confirm".to_string(), "--clean".to_string()],
-        )
-        .unwrap();
+        let req =
+            parse_request("apply", &["--confirm".to_string(), "--clean".to_string()]).unwrap();
         match req {
             Request::FwApply {
                 confirm,
@@ -583,7 +581,10 @@ mod tests {
         )
         .unwrap();
         match req {
-            Request::Collection { action: CrudAction::Add { json }, .. } => {
+            Request::Collection {
+                action: CrudAction::Add { json },
+                ..
+            } => {
                 assert!(json.contains("test"));
             }
             _ => panic!("expected Collection Add"),
@@ -592,7 +593,10 @@ mod tests {
         // get
         let req = parse_request("wifi", &["get".to_string(), "MySSID".to_string()]).unwrap();
         match req {
-            Request::Collection { collection, action: CrudAction::Get { name } } => {
+            Request::Collection {
+                collection,
+                action: CrudAction::Get { name },
+            } => {
                 assert_eq!(collection, "wifi");
                 assert_eq!(name, "MySSID");
             }
@@ -602,11 +606,18 @@ mod tests {
         // update
         let req = parse_request(
             "radio",
-            &["update".to_string(), "phy0".to_string(), r#"{"channel":44}"#.to_string()],
+            &[
+                "update".to_string(),
+                "phy0".to_string(),
+                r#"{"channel":44}"#.to_string(),
+            ],
         )
         .unwrap();
         match req {
-            Request::Collection { collection, action: CrudAction::Update { name, json } } => {
+            Request::Collection {
+                collection,
+                action: CrudAction::Update { name, json },
+            } => {
                 assert_eq!(collection, "radio");
                 assert_eq!(name, "phy0");
                 assert!(json.contains("44"));
@@ -617,7 +628,10 @@ mod tests {
         // remove
         let req = parse_request("zone", &["remove".to_string(), "guest".to_string()]).unwrap();
         match req {
-            Request::Collection { action: CrudAction::Remove { name }, .. } => {
+            Request::Collection {
+                action: CrudAction::Remove { name },
+                ..
+            } => {
                 assert_eq!(name, "guest");
             }
             _ => panic!("expected Collection Remove"),

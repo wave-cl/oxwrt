@@ -115,12 +115,16 @@ impl Network {
 impl Config {
     /// Find the first WAN network (for DHCP client, default route, etc.).
     pub fn primary_wan(&self) -> Option<&Network> {
-        self.networks.iter().find(|n| matches!(n, Network::Wan { .. }))
+        self.networks
+            .iter()
+            .find(|n| matches!(n, Network::Wan { .. }))
     }
 
     /// Find the first LAN network.
     pub fn lan(&self) -> Option<&Network> {
-        self.networks.iter().find(|n| matches!(n, Network::Lan { .. }))
+        self.networks
+            .iter()
+            .find(|n| matches!(n, Network::Lan { .. }))
     }
 
     /// Find a network by name.
@@ -307,7 +311,6 @@ pub enum Action {
 fn default_true() -> bool {
     true
 }
-
 
 /// WAN-mode configuration, flattened into the `Network::Wan` variant.
 /// The `mode` tag selects between DHCP, static, and PPPoE.
@@ -797,10 +800,8 @@ mod tests {
     #[test]
     fn example_config_parses() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let cfg: Config = toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
 
         // A handful of spot checks that double as documentation:
         // future field additions can extend the example TOML AND the
@@ -1070,7 +1071,11 @@ dest = "dmz"
     // added by dropping another assertion here.
 
     fn read_service_config(rel: &str) -> String {
-        let path = format!("{}/../../config/services/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = format!(
+            "{}/../../config/services/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            rel
+        );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 
@@ -1078,8 +1083,8 @@ dest = "dmz"
     fn named_toml_avoids_known_hickory025_breakers() {
         let text = read_service_config("dns/named.toml");
         // First line of defense: must be valid TOML.
-        let _: toml::Value = toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("named.toml not valid TOML: {e}"));
+        let _: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("named.toml not valid TOML: {e}"));
         // hickory 0.25 removed `Forward` as a zone_type variant.
         assert!(
             !text.contains("zone_type = \"Forward\""),
@@ -1097,8 +1102,7 @@ dest = "dmz"
         // Must declare at least one upstream (otherwise forwarding zone
         // has nowhere to send queries).
         assert!(
-            text.contains("[[zones.stores.name_servers]]")
-                || text.contains("name_servers = ["),
+            text.contains("[[zones.stores.name_servers]]") || text.contains("name_servers = ["),
             "named.toml must declare at least one upstream name_server"
         );
     }
@@ -1144,8 +1148,8 @@ dest = "dmz"
     #[test]
     fn ntp_toml_is_valid_toml() {
         let text = read_service_config("ntp/ntp.toml");
-        let _: toml::Value = toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("ntp.toml not valid TOML: {e}"));
+        let _: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("ntp.toml not valid TOML: {e}"));
         // Minimum: at least one [[source]] block, otherwise ntpd
         // doesn't know who to sync against.
         assert!(

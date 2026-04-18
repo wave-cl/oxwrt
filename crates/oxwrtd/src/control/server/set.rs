@@ -49,10 +49,18 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     };
                 }
             };
-            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
-                return Response::Err { message: "no lan network configured".to_string() };
+            let Some(lan) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Lan { .. }))
+            else {
+                return Response::Err {
+                    message: "no lan network configured".to_string(),
+                };
             };
-            if let Network::Lan { address, .. } = lan { *address = addr; }
+            if let Network::Lan { address, .. } = lan {
+                *address = addr;
+            }
         }
         "lan.prefix" => {
             let p = match value.parse::<u8>() {
@@ -63,10 +71,18 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     };
                 }
             };
-            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
-                return Response::Err { message: "no lan network configured".to_string() };
+            let Some(lan) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Lan { .. }))
+            else {
+                return Response::Err {
+                    message: "no lan network configured".to_string(),
+                };
             };
-            if let Network::Lan { prefix, .. } = lan { *prefix = p; }
+            if let Network::Lan { prefix, .. } = lan {
+                *prefix = p;
+            }
         }
         "lan.bridge" => {
             if value.is_empty() || value.len() >= 16 {
@@ -74,18 +90,34 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     message: "lan.bridge must be 1..15 chars".to_string(),
                 };
             }
-            let Some(lan) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Lan { .. })) else {
-                return Response::Err { message: "no lan network configured".to_string() };
+            let Some(lan) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Lan { .. }))
+            else {
+                return Response::Err {
+                    message: "no lan network configured".to_string(),
+                };
             };
-            if let Network::Lan { bridge, .. } = lan { *bridge = value.to_string(); }
+            if let Network::Lan { bridge, .. } = lan {
+                *bridge = value.to_string();
+            }
         }
         "wan.mode" => {
             // Switching WAN mode replaces the WanConfig inside the Wan variant.
             // The iface is carried over from the current config.
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
-            let Network::Wan { wan, .. } = wan_net else { unreachable!() };
+            let Network::Wan { wan, .. } = wan_net else {
+                unreachable!()
+            };
             match value {
                 "dhcp" => {
                     *wan = WanConfig::Dhcp;
@@ -106,18 +138,24 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                 }
                 _ => {
                     return Response::Err {
-                        message: format!(
-                            "unknown wan.mode: {value:?}. Valid: dhcp, static, pppoe"
-                        ),
+                        message: format!("unknown wan.mode: {value:?}. Valid: dhcp, static, pppoe"),
                     };
                 }
             }
         }
         "wan.iface" => {
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
-            if let Network::Wan { iface, .. } = wan_net { *iface = value.to_string(); }
+            if let Network::Wan { iface, .. } = wan_net {
+                *iface = value.to_string();
+            }
         }
         "wan.address" => {
             let addr = match value.parse::<Ipv4Addr>() {
@@ -128,11 +166,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     };
                 }
             };
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
             match wan_net {
-                Network::Wan { wan: WanConfig::Static { address, .. }, .. } => *address = addr,
+                Network::Wan {
+                    wan: WanConfig::Static { address, .. },
+                    ..
+                } => *address = addr,
                 _ => {
                     return Response::Err {
                         message: "wan.address only valid when wan.mode = \"static\"".to_string(),
@@ -154,11 +201,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     };
                 }
             };
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
             match wan_net {
-                Network::Wan { wan: WanConfig::Static { prefix, .. }, .. } => *prefix = p,
+                Network::Wan {
+                    wan: WanConfig::Static { prefix, .. },
+                    ..
+                } => *prefix = p,
                 _ => {
                     return Response::Err {
                         message: "wan.prefix only valid when wan.mode = \"static\"".to_string(),
@@ -175,11 +231,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
                     };
                 }
             };
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
             match wan_net {
-                Network::Wan { wan: WanConfig::Static { gateway, .. }, .. } => *gateway = addr,
+                Network::Wan {
+                    wan: WanConfig::Static { gateway, .. },
+                    ..
+                } => *gateway = addr,
                 _ => {
                     return Response::Err {
                         message: "wan.gateway only valid when wan.mode = \"static\"".to_string(),
@@ -188,11 +253,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
             }
         }
         "wan.username" => {
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
             match wan_net {
-                Network::Wan { wan: WanConfig::Pppoe { username, .. }, .. } => *username = value.to_string(),
+                Network::Wan {
+                    wan: WanConfig::Pppoe { username, .. },
+                    ..
+                } => *username = value.to_string(),
                 _ => {
                     return Response::Err {
                         message: "wan.username only valid when wan.mode = \"pppoe\"".to_string(),
@@ -201,11 +275,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
             }
         }
         "wan.password" => {
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
             match wan_net {
-                Network::Wan { wan: WanConfig::Pppoe { password, .. }, .. } => *password = value.to_string(),
+                Network::Wan {
+                    wan: WanConfig::Pppoe { password, .. },
+                    ..
+                } => *password = value.to_string(),
                 _ => {
                     return Response::Err {
                         message: "wan.password only valid when wan.mode = \"pppoe\"".to_string(),
@@ -216,10 +299,20 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
         "wan.dns" => {
             // Comma-separated list of IP addresses, e.g. "1.1.1.1,9.9.9.9".
             // Only valid in static mode (DHCP mode gets DNS from the lease).
-            let Some(wan_net) = new_cfg.networks.iter_mut().find(|n| matches!(n, Network::Wan { .. })) else {
-                return Response::Err { message: "no wan network configured".to_string() };
+            let Some(wan_net) = new_cfg
+                .networks
+                .iter_mut()
+                .find(|n| matches!(n, Network::Wan { .. }))
+            else {
+                return Response::Err {
+                    message: "no wan network configured".to_string(),
+                };
             };
-            let Network::Wan { wan: WanConfig::Static { dns, .. }, .. } = wan_net else {
+            let Network::Wan {
+                wan: WanConfig::Static { dns, .. },
+                ..
+            } = wan_net
+            else {
                 return Response::Err {
                     message: "wan.dns only valid when wan.mode = \"static\"".to_string(),
                 };
@@ -308,7 +401,11 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
 /// With the unified `[[networks]]` format, `lan.*` and `wan.*` keys must
 /// find the right entry in the `[[networks]]` array-of-tables by matching
 /// the `name` field.
-fn apply_set_to_toml(doc: &mut toml_edit::DocumentMut, key: &str, value: &str) -> Result<(), String> {
+fn apply_set_to_toml(
+    doc: &mut toml_edit::DocumentMut,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
     use toml_edit::{Item, value as tv};
 
     match key {

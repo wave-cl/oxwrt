@@ -13,19 +13,17 @@ pub(super) fn handle_crud_network(state: &ControlState, action: &CrudAction) -> 
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.networks.iter().find(|n| n.name() == name) {
-                Some(net) => match serde_json::to_string_pretty(net) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.networks.iter().find(|n| n.name() == name) {
+            Some(net) => match serde_json::to_string_pretty(net) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("network not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("network not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: Network = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -115,19 +113,17 @@ pub(super) fn handle_crud_zone(state: &ControlState, action: &CrudAction) -> Res
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.firewall.zones.iter().find(|z| z.name == *name) {
-                Some(zone) => match serde_json::to_string_pretty(zone) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.firewall.zones.iter().find(|z| z.name == *name) {
+            Some(zone) => match serde_json::to_string_pretty(zone) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("zone not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("zone not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: Zone = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -223,19 +219,17 @@ pub(super) fn handle_crud_rule(state: &ControlState, action: &CrudAction) -> Res
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.firewall.rules.iter().find(|r| r.name == *name) {
-                Some(rule) => match serde_json::to_string_pretty(rule) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.firewall.rules.iter().find(|r| r.name == *name) {
+            Some(rule) => match serde_json::to_string_pretty(rule) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("rule not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("rule not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: Rule = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -322,19 +316,17 @@ pub(super) fn handle_crud_wifi(state: &ControlState, action: &CrudAction) -> Res
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.wifi.iter().find(|w| w.ssid == *name) {
-                Some(wifi) => match serde_json::to_string_pretty(wifi) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.wifi.iter().find(|w| w.ssid == *name) {
+            Some(wifi) => match serde_json::to_string_pretty(wifi) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("wifi not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("wifi not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: Wifi = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -421,19 +413,17 @@ pub(super) fn handle_crud_radio(state: &ControlState, action: &CrudAction) -> Re
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.radios.iter().find(|r| r.phy == *name) {
-                Some(radio) => match serde_json::to_string_pretty(radio) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.radios.iter().find(|r| r.phy == *name) {
+            Some(radio) => match serde_json::to_string_pretty(radio) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("radio not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("radio not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: Radio = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -643,10 +633,7 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
     }
 }
 
-pub(super) fn handle_crud_port_forward(
-    state: &ControlState,
-    action: &CrudAction,
-) -> Response {
+pub(super) fn handle_crud_port_forward(state: &ControlState, action: &CrudAction) -> Response {
     use crate::config::PortForward;
     use crate::control::validate::check_port_forward;
     let cfg = state.config_snapshot();
@@ -688,11 +675,7 @@ pub(super) fn handle_crud_port_forward(
             let mut new_cfg = (*cfg).clone();
             let item_name = item.name.clone();
             new_cfg.port_forwards.push(item);
-            persist_and_swap(
-                state,
-                new_cfg,
-                &format!("added port-forward {item_name}"),
-            )
+            persist_and_swap(state, new_cfg, &format!("added port-forward {item_name}"))
         }
         CrudAction::Update { name, json } => {
             let idx = match cfg.port_forwards.iter().position(|p| p.name == *name) {
@@ -748,10 +731,7 @@ pub(super) fn handle_crud_port_forward(
     }
 }
 
-pub(super) fn handle_crud_wg_peer(
-    state: &ControlState,
-    action: &CrudAction,
-) -> Response {
+pub(super) fn handle_crud_wg_peer(state: &ControlState, action: &CrudAction) -> Response {
     use crate::config::WireguardPeer;
     let cfg = state.config_snapshot();
     // MVP: one wg iface supported. The index 0 convention keeps the
@@ -772,19 +752,17 @@ pub(super) fn handle_crud_wg_peer(
                 message: format!("serialize: {e}"),
             },
         },
-        CrudAction::Get { name } => {
-            match cfg.wireguard[0].peers.iter().find(|p| p.name == *name) {
-                Some(peer) => match serde_json::to_string_pretty(peer) {
-                    Ok(json) => Response::Value { value: json },
-                    Err(e) => Response::Err {
-                        message: format!("serialize: {e}"),
-                    },
+        CrudAction::Get { name } => match cfg.wireguard[0].peers.iter().find(|p| p.name == *name) {
+            Some(peer) => match serde_json::to_string_pretty(peer) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
                 },
-                None => Response::Err {
-                    message: format!("wg-peer not found: {name}"),
-                },
-            }
-        }
+            },
+            None => Response::Err {
+                message: format!("wg-peer not found: {name}"),
+            },
+        },
         CrudAction::Add { json } => {
             let item: WireguardPeer = match serde_json::from_str(json) {
                 Ok(v) => v,
@@ -889,10 +867,7 @@ fn validate_wg_peer(p: &crate::config::WireguardPeer) -> Result<(), String> {
     }
     // allowed_ips: comma-separated CIDRs, each parseable.
     if p.allowed_ips.trim().is_empty() {
-        return Err(format!(
-            "wg-peer {}: allowed_ips must not be empty",
-            p.name
-        ));
+        return Err(format!("wg-peer {}: allowed_ips must not be empty", p.name));
     }
     for cidr in p.allowed_ips.split(',').map(str::trim) {
         let Some((addr, prefix)) = cidr.split_once('/') else {
@@ -978,7 +953,9 @@ pub(super) fn handle_wg_enroll(
             };
         }
     };
-    let client_priv = String::from_utf8_lossy(&genkey_out.stdout).trim().to_string();
+    let client_priv = String::from_utf8_lossy(&genkey_out.stdout)
+        .trim()
+        .to_string();
 
     // 2. Derive client pubkey (pipe private key into `wg pubkey`).
     let client_pub = match run_wg_pubkey(&client_priv) {
@@ -1027,10 +1004,8 @@ pub(super) fn handle_wg_enroll(
             #[cfg(target_os = "linux")]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &wg.key_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                let _ =
+                    std::fs::set_permissions(&wg.key_path, std::fs::Permissions::from_mode(0o600));
             }
             k
         }
@@ -1093,11 +1068,12 @@ fn run_wg_pubkey(priv_key: &str) -> Result<String, String> {
         let _ = stdin.write_all(priv_key.as_bytes());
         let _ = stdin.write_all(b"\n");
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("wait: {e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("wait: {e}"))?;
     if !out.status.success() {
-        return Err(format!("wg pubkey: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "wg pubkey: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
