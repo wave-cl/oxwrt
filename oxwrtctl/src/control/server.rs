@@ -1815,27 +1815,34 @@ fn handle_fw_apply(confirm: bool, keep_settings: bool) -> Response {
     tracing::warn!(
         size = meta.len(),
         keep_settings,
-        "fw_apply: applying firmware and rebooting"
+        "fw_apply: applying firmware via native sysupgrade"
     );
 
-    // sysupgrade flags:
-    //   (no -n) = keep /etc/sysupgrade.conf files (default: keep settings)
-    //   -n      = do NOT keep settings (clean flash)
-    let mut args = Vec::new();
-    if !keep_settings {
-        args.push("-n");
-    }
-    args.push(FW_STAGING_PATH);
+    // Detach the actual flash to a background thread so we can reply
+    // "ok" to the client before tearing down the world. The client
+    // should interpret the upcoming connection drop (reboot) as
+    // success. Without this detach, we'd block the RPC handler
+    // through pivot_root + reboot and the reply would never flush.
+    //
+    // We deliberately do NOT use tokio::spawn — the sysupgrade code
+    // path calls pivot_root which would upset every tokio task's
+    // open fds. A plain OS thread is cleaner.
+    let path = std::path::PathBuf::from(FW_STAGING_PATH);
+    std::thread::Builder::new()
+        .name("sysupgrade".to_string())
+        .spawn(move || {
+            // Small delay so the RPC response has time to flush over
+            // sQUIC before we start tearing down tokio.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Err(e) = crate::sysupgrade::apply(&path, keep_settings) {
+                // This path only reachable if flash fails BEFORE reboot;
+                // on success, apply() loops forever waiting for reboot.
+                tracing::error!(error = %e, "sysupgrade: native flash failed");
+            }
+        })
+        .expect("spawn sysupgrade thread");
 
-    match std::process::Command::new("sysupgrade")
-        .args(&args)
-        .spawn()
-    {
-        Ok(_) => Response::Ok,
-        Err(e) => Response::Err {
-            message: format!("fw_apply: sysupgrade spawn: {e}"),
-        },
-    }
+    Response::Ok
 }
 
 fn handle_get(state: &ControlState, key: &str) -> Response {

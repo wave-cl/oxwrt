@@ -10,6 +10,8 @@ mod init;
 #[cfg(target_os = "linux")]
 mod net;
 #[cfg(target_os = "linux")]
+mod sysupgrade;
+#[cfg(target_os = "linux")]
 mod wan_dhcp;
 
 use std::process::ExitCode;
