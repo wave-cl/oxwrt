@@ -196,6 +196,49 @@ pub fn spawn_renewal_loop(
     initial_lease: DhcpLease,
     shared_lease: crate::control::SharedLease,
 ) -> tokio::task::JoinHandle<()> {
+    // Shared wake signal from the link-watch task → renewal loop. Fires
+    // on link-down→up edges so the renewal doesn't sit asleep for half
+    // a lease interval (typically 12h) after WAN reconnects.
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+
+    // Link-state watcher. Polls /sys/class/net/<iface>/carrier every 3s
+    // (cheaper + simpler than subscribing to RTMGRP_LINK multicast, and
+    // fast enough for WAN reconnect UX). Transitions:
+    //   up → down: clear the shared lease slot so `diag dhcp` no longer
+    //              advertises a stale address; DO NOT deconfigure the
+    //              iface (we'll re-DISCOVER on re-up and may get the
+    //              same address back).
+    //   down → up: notify the renewal loop; it drops out of sleep and
+    //              re-acquires immediately with backoff.
+    {
+        let iface = iface.clone();
+        let shared_lease = shared_lease.clone();
+        let wake = wake.clone();
+        tokio::spawn(async move {
+            let mut prev_up = true; // we were just handed a lease, assume up
+            loop {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let now_up = carrier_up(&iface);
+                if prev_up && !now_up {
+                    tracing::warn!(
+                        iface = %iface,
+                        "wan dhcp: carrier lost; clearing lease state"
+                    );
+                    if let Ok(mut slot) = shared_lease.write() {
+                        *slot = None;
+                    }
+                } else if !prev_up && now_up {
+                    tracing::info!(
+                        iface = %iface,
+                        "wan dhcp: carrier returned; waking renewal loop"
+                    );
+                    wake.notify_one();
+                }
+                prev_up = now_up;
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let mut current = initial_lease;
         loop {
@@ -209,7 +252,17 @@ pub fn spawn_renewal_loop(
                 lease_s = current.lease_seconds,
                 "wan dhcp: next renewal scheduled"
             );
-            tokio::time::sleep(Duration::from_secs(t1 as u64)).await;
+            // Wake early if the link-watcher says carrier just came
+            // back. Otherwise sleep the full T1.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(t1 as u64)) => {}
+                _ = wake.notified() => {
+                    tracing::info!(
+                        iface = %iface,
+                        "wan dhcp: early renewal triggered by carrier event"
+                    );
+                }
+            }
 
             tracing::info!(iface = %iface, "wan dhcp: renewing lease");
             let mut backoff = Duration::from_secs(10);
@@ -253,6 +306,19 @@ pub fn spawn_renewal_loop(
             }
         }
     })
+}
+
+/// Read /sys/class/net/<iface>/carrier. Returns true iff the file
+/// exists AND its contents start with "1". Any other case (file
+/// missing, IO error, "0", unreadable) → false. Matches the kernel's
+/// IFF_LOWER_UP bit in userspace-friendly form without a netlink
+/// round-trip.
+fn carrier_up(iface: &str) -> bool {
+    let path = format!("/sys/class/net/{iface}/carrier");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s.trim() == "1",
+        Err(_) => false,
+    }
 }
 
 // -------------- implementation details --------------
