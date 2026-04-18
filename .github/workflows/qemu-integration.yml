@@ -86,8 +86,12 @@ jobs:
       - name: install qemu
         run: |
           sudo apt-get update
+          # ipxe-qemu provides efi-virtio.rom — virtio-net-pci fails
+          # to init without it. qemu-system-arm itself doesn't pull it
+          # as a hard dep on Ubuntu (only Recommends), and we use
+          # --no-install-recommends for speed.
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-arm qemu-efi-aarch64
+            qemu-system-arm qemu-efi-aarch64 ipxe-qemu
 
       # ── Cache: OpenWrt armsr/armv8 image download ───────────────
       # The script caches into /tmp/armvirt-qemu/ — we pre-seed the
