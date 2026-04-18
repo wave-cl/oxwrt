@@ -1702,13 +1702,32 @@ fn early_mounts() -> Result<(), Error> {
 
     let no_data: Option<&CStr> = None;
     for (source, target, fstype, flags) in mounts {
+        // mkdir the target. Two tolerant cases:
+        //   AlreadyExists: fine.
+        //   EROFS (no such dir on the ro squashfs): log + try mount
+        //       anyway. On real hardware the kernel auto-mounts
+        //       devtmpfs on /dev (CONFIG_DEVTMPFS_MOUNT=y) before we
+        //       run, so /dev exists even if the squashfs didn't
+        //       provide it. /proc similarly gets mounted by the
+        //       kernel command line on some configs. When it really
+        //       doesn't exist, the mount call below fails with a
+        //       clearer error than mkdir's EROFS.
         if let Err(e) = std::fs::create_dir_all(target) {
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(Error::Io(e));
+            match e.kind() {
+                std::io::ErrorKind::AlreadyExists => {}
+                _ if e.raw_os_error() == Some(libc::EROFS) => {
+                    tracing::warn!(
+                        target = target,
+                        "early_mounts: mountpoint missing on ro rootfs; relying on pre-existing mount"
+                    );
+                }
+                _ => return Err(Error::Io(e)),
             }
         }
         match mount(*source, *target, *fstype, *flags, no_data) {
-            Ok(()) => {}
+            Ok(()) => {
+                tracing::debug!(target = target, fstype = fstype, "mounted");
+            }
             // EBUSY = target already mounted. ENODEV = fs type can't
             // be mounted on this target (e.g., devtmpfs when /dev is
             // already a different fs). Both mean "someone beat us to
@@ -1716,6 +1735,16 @@ fn early_mounts() -> Result<(), Error> {
             // container that already has /proc etc.).
             Err(rustix::io::Errno::BUSY) | Err(rustix::io::Errno::NODEV) => {
                 tracing::debug!(target = target, "mount skipped (already mounted)");
+            }
+            // ENOENT = target path doesn't exist AND nothing is
+            // mounted there. Can happen for /dev/pts or /sys/fs/cgroup
+            // if their parent tmpfs/sysfs doesn't have them yet.
+            // Log and continue — cgroup v2 setup later will retry.
+            Err(rustix::io::Errno::NOENT) => {
+                tracing::warn!(
+                    target = target,
+                    "early_mounts: mount target does not exist; skipping"
+                );
             }
             Err(source) => {
                 return Err(Error::Mount {
