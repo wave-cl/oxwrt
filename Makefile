@@ -144,31 +144,69 @@ IMAGEBUILDER_PROFILE ?= glinet_gl-mt6000
 IMAGEBUILDER_PACKAGES := \
 	kmod-veth \
 	kmod-nft-nat \
-	nftables
+	nftables \
+	-netifd \
+	-uci \
+	-uclient-fetch \
+	-libustream-mbedtls \
+	-dnsmasq \
+	-firewall4 \
+	-odhcp6c \
+	-odhcpd-ipv6only \
+	-wpad-basic-mbedtls \
+	-ppp \
+	-ppp-mod-pppoe \
+	-logd \
+	-procd-ujail \
+	-e2fsprogs \
+	-f2fsck
 
-# IMAGE PHILOSOPHY: this image adds oxwrtctl + services as SIDE
-# BINARIES alongside the stock OpenWrt stack (procd + netifd +
-# firewall4 + dnsmasq + odhcpd + dropbear). This mirrors the "first
-# successful flash" configuration we used during bring-up — stock
-# services handle LAN bringup / DHCP / DNS / firewall by default, and
-# oxwrtctl runs in --control-only or --services-only via /etc/oxwrt/
-# mode until the operator explicitly flips it to --init.
+# IMAGE PHILOSOPHY (pid1-standalone): oxwrtctl owns userspace. procd,
+# netifd, firewall4, dnsmasq, odhcpd*, dropbear, ppp — all gone.
+# Our Rust services (hickory-dns, coredhcp, ntpd-rs, debug-ssh) run
+# under our supervisor, nftables rules are installed by net::
+# install_firewall, WAN comes up via wan_dhcp, /sbin/init = oxwrtctl.
 #
-# Earlier we tried removing firewall4 / dnsmasq / odhcpd to make
-# oxwrt the sole owner of those roles, but it turned the fresh image
-# into a brick on boot — likely because some preinit / board.d
-# scripts assume those packages are present, and without them neither
-# the LAN bridge nor SSH ever come up. Rather than chase that
-# failure, we coexist with the stock stack and let the operator
-# uninstall it piece-by-piece from a shell when ready.
+# Earlier we coexisted with the stock stack ("pid1-coexist") to reduce
+# bring-up risk — oxwrtctl ran as /sbin/procd with procd-init handling
+# preinit, /sbin/init still being stock. Stage 4 of the migration
+# replaced /sbin/init with oxwrtctl and implemented mount_root +
+# modules.dep + netdev rename in Rust (see oxwrtctl/src/init.rs).
+# Stage 5 (this list) removes the packages that are now dead weight.
 #
-# kmod-veth: needed for container::spawn's isolated netns
-# (host-side veth pair creation). Without it, rtnetlink: Not
-# supported (os error 95) on every isolated service.
+# Kept:
+#   base-files       — shell stubs, /etc/passwd, busybox applet symlinks
+#   libc, libgcc     — musl runtime
+#   fstools          — /sbin/block for fstab mounts (rarely, but keep)
+#   mkf2fs           — invoked by init::mount_root for first-boot format
+#   ca-bundle        — TLS trust store for hickory-dns-over-tls etc.
+#   urandom-seed, urngd — entropy
+#   uboot-envtools   — u-boot env read/write (handy for recovery)
+#   dropbear         — 97-oxwrt-debug-ssh-rootfs copies /usr/sbin/dropbear
+#                      into the debug-ssh container rootfs at first boot.
+#                      Until we bundle a static dropbear in our staging,
+#                      keep this package. The host /etc/init.d/dropbear
+#                      doesn't get invoked (no procd) but the binary's
+#                      still on /usr/sbin for us to clone from.
+#   kmod-* (crypto, nft-offload, leds-gpio, gpio-button, usb3, mt7915e,
+#                mt7986-firmware, mt7986-wo-firmware) — hw drivers
 #
-# kmod-nft-nat: needed for our `type nat hook postrouting | prerouting`
-# chains (MASQUERADE + DNAT). Ships with firewall4 as a dependency,
-# so usually present — we pin it explicitly for forward-compat.
+# Removed (see -package list above):
+#   netifd, uci           — we use rtnetlink + TOML config
+#   dnsmasq, odhcp6c, odhcpd-ipv6only — DNS/DHCP done by our services
+#   firewall4             — we install nftables directly via rustables
+#   wpad-basic-mbedtls    — wifi not yet wired up; bring back later
+#   ppp, ppp-mod-pppoe    — PPPoE WAN; Flint 2 uses ethernet WAN
+#   uclient-fetch, libustream-mbedtls — http fetch for opkg, we don't
+#   logd, procd-ujail     — procd helpers, dead without procd
+#   e2fsprogs, f2fsck     — ext4 tools and f2fs check we don't invoke
+#
+# procd + procd-init themselves aren't in the default list — they come
+# in as transitive deps of netifd / dropbear / etc. Once all their
+# dependents are gone, apk drops them too.
+#
+# kmod-veth: needed for container::spawn's isolated netns.
+# kmod-nft-nat: needed for MASQUERADE + DNAT chains.
 
 .PHONY: imagebuilder-stage imagebuilder-image \
         imagebuilder-stage-bare imagebuilder-stage-init \
