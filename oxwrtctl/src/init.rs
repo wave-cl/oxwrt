@@ -38,6 +38,14 @@ pub enum Error {
 pub fn run() -> Result<(), Error> {
     early_mounts()?;
 
+    // Stage 1 of the procd-init takeover: kernel module loading.
+    // Walk /etc/modules-boot.d/ then /etc/modules.d/ and finit_module
+    // each entry. In coexist mode (procd-init still runs preinit
+    // upstream), every call returns EEXIST and this is a no-op —
+    // that's intentional, the migration path is "land the code, verify
+    // it's benign in coexist, then remove procd-init ahead of it."
+    load_modules();
+
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
@@ -776,6 +784,190 @@ fn bootstrap_clock_floor() {
             );
         }
     }
+}
+
+/// Load kernel modules from /etc/modules-boot.d/ and /etc/modules.d/.
+///
+/// Equivalent of upstream OpenWrt `ubox/kmodloader.c`, trimmed to
+/// what we actually need: boot-time modules (for things procd-init
+/// would have loaded before our pid-1 entry) and runtime modules
+/// (for drivers needed once the supervisor is up — e.g. `kmod-veth`
+/// for container netns peers, `kmod-nft-nat` for the firewall).
+///
+/// Flow: walk each directory in sorted order, read each file, parse
+/// each non-comment non-empty line as `<module_name> [params...]`.
+/// For each module, recursively glob /lib/modules/<uname>/ for the
+/// `.ko`, call finit_module(2). EEXIST (already loaded) counts as
+/// success and is logged at debug, not warn — this is the normal
+/// case when running in coexist with procd-init, which already
+/// loaded everything during its preinit phase.
+///
+/// Best-effort: a missing .ko file or a genuine finit_module error
+/// is logged at warn level and the loop continues. A missing
+/// kernel module is almost never fatal for oxwrtctl's own needs,
+/// and a panicked init makes diagnosis much harder than a running
+/// init with one missing driver.
+///
+/// Stage 1 of the procd-init takeover; safe under current (coexist)
+/// configuration where procd-init loads modules before us —
+/// every finit_module returns EEXIST.
+fn load_modules() {
+    // Resolve the running kernel release once — matches `uname -r`.
+    let kernel_release = match rustix::system::uname()
+        .release()
+        .to_str()
+    {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            tracing::warn!("load_modules: cannot read kernel release; skipping");
+            return;
+        }
+    };
+    let modules_root = PathBuf::from(format!("/lib/modules/{kernel_release}"));
+    if !modules_root.exists() {
+        tracing::warn!(
+            root = %modules_root.display(),
+            "load_modules: kernel modules root missing; skipping"
+        );
+        return;
+    }
+
+    for dir in ["/etc/modules-boot.d", "/etc/modules.d"] {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(dir, error = %e, "load_modules: read_dir failed");
+                continue;
+            }
+        };
+        let mut files: Vec<_> = rd
+            .filter_map(|r| r.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        for f in files {
+            load_modules_file(&f, &modules_root);
+        }
+    }
+}
+
+/// Parse one file under /etc/modules{,-boot}.d/ and load each module
+/// listed. Format matches stock ubox/kmodloader:
+///   # comment
+///   <module-name> [param1=val1 param2=val2 ...]
+fn load_modules_file(file: &Path, modules_root: &Path) {
+    let content = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(file = %file.display(), error = %e, "load_modules: read failed");
+            return;
+        }
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.splitn(2, char::is_whitespace);
+        let Some(name) = it.next() else { continue };
+        let params = it.next().unwrap_or("").trim();
+        load_one_module(name, params, modules_root);
+    }
+}
+
+/// Locate `<name>.ko`(.xz/.gz/.zst) under `modules_root` and
+/// finit_module it. Idempotent — EEXIST is success.
+fn load_one_module(name: &str, params: &str, modules_root: &Path) {
+    // Normalize module name: kmodloader accepts both "-" and "_" forms.
+    // The .ko filename is almost always the underscore form, but some
+    // packages install with dashes — try both.
+    let candidates = [
+        format!("{name}.ko"),
+        format!("{}.ko", name.replace('-', "_")),
+        format!("{}.ko", name.replace('_', "-")),
+    ];
+    let ko_path = find_ko_under(modules_root, &candidates);
+    let Some(ko_path) = ko_path else {
+        // Missing .ko might mean the module is builtin — check
+        // /sys/module/<name>/ to see if the kernel already has it
+        // statically.
+        let sys_name = name.replace('-', "_");
+        if Path::new(&format!("/sys/module/{sys_name}")).exists() {
+            tracing::debug!(module = name, "module is builtin; skipping");
+            return;
+        }
+        tracing::warn!(
+            module = name,
+            "load_modules: .ko not found under /lib/modules; skipping"
+        );
+        return;
+    };
+
+    let ko_file = match std::fs::File::open(&ko_path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                module = name,
+                path = %ko_path.display(),
+                error = %e,
+                "load_modules: open .ko failed"
+            );
+            return;
+        }
+    };
+
+    // finit_module wants params as a NUL-terminated C string.
+    let params_c = match std::ffi::CString::new(params) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(module = name, error = %e, "load_modules: params contain NUL");
+            return;
+        }
+    };
+
+    use std::os::fd::AsFd;
+    match rustix::system::finit_module(ko_file.as_fd(), params_c.as_c_str(), 0) {
+        Ok(()) => tracing::info!(module = name, "loaded"),
+        Err(rustix::io::Errno::EXIST) => {
+            tracing::debug!(module = name, "already loaded");
+        }
+        Err(e) => {
+            tracing::warn!(module = name, error = %e, "finit_module failed");
+        }
+    }
+}
+
+/// Recursively walk `root` looking for any of `candidates` as a
+/// filename. Returns the first match. O(n) in module tree size but
+/// fine on a firmware-sized /lib/modules (a few hundred .ko files).
+///
+/// Small optimization: cache the tree per-boot? Not worth it for
+/// /etc/modules{,-boot}.d/ which has ~5-10 entries total on our
+/// image. Defer until profiling shows it matters.
+fn find_ko_under(root: &Path, candidates: &[String]) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if candidates.iter().any(|c| c == fname) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Execute once-per-boot scripts under `/etc/uci-defaults/` in
