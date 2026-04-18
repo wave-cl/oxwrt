@@ -957,6 +957,21 @@ fn load_modules_file(file: &Path, modules_root: &Path) {
 /// Locate `<name>.ko`(.xz/.gz/.zst) under `modules_root` and
 /// finit_module it. Idempotent — EEXIST is success.
 fn load_one_module(name: &str, params: &str, modules_root: &Path) {
+    // Quick bail: if /sys/module/<name>/ already exists, the module
+    // is loaded (or built into the kernel). This catches both the
+    // coexist case (procd-init loaded everything upstream) and the
+    // case where an earlier file in the sorted iteration pulled the
+    // module in as a dependency. Either way: no work needed. Skipping
+    // here is faster than calling finit_module and also avoids the
+    // Linux "Unknown symbol" noise when we try to load a module that
+    // depends on something not yet loaded — procd-init uses
+    // modprobe's dep resolution for this; we don't.
+    let sys_name = name.replace('-', "_");
+    if Path::new(&format!("/sys/module/{sys_name}")).exists() {
+        tracing::debug!(module = name, "already present; skipping");
+        return;
+    }
+
     // Normalize module name: kmodloader accepts both "-" and "_" forms.
     // The .ko filename is almost always the underscore form, but some
     // packages install with dashes — try both.
@@ -967,17 +982,14 @@ fn load_one_module(name: &str, params: &str, modules_root: &Path) {
     ];
     let ko_path = find_ko_under(modules_root, &candidates);
     let Some(ko_path) = ko_path else {
-        // Missing .ko might mean the module is builtin — check
-        // /sys/module/<name>/ to see if the kernel already has it
-        // statically.
-        let sys_name = name.replace('-', "_");
-        if Path::new(&format!("/sys/module/{sys_name}")).exists() {
-            tracing::debug!(module = name, "module is builtin; skipping");
-            return;
-        }
-        tracing::warn!(
+        // Missing .ko + absent from /sys/module: either the package
+        // isn't installed in this image or we have a typo. Log at
+        // debug — warning here would be noisy in coexist, where the
+        // module might have been compiled out but procd-init also
+        // skipped it.
+        tracing::debug!(
             module = name,
-            "load_modules: .ko not found under /lib/modules; skipping"
+            "not found under /lib/modules and not in /sys/module; skipping"
         );
         return;
     };
@@ -1011,7 +1023,21 @@ fn load_one_module(name: &str, params: &str, modules_root: &Path) {
             tracing::debug!(module = name, "already loaded");
         }
         Err(e) => {
-            tracing::warn!(module = name, error = %e, "finit_module failed");
+            // ENOENT from finit_module means the module needs a
+            // symbol from an unloaded dependency. In coexist mode
+            // procd-init resolved this via modprobe ordering; we
+            // don't. Treat as debug so the boot log stays clean —
+            // when the hot path (Stage 4) runs this function, we'll
+            // add modules.dep parsing to drive correct ordering.
+            let is_dep_issue = matches!(
+                e,
+                rustix::io::Errno::NOENT | rustix::io::Errno::NOEXEC
+            );
+            if is_dep_issue {
+                tracing::debug!(module = name, error = %e, "finit_module failed (probable dep issue)");
+            } else {
+                tracing::warn!(module = name, error = %e, "finit_module failed");
+            }
         }
     }
 }
