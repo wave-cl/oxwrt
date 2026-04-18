@@ -1,7 +1,10 @@
-mod config;
+// config + rpc moved to the oxwrt-api crate as part of the workspace
+// split. Re-export them as if they were local modules so every
+// existing `crate::config::X` / `crate::rpc::Y` call site keeps
+// resolving — avoids churning thousands of imports in one commit.
+pub use oxwrt_api::{config, rpc};
 mod control;
 mod logd;
-mod rpc;
 
 #[cfg(target_os = "linux")]
 mod container;

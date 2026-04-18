@@ -1128,6 +1128,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "oxwrt-api"
+version = "0.1.1"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "oxwrtctl"
 version = "0.1.1"
 dependencies = [
@@ -1141,6 +1152,7 @@ dependencies = [
  "landlock",
  "libc",
  "netlink-packet-route 0.29.0",
+ "oxwrt-api",
  "quinn",
  "rand",
  "rand_core 0.6.4",

@@ -573,11 +573,11 @@ mod tests {
     /// two to stay in sync — a new field without an example is OK,
     /// but a new REQUIRED field without an example entry fails here).
     ///
-    /// Path is relative to `CARGO_MANIFEST_DIR` (= `oxwrtctl/`) so
-    /// this works regardless of where `cargo test` is invoked from.
+    /// Path is relative to `CARGO_MANIFEST_DIR` (= `crates/oxwrt-api/`)
+    /// so this works regardless of where `cargo test` is invoked from.
     #[test]
     fn example_config_parses() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/oxwrt.toml");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {path}: {e}"));
         let cfg: Config = toml::from_str(&text)
@@ -686,7 +686,7 @@ dnat_target = "10.53.0.2:15353"
         assert_eq!(cfg.firewall.zones.len(), 2);
         let lan = &cfg.firewall.zones[0];
         assert_eq!(lan.name, "lan");
-        assert_eq!(lan.default_input, crate::config::ChainPolicy::Accept);
+        assert_eq!(lan.default_input, super::ChainPolicy::Accept);
         assert!(!lan.masquerade);
         let wan = &cfg.firewall.zones[1];
         assert_eq!(wan.name, "wan");
@@ -695,12 +695,12 @@ dnat_target = "10.53.0.2:15353"
         assert_eq!(cfg.firewall.rules.len(), 3);
         let ct = &cfg.firewall.rules[0];
         assert_eq!(ct.ct_state, vec!["established", "related"]);
-        assert_eq!(ct.action, crate::config::Action::Accept);
+        assert_eq!(ct.action, super::Action::Accept);
         let dhcp = &cfg.firewall.rules[1];
         assert_eq!(dhcp.src.as_deref(), Some("guest"));
-        assert!(matches!(dhcp.dest_port, Some(crate::config::PortSpec::List(ref v)) if v == &[67, 68]));
+        assert!(matches!(dhcp.dest_port, Some(super::PortSpec::List(ref v)) if v == &[67, 68]));
         let dnat = &cfg.firewall.rules[2];
-        assert_eq!(dnat.action, crate::config::Action::Dnat);
+        assert_eq!(dnat.action, super::Action::Dnat);
         assert_eq!(dnat.dnat_target.as_deref(), Some("10.53.0.2:15353"));
     }
 
@@ -727,7 +727,7 @@ dnat_target = "10.53.0.2:15353"
     // added by dropping another assertion here.
 
     fn read_service_config(rel: &str) -> String {
-        let path = format!("{}/../config/services/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = format!("{}/../../config/services/{}", env!("CARGO_MANIFEST_DIR"), rel);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 

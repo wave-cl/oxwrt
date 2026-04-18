@@ -10,6 +10,7 @@ name = "oxwrtctl"
 path = "src/main.rs"
 
 [dependencies]
+oxwrt-api.workspace = true
 squic.workspace = true
 tokio.workspace = true
 serde.workspace = true
