@@ -1216,13 +1216,17 @@ fn mount_root_hot_path() -> Result<(), Error> {
         .map_err(|e| Error::Runtime(format!("mount_root: pivot_root: {e}")))?;
     std::env::set_current_dir("/").map_err(Error::Io)?;
 
-    // 9. Move the rest. sys/dev/tmp/overlay — in that order. /overlay
+    // 9. Move the rest. sys/dev/overlay — in that order. /overlay
     // must move last because we depend on the original /overlay bind
     // until we unmount /rom.
+    //
+    // /tmp is intentionally NOT in this list: early_mounts doesn't
+    // mount a tmpfs on /tmp, so /rom/tmp is just a directory on the
+    // old rootfs — `mount_move` returns EINVAL on non-mountpoints.
+    // Instead, mount a fresh tmpfs on the new /tmp below (step 9b).
     for (src, dst) in [
         ("/rom/sys", "/sys"),
         ("/rom/dev", "/dev"),
-        ("/rom/tmp", "/tmp"),
         ("/rom/overlay", "/overlay"),
     ] {
         if std::path::Path::new(src).exists() {
@@ -1230,6 +1234,19 @@ fn mount_root_hot_path() -> Result<(), Error> {
                 tracing::warn!(src, dst, error = %e, "mount_root: move failed");
             }
         }
+    }
+
+    // 9b. Fresh tmpfs on /tmp. Stock OpenWrt does this via preinit's
+    // `/lib/preinit/10_indicate_preinit`; we own that responsibility
+    // now. Standard size (half of RAM) matches procd's default.
+    if let Err(e) = mount(
+        "tmpfs",
+        "/tmp",
+        "tmpfs",
+        MountFlags::NOSUID | MountFlags::NODEV,
+        Some(std::ffi::CString::new("mode=1777").unwrap().as_c_str()),
+    ) {
+        tracing::warn!(error = %e, "mount_root: tmpfs /tmp failed");
     }
 
     // 10. Restore backup.
