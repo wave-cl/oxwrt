@@ -1112,15 +1112,33 @@ fn mount_root_hot_path() -> Result<(), Error> {
     let f2fs_at = u32::from_le_bytes(probe[0x400..0x404].try_into().unwrap());
     let first_le = u32::from_le_bytes(probe[0..4].try_into().unwrap());
 
+    // Gzip magic `1f 8b 08 00` as LE u32 = 0x00088b1f. Our native
+    // sysupgrade writes the config-backup tgz directly at overlay_off
+    // (no preceding DEADCODE marker, which stock libfstools uses).
+    // Accept that case too.
+    const GZIP_MAGIC_LE: u32 = 0x00088b1f;
+
     let (needs_format, backup_tgz): (bool, Option<Vec<u8>>) = if f2fs_at == F2FS_MAGIC {
         tracing::info!("mount_root: existing f2fs overlay detected");
         (false, None)
     } else if first_le == 0xDEADC0DE || first_le == 0xFFFFFFFF {
-        // Scan forward ≤256 KiB looking for gzip magic 1f 8b 08 00.
+        // Stock sysupgrade convention: DEADCODE or FFFFFFFF marker,
+        // gzip backup ≤256 KiB forward.
         tracing::info!(marker = format!("{first_le:#010x}"), "mount_root: unformatted marker; scanning for config backup");
         let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "mount_root: backup scan failed");
+                None
+            });
+        (true, backup)
+    } else if first_le == GZIP_MAGIC_LE {
+        // Our native sysupgrade's convention: gzip backup starts
+        // directly at overlay_off. Read it and treat overlay as
+        // unformatted.
+        tracing::info!("mount_root: gzip backup at overlay_off; unformatted overlay");
+        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "mount_root: backup read failed");
                 None
             });
         (true, backup)
