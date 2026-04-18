@@ -27,6 +27,12 @@ jobs:
     name: QEMU aarch64 RPC suite
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        # Most steps run from the oxwrt checkout. The sibling
+        # squic-rust checkout lives alongside it so the path-dep
+        # `../squic-rust` in Cargo.toml resolves.
+        working-directory: oxwrt
     env:
       # Bump VM boot budget — TCG emulation of aarch64 on x86_64
       # is ~20-40x slower than HVF on native arm64, so the 120s
@@ -36,6 +42,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: oxwrt
+
+      # squic is a path-dep at `../squic-rust` from the workspace
+      # root (see Cargo.toml [workspace.dependencies]). Check out the
+      # sibling repo so cargo can resolve it. Public repo, no token
+      # needed.
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
 
       # ── Rust toolchain + targets ─────────────────────────────────
       - uses: dtolnay/rust-toolchain@stable
@@ -51,8 +68,8 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-qemu-cargo-${{ hashFiles('**/Cargo.lock') }}
+            oxwrt/target
+          key: ${{ runner.os }}-qemu-cargo-${{ hashFiles('oxwrt/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-qemu-cargo-
 
