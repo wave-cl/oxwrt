@@ -259,16 +259,18 @@ channel = 6
 [[radios]]
 phy = "phy1"
 band = "5g"
-# Channel 36 + 160 MHz covers the UNII-1/2A band (ch 36-64 @ 5180-5320 MHz).
-# Channels 52-64 are DFS in US so hostapd does a 60-second radar-free
-# CAC at startup before beaconing. For zero-CAC VHT80 use
-# vht_oper_chwidth=1 + seg0=42, OR swap to channel 149 (UNII-3, no DFS)
-# for VHT80-only.
+# Channel 36 @ 80 MHz (U-NII-1, channels 36-48). Zero DFS, so
+# hostapd beacons immediately on boot — no 60-second CAC wait.
+# VHT80 / HE80 defaults fall out of wifi.rs's `vht_seg0(36) == 42`
+# lookup, so we don't need to restate chwidth/seg0 here.
+#
+# For VHT160 throughput, either:
+#   (a) accept DFS CAC on channel 36 + vht_oper_chwidth=2 + seg0=50
+#       (often fails on MT76 — driver doesn't always signal
+#       CAC-COMPLETE back to hostapd on MT7986), or
+#   (b) switch to channel=149 + vht_oper_chwidth=2 + seg0=155
+#       (U-NII-3, no DFS) — regulatory-domain-dependent.
 channel = 36
-vht_oper_chwidth = 2
-vht_oper_centr_freq_seg0_idx = 50
-he_oper_chwidth = 2
-he_oper_centr_freq_seg0_idx = 50
 
 # ── Full-featured radio example (commented) ──
 # [[radios]]
