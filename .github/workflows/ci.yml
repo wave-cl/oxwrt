@@ -53,7 +53,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      # `cargo fmt --all` walks into the sibling squic-rust
+       # path-dep and fails on its formatting style (not ours to
+      # police). Enumerate our workspace packages explicitly.
+      - run: |
+          cargo fmt \
+            -p oxwrt-api \
+            -p oxwrt-linux \
+            -p oxwrt-proto \
+            -p oxwrtctl-cli \
+            -p oxwrtd \
+            -- --check
 
   # ── clippy ─────────────────────────────────────────────────────────
   # Runs without `-D warnings` for now because existing code has ~16
