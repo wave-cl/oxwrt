@@ -102,20 +102,29 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
         "sysupgrade: fwtool metadata ok"
     );
 
-    // Step 2: build the preserved-config tarball. If this fails, abort
-    // — flashing without the config we promised to keep is worse than
-    // not flashing at all.
-    let backup_path: Option<PathBuf> = if keep_settings {
-        let p = PathBuf::from("/tmp/sysupgrade.tgz");
-        build_config_backup(&p)?;
-        Some(p)
+    // Step 2: build the preserved-config tarball IN MEMORY. After the
+    // pivot, any path in the old root is reachable only as /mnt/…
+    // and we lazy-unmount /mnt, so a file written there disappears.
+    // Build into a Vec<u8> that survives the pivot by virtue of being
+    // in process memory.
+    let backup_tgz: Option<Vec<u8>> = if keep_settings {
+        Some(build_config_backup_in_memory()?)
     } else {
         None
     };
 
-    // Step 3: resolve partitions ahead of pivot. After the pivot, /sys
-    // and /dev are moved but still present; doing this up-front keeps
-    // the error surface simpler.
+    // Step 3: OPEN the image file before pivot so the inode stays
+    // accessible through the fd even after /tmp becomes unreachable.
+    // Files open across a pivot_root continue to work — only name
+    // lookups break. The image is ~22 MiB so we don't slurp it into
+    // memory; keep it on disk (via the old-root path, now hidden)
+    // and stream through the open fd.
+    let image_file = File::open(image_path)
+        .map_err(io(format!("open {} pre-pivot", image_path.display())))?;
+
+    // Step 4: resolve partitions ahead of pivot. After the pivot,
+    // /sys gets moved into the new root and is still present, but
+    // doing this up-front keeps the error surface simpler.
     let kern_dev = resolve_partition("kernel")?;
     let root_dev = resolve_partition("rootfs")?;
     tracing::info!(
@@ -124,12 +133,12 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
         "sysupgrade: eMMC partitions resolved"
     );
 
-    // Step 4: pivot_root to tmpfs so we're not holding the rootfs
+    // Step 5: pivot_root to tmpfs so we're not holding the rootfs
     // block device open when we write to it.
     pivot_to_ramfs()?;
 
-    // Step 5-7: flash.
-    flash_image(image_path, tar_len, &kern_dev, &root_dev, backup_path.as_deref())?;
+    // Step 6-7: flash.
+    flash_image(image_file, tar_len, &kern_dev, &root_dev, backup_tgz.as_deref())?;
 
     // Step 8: sync + reboot.
     tracing::warn!("sysupgrade: flash complete, rebooting");
@@ -285,61 +294,58 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
 
 // ── config backup ──────────────────────────────────────────────────
 
-/// Build a gzipped tar at `out` containing every file referenced by
-/// /etc/sysupgrade.conf and /lib/upgrade/keep.d/* (same convention as
-/// stock sysupgrade). Paths may be directories (recursed) or files.
+/// Build a gzipped tar of every file referenced by
+/// /etc/sysupgrade.conf and /lib/upgrade/keep.d/*, returned as an
+/// in-memory Vec<u8>.
 ///
-/// Implementation note: we do not do the full shell-driven file-list
-/// resolution that stock does (uci conffiles, packaging hooks, etc.).
-/// For our image the list is short and predictable — /etc/oxwrt/,
-/// /etc/dropbear/, maybe /etc/oxwrt.toml. If operators need to
-/// extend it, /etc/sysupgrade.conf is still the hook.
-fn build_config_backup(out: &Path) -> Result<(), Error> {
+/// In memory (rather than writing to /tmp/sysupgrade.tgz) because
+/// after pivot_root, /tmp is the empty new-root tmpfs — a file
+/// written under /tmp pre-pivot is reachable only as /mnt/tmp/... ,
+/// and we lazy-unmount /mnt. The Vec survives the pivot trivially
+/// since it's process memory.
+///
+/// Implementation note: we don't do the full shell-driven file-list
+/// resolution that stock sysupgrade does (uci conffiles, per-package
+/// keep.d, etc.). Our image has a small, predictable list —
+/// /etc/oxwrt/, /etc/dropbear/, /etc/oxwrt.toml. If operators need
+/// to extend it, /etc/sysupgrade.conf is the hook and we read it.
+fn build_config_backup_in_memory() -> Result<Vec<u8>, Error> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
     let list = read_keep_list()?;
-    if list.is_empty() {
-        // Still emit an empty archive so later stages can rely on it
-        // existing (clean error if file is missing vs. "0-sized is
-        // fine, nothing to restore").
-        let f = File::create(out).map_err(io(format!("create {}", out.display())))?;
-        let gz = GzEncoder::new(f, Compression::default());
+    let mut buf = Vec::<u8>::with_capacity(64 * 1024);
+    {
+        let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tb = tar::Builder::new(gz);
-        tb.finish().map_err(io("tar finish (empty)"))?;
-        return Ok(());
-    }
-
-    let f = File::create(out).map_err(io(format!("create {}", out.display())))?;
-    let gz = GzEncoder::new(f, Compression::default());
-    let mut tb = tar::Builder::new(gz);
-    for p in &list {
-        let p = Path::new(p);
-        if !p.exists() {
-            tracing::debug!(path = %p.display(), "backup: path absent, skip");
-            continue;
+        for p in &list {
+            let p = Path::new(p);
+            if !p.exists() {
+                tracing::debug!(path = %p.display(), "backup: path absent, skip");
+                continue;
+            }
+            if p.is_dir() {
+                // append_dir_all prepends the path as-is — strip leading
+                // '/' so the tar looks like "etc/oxwrt/" not "/etc/oxwrt/"
+                // (stock sysupgrade's restore expects relative paths).
+                let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();
+                tb.append_dir_all(&stripped, p)
+                    .map_err(io(format!("tar dir {}", p.display())))?;
+            } else {
+                let mut f = File::open(p).map_err(io(format!("open {}", p.display())))?;
+                let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();
+                tb.append_file(&stripped, &mut f)
+                    .map_err(io(format!("tar file {}", p.display())))?;
+            }
         }
-        if p.is_dir() {
-            // append_dir_all prepends the path as-is — strip leading
-            // '/' so the tar looks like "etc/oxwrt/" not "/etc/oxwrt/"
-            // (stock sysupgrade's restore expects leading-slash-relative).
-            let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();
-            tb.append_dir_all(&stripped, p)
-                .map_err(io(format!("tar dir {}", p.display())))?;
-        } else {
-            let mut f = File::open(p).map_err(io(format!("open {}", p.display())))?;
-            let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();
-            tb.append_file(&stripped, &mut f)
-                .map_err(io(format!("tar file {}", p.display())))?;
-        }
+        tb.finish().map_err(io("tar finish"))?;
     }
-    tb.finish().map_err(io("tar finish"))?;
     tracing::info!(
-        out = %out.display(),
         entries = list.len(),
-        "sysupgrade: config backup written"
+        bytes = buf.len(),
+        "sysupgrade: config backup built in memory"
     );
-    Ok(())
+    Ok(buf)
 }
 
 /// Read /etc/sysupgrade.conf + every /lib/upgrade/keep.d/* into a
@@ -508,11 +514,11 @@ fn pivot_to_ramfs() -> Result<(), Error> {
 /// valid kernel or a zeroed kernel — never a valid-looking kernel
 /// pointing at a half-flashed rootfs).
 fn flash_image(
-    image_path: &Path,
+    image_file: File,
     tar_len: u64,
     kern_dev: &Path,
     root_dev: &Path,
-    backup: Option<&Path>,
+    backup_tgz: Option<&[u8]>,
 ) -> Result<(), Error> {
     use flate2::read::GzDecoder;
 
@@ -530,11 +536,10 @@ fn flash_image(
     }
     tracing::info!(dev = %kern_dev.display(), "sysupgrade: kernel head zeroed");
 
-    // Open the image file and size-limit the gzip/tar to the
-    // pre-trailer length — otherwise tar will see the fwtool FWx0
-    // footer as garbage past EOF.
-    let img = File::open(image_path).map_err(io(format!("open {}", image_path.display())))?;
-    let limited = img.take(tar_len);
+    // Size-limit the gzip/tar to the pre-trailer length — otherwise
+    // tar will see the fwtool FWx0 footer as garbage past EOF. The
+    // File was opened pre-pivot and still points at the same inode.
+    let limited = image_file.take(tar_len);
     let gz = GzDecoder::new(limited);
     let mut ar = tar::Archive::new(gz);
 
@@ -625,13 +630,12 @@ fn flash_image(
     f.seek(SeekFrom::Start(overlay_off))
         .map_err(io("seek overlay marker"))?;
 
-    match backup {
-        Some(p) => {
-            tracing::info!(off = overlay_off, src = %p.display(), "sysupgrade: writing config backup past rootfs");
-            let mut b = File::open(p).map_err(io(format!("open backup {}", p.display())))?;
-            let n = std::io::copy(&mut b, &mut f).map_err(io("write backup"))?;
+    match backup_tgz {
+        Some(bytes) => {
+            tracing::info!(off = overlay_off, size = bytes.len(), "sysupgrade: writing config backup past rootfs");
+            f.write_all(bytes).map_err(io("write backup"))?;
             f.sync_all().map_err(io("fsync backup"))?;
-            tracing::info!(bytes = n, "sysupgrade: backup written");
+            tracing::info!(bytes = bytes.len(), "sysupgrade: backup written");
         }
         None => {
             // Clean flash: zero 4 KiB at the overlay start so
