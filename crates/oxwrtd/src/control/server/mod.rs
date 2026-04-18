@@ -215,8 +215,8 @@ pub use reload::handle_reload_async;
 // dispatch. The originals were all `fn` at the top level; these
 // imports bring the names back into scope so call sites don't change.
 use crud::{
-    handle_crud_network, handle_crud_radio, handle_crud_rule, handle_crud_service,
-    handle_crud_wifi, handle_crud_zone,
+    handle_crud_network, handle_crud_port_forward, handle_crud_radio, handle_crud_rule,
+    handle_crud_service, handle_crud_wifi, handle_crud_zone,
 };
 use diag::handle_diag;
 use logs::{handle_logs, stream_follow_logs};
@@ -505,6 +505,7 @@ fn handle_collection(state: &ControlState, collection: &str, action: &CrudAction
         "wifi" => handle_crud_wifi(state, action),
         "radio" => handle_crud_radio(state, action),
         "service" => handle_crud_service(state, action),
+        "port-forward" => handle_crud_port_forward(state, action),
         _ => Response::Err {
             message: format!("unknown collection: {collection}"),
         },

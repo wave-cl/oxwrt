@@ -558,10 +558,65 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
     }
 
+    // Port forwards: companion FORWARD accept for every port-forward
+    // entry. Without this the default-drop FORWARD policy silently
+    // swallows the post-DNAT packet and the operator sees "the DNAT
+    // rule is right there in `diag nft`, why doesn't the service
+    // respond?". Each port-forward installed here is guaranteed to
+    // have its FORWARD half wired — the whole point of the dedicated
+    // [[port_forwards]] section vs loose firewall.rules DNAT.
+    for pf in &cfg.port_forwards {
+        let Some((target_ip, target_port)) = parse_dnat_target(&pf.internal) else {
+            tracing::warn!(pf = %pf.name, internal = %pf.internal, "invalid port-forward internal target; skipping FORWARD");
+            continue;
+        };
+        // Src zone ifaces — typically one (wan). `pf.src` always
+        // populated (serde default `"wan"`).
+        let src_ifaces = zone_ifaces(cfg, &pf.src);
+        if src_ifaces.is_empty() {
+            tracing::warn!(pf = %pf.name, src = %pf.src, "port-forward src zone has no ifaces; skipping FORWARD");
+            continue;
+        }
+        // Dest zone: explicit if given, else auto-detect from the
+        // internal IP's subnet membership. The CRUD validator
+        // rejects a port-forward whose IP sits in no LAN/Simple
+        // subnet when `dest` is None, so an unresolvable case
+        // here means the config was pushed through ConfigPush
+        // bypassing CRUD — degrade by logging, not by failing
+        // the whole install.
+        let dest_zone_name = pf
+            .dest
+            .clone()
+            .or_else(|| find_dest_zone_for_ip(cfg, target_ip));
+        let Some(dest_zone_name) = dest_zone_name else {
+            tracing::warn!(pf = %pf.name, ip = %target_ip, "cannot resolve dest zone for port-forward; skipping FORWARD");
+            continue;
+        };
+        let dest_ifaces = zone_ifaces(cfg, &dest_zone_name);
+        let protos = proto_to_nf_list(Some(pf.proto));
+
+        for &proto in &protos {
+            for src_if in &src_ifaces {
+                for dst_if in &dest_ifaces {
+                    let mut r = Rule::new(&forward)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .iiface(src_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .oiface(dst_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .daddr(IpAddr::V4(target_ip));
+                    r = r.dport(target_port, proto);
+                    r.accept().add_to_batch(&mut batch);
+                }
+            }
+        }
+    }
+
     batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
     tracing::info!(
         zones = cfg.firewall.zones.len(),
         rules = cfg.firewall.rules.len(),
+        port_forwards = cfg.port_forwards.len(),
         "nftables inet filter installed"
     );
 
@@ -613,7 +668,9 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .filter(|r| r.action == Action::Dnat && r.dnat_target.is_some())
         .collect();
 
-    if !dnat_rules.is_empty() {
+    // Build the DNAT table if EITHER legacy DNAT rules or port-forwards
+    // need it. Two sources, one table.
+    if !dnat_rules.is_empty() || !cfg.port_forwards.is_empty() {
         let dnat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-dnat");
         let mut dnat_batch = Batch::new();
         dnat_batch.add(&dnat_table, MsgType::Add);
@@ -681,11 +738,55 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             tracing::info!(rule = %rule.name, target = %target_str, "DNAT rule emitted");
         }
 
+        // Port forwards: WAN-facing DNAT keyed on src-zone iifname
+        // (not on a router IP). Accepts traffic arriving on the
+        // source zone's iface on `external_port` and rewrites dest
+        // to `internal`. Typical: WAN eth1 → LAN 192.168.50.50:80.
+        for pf in &cfg.port_forwards {
+            let Some((target_ip, target_port)) = parse_dnat_target(&pf.internal) else {
+                tracing::warn!(pf = %pf.name, internal = %pf.internal, "invalid port-forward target; skipping");
+                continue;
+            };
+            let src_ifaces = zone_ifaces(cfg, &pf.src);
+            if src_ifaces.is_empty() {
+                tracing::warn!(pf = %pf.name, src = %pf.src, "port-forward src zone has no ifaces; skipping DNAT");
+                continue;
+            }
+            let protos = proto_to_nf_list(Some(pf.proto));
+
+            for &proto in &protos {
+                for src_if in &src_ifaces {
+                    let ip_bytes = target_ip.octets().to_vec();
+                    let port_bytes = target_port.to_be_bytes().to_vec();
+                    let nat_expr = Nat::default()
+                        .with_nat_type(NatType::DNat)
+                        .with_family(ProtocolFamily::Ipv4)
+                        .with_ip_register(Register::Reg1)
+                        .with_port_register(Register::Reg2);
+
+                    let mut r = Rule::new(&prerouting)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .iiface(src_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?;
+                    r = r.dport(pf.external_port, proto);
+                    r.with_expr(Immediate::new_data(ip_bytes, Register::Reg1))
+                        .with_expr(Immediate::new_data(port_bytes, Register::Reg2))
+                        .with_expr(nat_expr)
+                        .add_to_batch(&mut dnat_batch);
+                }
+            }
+            tracing::info!(pf = %pf.name, external = pf.external_port, target = %pf.internal, "port-forward DNAT emitted");
+        }
+
         dnat_batch.send().map_err(|e| {
             tracing::error!(error = %e, "nftables DNAT batch send failed");
             Error::Firewall(e.to_string())
         })?;
-        tracing::info!(count = dnat_rules.len(), "nftables DNAT installed");
+        tracing::info!(
+            rule_dnat = dnat_rules.len(),
+            port_forwards = cfg.port_forwards.len(),
+            "nftables DNAT installed"
+        );
     }
 
     Ok(())
@@ -851,6 +952,49 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     }
 
     out
+}
+
+/// Find the firewall zone whose network-list contains a LAN/Simple
+/// subnet that includes `ip`. Used for port-forward dest auto-detect
+/// when the operator hasn't pinned `dest` explicitly.
+fn find_dest_zone_for_ip(cfg: &Config, ip: Ipv4Addr) -> Option<String> {
+    for net in &cfg.networks {
+        let (net_name, subnet_ip, prefix) = match net {
+            Network::Lan {
+                name,
+                address,
+                prefix,
+                ..
+            }
+            | Network::Simple {
+                name,
+                address,
+                prefix,
+                ..
+            } => (name.as_str(), *address, *prefix),
+            Network::Wan { .. } => continue,
+        };
+        if !ipv4_in_subnet(ip, subnet_ip, prefix) {
+            continue;
+        }
+        for z in &cfg.firewall.zones {
+            if z.networks.iter().any(|n| n == net_name) {
+                return Some(z.name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn ipv4_in_subnet(ip: Ipv4Addr, subnet: Ipv4Addr, prefix: u8) -> bool {
+    if prefix > 32 {
+        return false;
+    }
+    if prefix == 0 {
+        return true;
+    }
+    let mask: u32 = u32::MAX.checked_shl(32 - prefix as u32).unwrap_or(0);
+    (u32::from(ip) & mask) == (u32::from(subnet) & mask)
 }
 
 /// Resolve a zone name to the set of interface names it covers.
@@ -1092,5 +1236,41 @@ mod tests {
             ..svc
         };
         assert_eq!(veth_host_name(&svc2), "veth-debug-ssh");
+    }
+
+    // ── ipv4_in_subnet / find_dest_zone_for_ip ─────────────────────
+
+    #[test]
+    fn ipv4_in_subnet_basic() {
+        let net = Ipv4Addr::new(192, 168, 1, 0);
+        assert!(ipv4_in_subnet(Ipv4Addr::new(192, 168, 1, 50), net, 24));
+        assert!(ipv4_in_subnet(Ipv4Addr::new(192, 168, 1, 255), net, 24));
+        assert!(!ipv4_in_subnet(Ipv4Addr::new(192, 168, 2, 1), net, 24));
+        // /32 matches only itself.
+        assert!(ipv4_in_subnet(net, net, 32));
+        assert!(!ipv4_in_subnet(Ipv4Addr::new(192, 168, 1, 1), net, 32));
+        // /0 matches everything.
+        assert!(ipv4_in_subnet(Ipv4Addr::new(8, 8, 8, 8), net, 0));
+    }
+
+    #[test]
+    fn find_dest_zone_for_ip_finds_lan() {
+        let cfg = minimal_config();
+        // minimal_config's "trusted" zone covers both lan + guest.
+        // 192.168.1.42 → in lan subnet → trusted zone.
+        assert_eq!(
+            find_dest_zone_for_ip(&cfg, Ipv4Addr::new(192, 168, 1, 42)),
+            Some("trusted".to_string())
+        );
+        // 10.99.0.50 → in guest subnet → trusted zone.
+        assert_eq!(
+            find_dest_zone_for_ip(&cfg, Ipv4Addr::new(10, 99, 0, 50)),
+            Some("trusted".to_string())
+        );
+        // Outside any subnet.
+        assert_eq!(
+            find_dest_zone_for_ip(&cfg, Ipv4Addr::new(8, 8, 8, 8)),
+            None
+        );
     }
 }

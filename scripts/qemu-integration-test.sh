@@ -300,6 +300,29 @@ echo "-- radio CRUD --"
 R=$(run_cmd radio add '{"phy":"phy0","band":"2g","channel":6}'); check_ok "radio add" "$R"
 R=$(run_cmd radio list); check "radio list (has phy0)" "phy0" "$R"
 
+echo "-- port-forward CRUD --"
+# Expand minimal test config to include a LAN for auto-detect, via an
+# add-network call. Then exercise port-forward add/list/get/remove.
+R=$(run_cmd network add '{"name":"lan","type":"lan","bridge":"br-test","members":[],"address":"192.168.77.1","prefix":24}')
+check_ok "network add lan (for port-forward test)" "$R"
+# Need the zone too so validator passes.
+R=$(run_cmd zone add '{"name":"lan","networks":["lan"],"default_input":"accept","default_forward":"drop"}')
+check_ok "zone add lan" "$R"
+R=$(run_cmd port-forward list); check "port-forward list (empty)" "[]" "$R"
+R=$(run_cmd port-forward add '{"name":"mc","proto":"tcp","external_port":25565,"internal":"192.168.77.50:25565"}')
+check_ok "port-forward add (auto-detect dest)" "$R"
+R=$(run_cmd port-forward get mc); check "port-forward get" "25565" "$R"
+R=$(run_cmd port-forward list); check "port-forward list (has mc)" "mc" "$R"
+# Invalid internal: should reject.
+R=$(run_cmd port-forward add '{"name":"bad","proto":"tcp","external_port":80,"internal":"not.an.ip:8080"}')
+check_err "port-forward add invalid internal" "invalid internal IP" "$R"
+# IP outside any subnet: should reject (dest auto-detect).
+R=$(run_cmd port-forward add '{"name":"elsewhere","proto":"tcp","external_port":81,"internal":"8.8.8.8:80"}')
+check_err "port-forward add unreachable IP" "not in any LAN" "$R"
+R=$(run_cmd port-forward remove mc); check_ok "port-forward remove" "$R"
+R=$(run_cmd zone remove lan); check_ok "zone remove lan" "$R"
+R=$(run_cmd network remove lan); check_ok "network remove lan" "$R"
+
 echo "-- wifi CRUD --"
 R=$(run_cmd wifi list); check "wifi list (empty)" "[]" "$R"
 R=$(run_cmd wifi add '{"radio":"phy0","ssid":"TestNet","security":"wpa3-sae","passphrase":"testpass","network":"wan"}')

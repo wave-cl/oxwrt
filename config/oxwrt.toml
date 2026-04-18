@@ -212,6 +212,32 @@ src = "lan"
 proto = "icmp"
 action = "accept"
 
+# ---------------- Port Forwards ----------------
+#
+# External WAN port → internal LAN host:port. Each entry expands at
+# install-time into a prerouting DNAT rule + a companion FORWARD
+# accept, so a port-forward can't be half-configured (the failure mode
+# that made loose `[[firewall.rules]]` action="dnat" rules a footgun).
+#
+# ── Required ──
+#   name           unique identifier
+#   proto          "tcp" | "udp" | "both"
+#   external_port  u16, port on the source zone's iface
+#   internal       "ip:port", destination host and port
+#
+# ── Optional ──
+#   src            source zone, default "wan"
+#   dest           dest zone, default auto-detected by matching the
+#                  internal IP against LAN/Simple network subnets
+#
+# Example (commented — uncomment + edit to enable):
+#
+# [[port_forwards]]
+# name = "minecraft"
+# proto = "tcp"
+# external_port = 25565
+# internal = "192.168.50.50:25565"
+
 # ---------------- Radios ----------------
 #
 # Per-phy radio configuration. Each [[radios]] entry is one physical

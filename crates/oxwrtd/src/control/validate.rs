@@ -57,6 +57,82 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+pub fn check_port_forward(
+    pf: &crate::config::PortForward,
+    cfg: &Config,
+) -> Result<(), String> {
+    // Source zone must exist. We don't default to "wan" silently
+    // here — the config field defaulted when parsed; by the time
+    // validation runs `src` is populated.
+    if !cfg.firewall.zones.iter().any(|z| z.name == pf.src) {
+        return Err(format!(
+            "port-forward {} references unknown src zone: {}",
+            pf.name, pf.src
+        ));
+    }
+    // Dest zone, if explicit, must exist.
+    if let Some(dest) = &pf.dest {
+        if !cfg.firewall.zones.iter().any(|z| z.name == *dest) {
+            return Err(format!(
+                "port-forward {} references unknown dest zone: {dest}",
+                pf.name
+            ));
+        }
+    }
+    // Internal target must parse as IP:port.
+    let (ip_part, port_part) = pf.internal.split_once(':').ok_or_else(|| {
+        format!(
+            "port-forward {}: internal must be 'ip:port' (got {:?})",
+            pf.name, pf.internal
+        )
+    })?;
+    let ip: std::net::Ipv4Addr = ip_part.parse().map_err(|_| {
+        format!(
+            "port-forward {}: invalid internal IP {:?}",
+            pf.name, ip_part
+        )
+    })?;
+    let _port: u16 = port_part.parse().map_err(|_| {
+        format!(
+            "port-forward {}: invalid internal port {:?}",
+            pf.name, port_part
+        )
+    })?;
+    // If dest zone is auto-detected (not provided), a LAN/Simple
+    // network must contain the internal IP — otherwise install
+    // can't emit the companion FORWARD rule.
+    if pf.dest.is_none() {
+        let hit = cfg.networks.iter().any(|n| {
+            use crate::config::Network;
+            match n {
+                Network::Lan { address, prefix, .. }
+                | Network::Simple { address, prefix, .. } => {
+                    ipv4_in_subnet(ip, *address, *prefix)
+                }
+                Network::Wan { .. } => false,
+            }
+        });
+        if !hit {
+            return Err(format!(
+                "port-forward {}: internal IP {ip} is not in any LAN/Simple subnet; set `dest` explicitly",
+                pf.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ipv4_in_subnet(ip: std::net::Ipv4Addr, subnet: std::net::Ipv4Addr, prefix: u8) -> bool {
+    if prefix > 32 {
+        return false;
+    }
+    if prefix == 0 {
+        return true;
+    }
+    let mask: u32 = u32::MAX.checked_shl(32 - prefix as u32).unwrap_or(0);
+    (u32::from(ip) & mask) == (u32::from(subnet) & mask)
+}
+
 pub fn check_wifi_refs(wifi: &Wifi, cfg: &Config) -> Result<(), String> {
     if !cfg.radios.iter().any(|r| r.phy == wifi.radio) {
         return Err(format!(

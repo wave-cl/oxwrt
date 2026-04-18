@@ -642,3 +642,108 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
         }
     }
 }
+
+pub(super) fn handle_crud_port_forward(
+    state: &ControlState,
+    action: &CrudAction,
+) -> Response {
+    use crate::config::PortForward;
+    use crate::control::validate::check_port_forward;
+    let cfg = state.config_snapshot();
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.port_forwards) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => match cfg.port_forwards.iter().find(|p| p.name == *name) {
+            Some(pf) => match serde_json::to_string_pretty(pf) {
+                Ok(json) => Response::Value { value: json },
+                Err(e) => Response::Err {
+                    message: format!("serialize: {e}"),
+                },
+            },
+            None => Response::Err {
+                message: format!("port-forward not found: {name}"),
+            },
+        },
+        CrudAction::Add { json } => {
+            let item: PortForward = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.port_forwards.iter().any(|p| p.name == item.name) {
+                return Response::Err {
+                    message: format!("port-forward already exists: {}", item.name),
+                };
+            }
+            if let Err(e) = check_port_forward(&item, &cfg) {
+                return Response::Err { message: e };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_name = item.name.clone();
+            new_cfg.port_forwards.push(item);
+            persist_and_swap(
+                state,
+                new_cfg,
+                &format!("added port-forward {item_name}"),
+            )
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.port_forwards.iter().position(|p| p.name == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("port-forward not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.port_forwards[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: PortForward = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            if let Err(e) = check_port_forward(&updated, &cfg) {
+                return Response::Err { message: e };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.port_forwards[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated port-forward {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.port_forwards.iter().any(|p| p.name == *name) {
+                return Response::Err {
+                    message: format!("port-forward not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.port_forwards.retain(|p| p.name != *name);
+            persist_and_swap(state, new_cfg, &format!("removed port-forward {name}"))
+        }
+    }
+}

@@ -40,6 +40,13 @@ pub struct Config {
     pub wifi: Vec<Wifi>,
     #[serde(default)]
     pub services: Vec<Service>,
+    /// Port forwards (WAN-side external port → LAN-side host:port).
+    /// Stored as a first-class collection rather than loose DNAT rules
+    /// under `firewall.rules` so operators never forget the companion
+    /// FORWARD accept: install emits both from a single entry. Empty
+    /// by default (no ports exposed).
+    #[serde(default, rename = "port_forwards")]
+    pub port_forwards: Vec<PortForward>,
     pub control: Control,
 }
 
@@ -157,6 +164,36 @@ pub struct Rule {
     pub action: Action,
     #[serde(default)]
     pub dnat_target: Option<String>,
+}
+
+/// A single WAN-side port forward. Expanded at install time into
+/// (a) a prerouting DNAT rule keyed on the source zone's iface and
+/// the external port, plus (b) a FORWARD accept that lets the
+/// post-DNAT packet cross into the dest network. Owning both halves
+/// in one entry means a port-forward can't be half-configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForward {
+    pub name: String,
+    pub proto: Proto,
+    /// External port on the source zone (usually WAN).
+    pub external_port: u16,
+    /// Internal destination as "ip:port" — same shape as
+    /// `Rule::dnat_target`. The internal port may differ from the
+    /// external port (e.g. expose :80 → internal :8080).
+    pub internal: String,
+    /// Source zone the forward is exposed on. Defaults to "wan".
+    #[serde(default = "default_wan_src")]
+    pub src: String,
+    /// Destination zone (the zone containing the internal IP). If
+    /// omitted, the installer auto-detects by matching the internal
+    /// IP against LAN/Simple network subnets. Explicit wins when
+    /// a host sits on multiple overlapping subnets.
+    #[serde(default)]
+    pub dest: Option<String>,
+}
+
+fn default_wan_src() -> String {
+    "wan".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -702,6 +739,62 @@ dnat_target = "10.53.0.2:15353"
         let dnat = &cfg.firewall.rules[2];
         assert_eq!(dnat.action, super::Action::Dnat);
         assert_eq!(dnat.dnat_target.as_deref(), Some("10.53.0.2:15353"));
+    }
+
+    /// Port-forward section parses, applies serde defaults (`src = "wan"`
+    /// when absent, `dest = None`), and preserves explicit overrides.
+    #[test]
+    fn port_forward_section_roundtrip() {
+        let toml_text = r#"
+hostname = "r"
+
+[[networks]]
+name = "wan"
+type = "wan"
+iface = "eth0"
+mode = "dhcp"
+
+[[networks]]
+name = "lan"
+type = "lan"
+bridge = "br-lan"
+members = []
+address = "192.168.50.1"
+prefix = 24
+
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/x"
+
+# Minimal: defaults kick in (src=wan, dest=auto-detect).
+[[port_forwards]]
+name = "minecraft"
+proto = "tcp"
+external_port = 25565
+internal = "192.168.50.50:25565"
+
+# Explicit overrides.
+[[port_forwards]]
+name = "ssh-to-dmz"
+proto = "tcp"
+external_port = 2222
+internal = "10.50.0.5:22"
+src = "wan"
+dest = "dmz"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.port_forwards.len(), 2);
+
+        let mc = &cfg.port_forwards[0];
+        assert_eq!(mc.name, "minecraft");
+        assert_eq!(mc.proto, Proto::Tcp);
+        assert_eq!(mc.external_port, 25565);
+        assert_eq!(mc.internal, "192.168.50.50:25565");
+        assert_eq!(mc.src, "wan", "serde default applied");
+        assert!(mc.dest.is_none(), "no dest → auto-detect at install");
+
+        let ssh = &cfg.port_forwards[1];
+        assert_eq!(ssh.dest.as_deref(), Some("dmz"));
     }
 
     // ── shipped-service-config regression tests ─────────────────────
