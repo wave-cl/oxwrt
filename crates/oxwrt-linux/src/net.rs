@@ -377,6 +377,27 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         r.accept().add_to_batch(&mut batch);
     }
 
+    // Auto-open WireGuard listen ports on the WAN iface. A declared
+    // `[[wireguard]]` entry is pointless if the matching UDP port
+    // can't reach the server — previously the operator had to add
+    // an explicit `[[firewall.rules]]` UDP accept, and forgetting
+    // was the canonical "I enrolled a peer, why doesn't it connect"
+    // support ticket. Emitted only when there's a WAN iface (no
+    // accept needed on a LAN-only dev setup where WG traffic
+    // arrives via br-lan and the LAN zone's default_input=accept
+    // already lets it through).
+    if let Some(wan) = cfg.primary_wan() {
+        let wan_if = wan.iface().to_string();
+        for wg in &cfg.wireguard {
+            let mut r = Rule::new(&input)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .iiface(&wan_if)
+                .map_err(|e| Error::Firewall(e.to_string()))?;
+            r = r.dport(wg.listen_port, rustables::Protocol::UDP);
+            r.accept().add_to_batch(&mut batch);
+        }
+    }
+
     // Emit each config rule into the right chain.
     for rule in &cfg.firewall.rules {
         // ct_state rules go into both input + forward.
@@ -617,6 +638,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         zones = cfg.firewall.zones.len(),
         rules = cfg.firewall.rules.len(),
         port_forwards = cfg.port_forwards.len(),
+        wg_ports = cfg.wireguard.len(),
         "nftables inet filter installed"
     );
 
