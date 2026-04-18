@@ -1142,6 +1142,12 @@ fn mount_root_hot_path() -> Result<(), Error> {
                 None
             });
         (true, backup)
+    } else if first_le == 0x00000000 && f2fs_at == 0x00000000 {
+        // Freshly-flashed region (U-Boot HTTP recovery writes zeros
+        // past the rootfs — no marker, no backup, no filesystem).
+        // Treat as unformatted, no backup.
+        tracing::info!("mount_root: zero region (fresh flash); will format f2fs");
+        (true, None)
     } else {
         // Something in the overlay region but not f2fs — bail loudly
         // rather than format and potentially destroy user data.
