@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 oxwrt-api.workspace = true
+oxwrt-proto.workspace = true
 squic.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "oxwrt-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# sQUIC frame codec + RPC parse/format. The cross-platform transport
+# layer shared by the daemon (accepts frames over sQUIC streams) and
+# the CLI (dials + sends one frame, receives one). Pure codec + a
+# bit of parse — no daemon state, no tokio runtime management,
+# nothing Linux-specific.
+
+[dependencies]
+oxwrt-api.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+# sha2 + hex are used by `parse_request("update", ...)` to hash a
+# local firmware image before the CLI streams it — the client
+# computes the SHA-256 up-front so the server can verify on receipt.
+sha2.workspace = true
+hex.workspace = true
+# `default_config_text` renders into TOML and we want a round-trip
+# test that parses it back via oxwrt-api::Config.
+[dev-dependencies]
+toml.workspace = true
