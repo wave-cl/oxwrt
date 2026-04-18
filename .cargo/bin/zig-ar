@@ -1,8 +1,30 @@
 #!/bin/sh
-# Cross-compilation ar for Linux targets.
+# Cross-compilation `ar` wrapper used by cargo-zigbuild when producing
+# Linux-musl static archives. `zig ar` in Zig 0.14+ refuses `cq`/`rcs`
+# on first-time archive creation, so ring's build script fails. GNU
+# `ar` (binutils) handles it correctly.
 #
-# `zig ar` in Zig 0.16 is broken: `cq` (and `rcs`) refuses to create a new
-# archive file, so ring's build script fails during the first-time archive
-# link. GNU ar from binutils handles this correctly and produces thin
-# archives compatible with Linux targets.
-exec /Users/c/homebrew/opt/binutils/bin/ar "$@"
+# - macOS: Apple's /usr/bin/ar doesn't write thin archives in the
+#   format ring expects; need the binutils build installed via brew
+#   / macports.
+# - Linux (incl. GitHub Actions ubuntu-latest): /usr/bin/ar IS GNU ar,
+#   use it directly.
+case "$(uname -s)" in
+  Darwin)
+    for cand in \
+        /opt/homebrew/opt/binutils/bin/ar \
+        /usr/local/opt/binutils/bin/ar \
+        /Users/c/homebrew/opt/binutils/bin/ar \
+        /opt/local/bin/gar; do
+        if [ -x "$cand" ]; then exec "$cand" "$@"; fi
+    done
+    echo "zig-ar: GNU binutils ar not found. brew install binutils." >&2
+    exit 127
+    ;;
+  *)
+    if [ -x /usr/bin/ar ]; then
+        exec /usr/bin/ar "$@"
+    fi
+    exec ar "$@"
+    ;;
+esac
