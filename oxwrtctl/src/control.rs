@@ -13,18 +13,13 @@ use crate::config::Config;
 use crate::container::Supervisor;
 #[cfg(target_os = "linux")]
 use crate::logd::Logd;
-#[cfg(target_os = "linux")]
-use crate::wan_dhcp::DhcpLease;
 
-/// Shared WAN lease state. `None` until the boot-time DHCP `acquire`
-/// succeeds, then mutated in place by `spawn_renewal_loop` on every
-/// renewal. `handle_diag("dhcp")` reads it for the diag RPC. Wrapped
-/// in an `Arc<RwLock<...>>` so the renewal loop and `ControlState` can
-/// hold independent clones — the renewal loop is spawned BEFORE
-/// `ControlState::new` runs, so it can't share via the `ControlState`
-/// `Arc` itself.
+// SharedLease moved to oxwrt-linux (next to DhcpLease, which is where
+// it belongs — the old layout put the alias in the control module
+// only as a convenience). Re-exported so every existing
+// `crate::control::SharedLease` call site keeps resolving.
 #[cfg(target_os = "linux")]
-pub type SharedLease = Arc<RwLock<Option<DhcpLease>>>;
+pub use oxwrt_linux::wan_dhcp::SharedLease;
 
 /// State shared between the init main loop and sQUIC control-plane tasks.
 ///

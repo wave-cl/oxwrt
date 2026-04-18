@@ -1,0 +1,67 @@
+[package]
+name = "oxwrt-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Linux-only system integrations: container spawn/reap + hardening,
+# netlink + nftables firewall, DHCPv4 client, wifi hostapd generator,
+# native sysupgrade, in-memory service log ring buffer.
+#
+# Why one crate for six modules: every one of these has exactly one
+# consumer (the oxwrtctl daemon). Six Cargo.toml's + a combinatorial
+# feature-flag matrix would be zero isolation benefit over a single
+# `pub mod {container, net, dhcp, wifi, sysupgrade, logd}` layout.
+# All six already share most of their deps (rustix, netlink, libc) so
+# splitting them wouldn't meaningfully shrink any sub-build either.
+
+# Cross-platform deps (so cargo check on macOS doesn't churn on a
+# crate whose body is cfg-gated empty — these are cheap).
+[dependencies]
+oxwrt-api.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+hex.workspace = true
+sha2.workspace = true
+
+# Every system-facing crate below is Linux-only and would fail to
+# compile on macOS (seccompiler / caps call prctl, rtnetlink pulls
+# netlink socket abstractions). The crate body itself carries
+# `#![cfg(target_os = "linux")]`, so on non-Linux targets this whole
+# dep set is dead weight — moving it under a cfg target saves
+# download + cargo check time.
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2.workspace = true
+tar.workspace = true
+rustix = { version = "1", features = [
+    "fs",
+    "mount",
+    "process",
+    "system",
+    "thread",
+    "net",
+    "pipe",
+    "event",
+    "termios",
+    "time",
+] }
+rtnetlink = "0.20"
+netlink-packet-route = "0.29"
+rustables = "0.8"
+futures-util.workspace = true
+dhcproto.workspace = true
+socket2.workspace = true
+rand.workspace = true
+seccompiler.workspace = true
+caps.workspace = true
+libc.workspace = true
+landlock.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

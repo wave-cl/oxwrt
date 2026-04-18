@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, new_connection};
 
-use crate::config::{Action, Config, Network, PortSpec, Proto, Service, WanConfig};
+use oxwrt_api::config::{Action, Config, Network, PortSpec, Proto, Service, WanConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -606,7 +606,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
 
     // ── 3. ip oxwrt-dnat: DNAT rules ────────────────────────────────
 
-    let dnat_rules: Vec<&crate::config::Rule> = cfg
+    let dnat_rules: Vec<&oxwrt_api::config::Rule> = cfg
         .firewall
         .rules
         .iter()
@@ -823,7 +823,7 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
     out.push("}".to_string());
 
     // DNAT dump
-    let dnat_rules: Vec<&crate::config::Rule> = cfg
+    let dnat_rules: Vec<&oxwrt_api::config::Rule> = cfg
         .firewall
         .rules
         .iter()
@@ -925,7 +925,7 @@ mod tests {
     //! inputs, so the tests don't need any mock netlink / cgroup /
     //! seccomp infrastructure.
     use super::*;
-    use crate::config::{
+    use oxwrt_api::config::{
         Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone,
     };
     use std::collections::BTreeMap;
@@ -955,8 +955,8 @@ mod tests {
                 zones: vec![Zone {
                     name: "trusted".to_string(),
                     networks: vec!["lan".to_string(), "guest".to_string()],
-                    default_input: crate::config::ChainPolicy::Accept,
-                    default_forward: crate::config::ChainPolicy::Drop,
+                    default_input: oxwrt_api::config::ChainPolicy::Accept,
+                    default_forward: oxwrt_api::config::ChainPolicy::Drop,
                     masquerade: false,
                 }],
                 rules: vec![],

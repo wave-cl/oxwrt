@@ -41,9 +41,9 @@ use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetA
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::config::{NetMode, SecurityProfile, Service};
+use oxwrt_api::config::{NetMode, SecurityProfile, Service};
 use crate::logd::Logd;
-use crate::rpc::ServiceState;
+use oxwrt_api::rpc::ServiceState;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/svc";
 const CGROUP_UNIFIED: &str = "/sys/fs/cgroup";
@@ -375,7 +375,7 @@ pub fn spawn(sup: &mut Supervised, logd: &Logd) -> Result<(), Error> {
     // For isolated-netns services with a veth config, re-exec ourselves as
     // the `--attach-netns` helper to move the peer into the child netns and
     // configure it.
-    if sup.spec.net_mode == crate::config::NetMode::Isolated {
+    if sup.spec.net_mode == oxwrt_api::config::NetMode::Isolated {
         if let (Some(pid), Some(veth)) = (child.id(), sup.spec.veth.as_ref()) {
             attach_netns(&sup.spec.name, pid, veth);
         }
@@ -599,7 +599,7 @@ fn spawn_clone3(
 }
 
 /// Run the `--attach-netns` helper to move veth peer into child netns.
-fn attach_netns(svc_name: &str, pid: u32, veth: &crate::config::VethConfig) {
+fn attach_netns(svc_name: &str, pid: u32, veth: &oxwrt_api::config::VethConfig) {
     let peer_name = format!("veth-{svc_name}-p");
     match std::env::current_exe() {
         Ok(exe) => {
@@ -1709,7 +1709,7 @@ fn map_step_err(step: &str, e: rustix::io::Errno) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BindMount, Service};
+    use oxwrt_api::config::{BindMount, Service};
     use std::path::PathBuf;
 
     fn tmp_service(rootfs: PathBuf) -> Service {

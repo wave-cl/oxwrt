@@ -19,6 +19,7 @@
 //! tied to the interface directly.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
@@ -59,6 +60,19 @@ pub struct DhcpLease {
     pub lease_seconds: u32,
     pub server: Ipv4Addr,
 }
+
+/// Shared WAN lease state. `None` until the boot-time DHCP `acquire`
+/// succeeds, then mutated in place by `spawn_renewal_loop` on every
+/// renewal. The control plane's `diag dhcp` RPC reads it.
+/// Wrapped in an `Arc<RwLock<...>>` so the renewal loop and the
+/// control-plane side can hold independent clones — the renewal loop
+/// is spawned before ControlState exists, so it can't share via the
+/// ControlState Arc itself.
+///
+/// Lives alongside [`DhcpLease`] here (not in the daemon's
+/// `control.rs`) so oxwrt-linux can own the type and `spawn_renewal_
+/// loop` takes a `SharedLease` without a cross-crate circularity.
+pub type SharedLease = Arc<RwLock<Option<DhcpLease>>>;
 
 /// Run one full DHCPv4 handshake on `iface_name`. Returns the lease on
 /// success, or an error on timeout / protocol failure. Does **not** apply
@@ -194,7 +208,7 @@ pub fn spawn_renewal_loop(
     handle: Handle,
     iface: String,
     initial_lease: DhcpLease,
-    shared_lease: crate::control::SharedLease,
+    shared_lease: SharedLease,
 ) -> tokio::task::JoinHandle<()> {
     // Shared wake signal from the link-watch task → renewal loop. Fires
     // on link-down→up edges so the renewal doesn't sit asleep for half

@@ -39,6 +39,11 @@ tar.workspace = true
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# container/net/wan_dhcp/wifi/sysupgrade/logd moved to the oxwrt-linux
+# crate. Daemon-local code (init.rs, control/server.rs, the --attach-
+# netns / --smoke / --smoke-ns main.rs subcommands) still needs direct
+# rustix + rtnetlink + futures-util for its own netlink plumbing.
+oxwrt-linux.workspace = true
 rustix = { version = "1", features = [
     "fs",
     "mount",
@@ -52,13 +57,5 @@ rustix = { version = "1", features = [
     "time",
 ] }
 rtnetlink = "0.20"
-netlink-packet-route = "0.29"
-rustables = "0.8"
 futures-util = { workspace = true }
-dhcproto = { workspace = true }
-socket2 = { workspace = true }
-rand = { workspace = true }
-seccompiler = { workspace = true }
-caps = { workspace = true }
 libc = { workspace = true }
-landlock = { workspace = true }

@@ -18,7 +18,7 @@
 //! hostapd/ yet; `write_all()` creates the dir + populates it before
 //! the supervisor tries to start the hostapd services.
 
-use crate::config::{Config, Radio, Wifi, WifiSecurity};
+use oxwrt_api::config::{Config, Radio, Wifi, WifiSecurity};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
@@ -301,7 +301,7 @@ fn vht_seg0(channel: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Radio, Wifi, WifiSecurity};
+    use oxwrt_api::config::{Radio, Wifi, WifiSecurity};
 
     fn mk_radio(phy: &str, band: &str, channel: u16, disabled: bool) -> Radio {
         Radio {

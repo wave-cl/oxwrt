@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["oxwrtctl", "crates/oxwrt-api", "crates/oxwrt-proto", "crates/oxwrtctl-cli"]
+members = [
+    "oxwrtctl",
+    "crates/oxwrt-api",
+    "crates/oxwrt-linux",
+    "crates/oxwrt-proto",
+    "crates/oxwrtctl-cli",
+]
 
 [workspace.package]
 version = "0.1.1"
@@ -10,6 +16,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 oxwrt-api = { path = "crates/oxwrt-api" }
+oxwrt-linux = { path = "crates/oxwrt-linux" }
 oxwrt-proto = { path = "crates/oxwrt-proto" }
 oxwrtctl-cli = { path = "crates/oxwrtctl-cli" }
 squic = { path = "../squic-rust" }

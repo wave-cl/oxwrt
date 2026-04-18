@@ -1,22 +1,15 @@
-// config + rpc moved to the oxwrt-api crate as part of the workspace
-// split. Re-export them as if they were local modules so every
-// existing `crate::config::X` / `crate::rpc::Y` call site keeps
-// resolving — avoids churning thousands of imports in one commit.
+// config + rpc moved to oxwrt-api. container / net / wan_dhcp / wifi /
+// sysupgrade / logd moved to oxwrt-linux. All re-exported here as if
+// they were local modules so every existing `crate::config::X`,
+// `crate::container::Y`, etc. call site keeps resolving — avoids
+// churning thousands of imports across init.rs + control/server.rs.
 pub use oxwrt_api::{config, rpc};
+#[cfg(target_os = "linux")]
+pub use oxwrt_linux::{container, logd, net, sysupgrade, wan_dhcp, wifi};
 mod control;
-mod logd;
 
 #[cfg(target_os = "linux")]
-mod container;
-#[cfg(target_os = "linux")]
 mod init;
-#[cfg(target_os = "linux")]
-mod net;
-#[cfg(target_os = "linux")]
-mod sysupgrade;
-#[cfg(target_os = "linux")]
-mod wan_dhcp;
-mod wifi;
 
 use std::process::ExitCode;
 

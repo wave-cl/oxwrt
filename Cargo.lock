@@ -1139,6 +1139,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxwrt-linux"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "caps",
+ "dhcproto",
+ "flate2",
+ "futures-util",
+ "hex",
+ "landlock",
+ "libc",
+ "netlink-packet-route 0.29.0",
+ "oxwrt-api",
+ "rand",
+ "rtnetlink",
+ "rustables",
+ "rustix",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2 0.6.3",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oxwrt-proto"
 version = "0.1.1"
 dependencies = [
@@ -1157,30 +1187,23 @@ name = "oxwrtctl"
 version = "0.1.1"
 dependencies = [
  "bytes",
- "caps",
- "dhcproto",
  "ed25519-dalek",
  "flate2",
  "futures-util",
  "hex",
- "landlock",
  "libc",
- "netlink-packet-route 0.29.0",
  "oxwrt-api",
+ "oxwrt-linux",
  "oxwrt-proto",
  "oxwrtctl-cli",
  "quinn",
- "rand",
  "rand_core 0.6.4",
  "rmp-serde",
  "rtnetlink",
- "rustables",
  "rustix",
- "seccompiler",
  "serde",
  "serde_json",
  "sha2",
- "socket2 0.6.3",
  "squic",
  "tar",
  "tempfile",
