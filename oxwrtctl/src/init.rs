@@ -1499,32 +1499,112 @@ fn load_modules() {
 fn parse_modules_dep(
     modules_root: &Path,
 ) -> std::collections::HashMap<String, Vec<String>> {
+    // Preferred: read modules.dep if present (built by depmod, e.g. on
+    // Debian/Ubuntu). OpenWrt's imagebuilder does NOT generate this
+    // file — it relies on each .ko's embedded `depends=` modinfo field
+    // read by ubox/kmodloader. Fall through to modinfo scanning when
+    // modules.dep is missing.
     let path = modules_root.join("modules.dep");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let mut map = std::collections::HashMap::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((lhs, rhs)) = line.split_once(':') else {
+                continue;
+            };
+            let name = module_name_from_ko_path(lhs);
+            let deps: Vec<String> = rhs
+                .split_whitespace()
+                .map(module_name_from_ko_path)
+                .collect();
+            map.insert(name, deps);
+        }
+        tracing::debug!(modules = map.len(), "parsed modules.dep");
+        return map;
+    }
+    tracing::debug!(
+        path = %path.display(),
+        "modules.dep not present; falling back to .modinfo scanning"
+    );
+    parse_modinfo_deps(modules_root)
+}
+
+/// Fallback for OpenWrt-style trees that ship only `.ko` files (no
+/// modules.dep). Walks every `*.ko` under `modules_root` and extracts the
+/// `depends=` value from the ELF `.modinfo` section. Returns a map of
+/// module-name → dep-names, keyed and valued with `-` → `_` canonicalization
+/// so it slots straight into the existing `load_with_deps` DFS.
+///
+/// Why byte-scan instead of proper ELF parsing: `.modinfo` contents are
+/// always a sequence of NUL-terminated `key=value` strings, and "depends="
+/// is a sufficiently distinctive prefix that a raw memmem search is
+/// correct for every real kernel .ko. This keeps oxwrtctl dependency-free
+/// (no `object` / `goblin` / `elf` crate).
+fn parse_modinfo_deps(
+    modules_root: &Path,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    let rd = match std::fs::read_dir(modules_root) {
+        Ok(rd) => rd,
         Err(e) => {
-            tracing::debug!(error = %e, path = %path.display(), "modules.dep not read; continuing without dep resolution");
-            return std::collections::HashMap::new();
+            tracing::warn!(error = %e, "parse_modinfo_deps: read_dir failed");
+            return map;
         }
     };
-    let mut map = std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("ko") {
             continue;
         }
-        let Some((lhs, rhs)) = line.split_once(':') else {
-            continue;
+        let name = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.replace('-', "_"),
+            None => continue,
         };
-        let name = module_name_from_ko_path(lhs);
-        let deps: Vec<String> = rhs
-            .split_whitespace()
-            .map(module_name_from_ko_path)
-            .collect();
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let deps = extract_modinfo_depends(&bytes);
         map.insert(name, deps);
     }
-    tracing::debug!(modules = map.len(), "parsed modules.dep");
+    tracing::debug!(modules = map.len(), "parsed .modinfo dep info");
     map
+}
+
+/// Scan ELF bytes for the NUL-terminated `depends=foo,bar,baz` entry in
+/// the `.modinfo` section. Returns dep names with `-` → `_`
+/// canonicalization; empty list when the module has no deps (a very
+/// common case — look at `cfg80211`, `nfnetlink`, etc.).
+fn extract_modinfo_depends(bytes: &[u8]) -> Vec<String> {
+    const KEY: &[u8] = b"depends=";
+    // Find every occurrence of "depends=" — .modinfo typically contains
+    // only one, but scanning all of them is safe.
+    let mut i = 0usize;
+    while i + KEY.len() <= bytes.len() {
+        if &bytes[i..i + KEY.len()] == KEY {
+            let start = i + KEY.len();
+            let end = start + bytes[start..]
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(bytes.len() - start);
+            let value = &bytes[start..end];
+            if value.is_empty() {
+                return Vec::new();
+            }
+            // Comma-separated, skip empty entries.
+            return std::str::from_utf8(value)
+                .unwrap_or("")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.replace('-', "_"))
+                .collect();
+        }
+        i += 1;
+    }
+    Vec::new()
 }
 
 /// "kernel/drivers/net/foo.ko" → "foo"

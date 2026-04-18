@@ -846,10 +846,47 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
             };
             Response::Value { value }
         }
+        "modules" => {
+            // Read /proc/modules (kernel-global, not pid-ns specific, but
+            // still readable from the init process). Useful to see what
+            // load_modules actually landed on boot.
+            match std::fs::read_to_string("/proc/modules") {
+                Ok(s) if s.is_empty() => Response::Value {
+                    value: "(no modules loaded)\n".to_string(),
+                },
+                Ok(s) => Response::Value { value: s },
+                Err(e) => Response::Err {
+                    message: format!("diag modules: {e}"),
+                },
+            }
+        }
+        "dmesg" => {
+            // Read the kernel ring buffer via klogctl(SYSLOG_ACTION_READ_ALL).
+            // Needs CAP_SYSLOG (we have it as pid 1). A 256KB buffer fits
+            // the default kmsg sizes. Output is one message per line.
+            let mut buf = vec![0u8; 256 * 1024];
+            // SYSLOG_ACTION_READ_ALL = 3
+            let n = unsafe {
+                libc::klogctl(3, buf.as_mut_ptr() as *mut _, buf.len() as _)
+            };
+            if n < 0 {
+                Response::Err {
+                    message: format!(
+                        "diag dmesg: klogctl: {}",
+                        std::io::Error::last_os_error()
+                    ),
+                }
+            } else {
+                buf.truncate(n as usize);
+                Response::Value {
+                    value: String::from_utf8_lossy(&buf).into_owned(),
+                }
+            }
+        }
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 ping, traceroute, dig)"
+                 modules, dmesg, ping, traceroute, dig)"
             ),
         },
     }
