@@ -326,6 +326,24 @@ R=$(run_cmd wg-peer add '{"name":"bad2","pubkey":"bbbbbFkq7cLKgqx7qVqEHS9f00NL0y
 check_err "wg-peer add bad cidr" "missing /prefix" "$R"
 R=$(run_cmd wg-peer remove alice); check_ok "wg-peer remove" "$R"
 
+# wg-enroll: server-generated client keypair + rendered .conf. The
+# stock armsr/armv8 test VM lacks wireguard-tools (we'd need to opkg
+# install or reshape the image), so the `wg` invocation inside the
+# enroll handler returns EEXEC. Validating the error path is still
+# useful — it confirms the RPC is dispatched, args parse, and the
+# handler fails gracefully when the binary is missing.
+R=$(run_cmd wg-enroll charlie 10.8.0.4/32 vpn.example.com)
+# Accept either success (if wg is present) OR the friendly binary-
+# missing error (more common in CI). Both prove plumbing works.
+if echo "$R" | grep -qE "PrivateKey|wireguard-tools"; then
+    PASS=$((PASS + 1))
+    echo "  OK   wg-enroll (either rendered conf or friendly missing-tool error)"
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL wg-enroll"
+    echo "       got: $(echo "$R" | head -3)"
+fi
+
 echo "-- port-forward CRUD --"
 # Expand minimal test config to include a LAN for auto-detect, via an
 # add-network call. Then exercise port-forward add/list/get/remove.

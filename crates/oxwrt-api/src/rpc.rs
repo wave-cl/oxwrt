@@ -54,6 +54,35 @@ pub enum Request {
     /// `reload` to apply. Use with care — no partial validation
     /// beyond "does it parse as a valid Config?"
     ConfigPush { toml: String },
+    /// Enroll a new WireGuard roadwarrior peer: the server generates
+    /// a fresh client keypair, adds the public half to its peer list
+    /// (persisted to oxwrt.toml), and returns a complete client
+    /// `.conf` — ready for the operator to hand to the user who
+    /// pastes it into wg-quick / the GUI / QR scanner. Closes the
+    /// onboarding loop: previously the operator had to generate the
+    /// client keypair manually, call `wg-peer add` with the pubkey,
+    /// compose a .conf by hand, and remember the server pubkey +
+    /// endpoint. Now one RPC does it.
+    ///
+    /// The client's private key is returned in the response and NOT
+    /// persisted on the router — if the operator loses it the only
+    /// fix is re-enroll (which regenerates).
+    WgEnroll {
+        /// Peer name (unique under `[[wireguard.peers]]`).
+        name: String,
+        /// Allowed IPs on the server side — CIDR(s) the peer is
+        /// permitted to source from. Typically a single /32 per
+        /// roadwarrior.
+        allowed_ips: String,
+        /// Endpoint host (IP or DDNS name) the client dials into.
+        /// Port is taken from the iface's `listen_port`.
+        endpoint_host: String,
+        /// DNS server to push to the client's [Interface] block.
+        /// Typically the router's LAN IP. None → client uses its
+        /// upstream default.
+        #[serde(default)]
+        dns: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -186,6 +186,29 @@ impl Server {
                 continue;
             }
 
+            // WireGuard enroll: server-generated client keypair + a
+            // rendered [Interface]+[Peer] .conf text for the operator
+            // to hand off. Handled here (not in sync dispatch) because
+            // it shells out to `wg genkey` / `wg pubkey`.
+            if let Request::WgEnroll {
+                name,
+                allowed_ips,
+                endpoint_host,
+                dns,
+            } = &request
+            {
+                let resp = handle_wg_enroll(
+                    &self.state,
+                    name,
+                    allowed_ips,
+                    endpoint_host,
+                    dns.as_deref(),
+                );
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+
             let responses = handle(&self.state, request);
             for response in &responses {
                 write_frame(&mut send, response).await?;
@@ -217,6 +240,7 @@ pub use reload::handle_reload_async;
 use crud::{
     handle_crud_network, handle_crud_port_forward, handle_crud_radio, handle_crud_rule,
     handle_crud_service, handle_crud_wg_peer, handle_crud_wifi, handle_crud_zone,
+    handle_wg_enroll,
 };
 use diag::handle_diag;
 use logs::{handle_logs, stream_follow_logs};
@@ -275,6 +299,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::ConfigDump => vec![Response::Err {
             message: "BUG: ConfigDump should be handled upstream".to_string(),
+        }],
+        Request::WgEnroll { .. } => vec![Response::Err {
+            message: "BUG: WgEnroll should be handled async upstream".to_string(),
         }],
         Request::ConfigPush { .. } => vec![Response::Err {
             message: "BUG: ConfigPush should be handled upstream".to_string(),

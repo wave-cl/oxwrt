@@ -925,3 +925,204 @@ fn validate_wg_peer(p: &crate::config::WireguardPeer) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Server-generated peer enrollment: runs `wg genkey` + `wg pubkey`
+/// to produce a fresh client keypair, adds the public half to
+/// `cfg.wireguard[0].peers`, persists, and returns a complete client
+/// `.conf` (with the generated PRIVATE key embedded) as a Value
+/// response. The private key leaves the router exactly once in this
+/// reply and is never persisted — if the operator loses it, re-enroll
+/// is the fix (that's also why there's no separate "give me alice's
+/// private key again" RPC).
+///
+/// Requires the `wg` binary from wireguard-tools — call fails early
+/// with a friendly error if the binary is missing (e.g. test harness
+/// VM without the package).
+pub(super) fn handle_wg_enroll(
+    state: &ControlState,
+    name: &str,
+    allowed_ips: &str,
+    endpoint_host: &str,
+    dns: Option<&str>,
+) -> Response {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let cfg = state.config_snapshot();
+    if cfg.wireguard.is_empty() {
+        return Response::Err {
+            message: "wg-enroll: no [[wireguard]] iface declared in config".to_string(),
+        };
+    }
+    let wg = &cfg.wireguard[0];
+    if wg.peers.iter().any(|p| p.name == name) {
+        return Response::Err {
+            message: format!("wg-enroll: peer already exists: {name}"),
+        };
+    }
+
+    // 1. Generate client private key.
+    let genkey_out = match Command::new("wg").arg("genkey").output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            return Response::Err {
+                message: format!(
+                    "wg-enroll: wg genkey failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+            };
+        }
+        Err(e) => {
+            return Response::Err {
+                message: format!("wg-enroll: wg genkey: {e} (is wireguard-tools installed?)"),
+            };
+        }
+    };
+    let client_priv = String::from_utf8_lossy(&genkey_out.stdout).trim().to_string();
+
+    // 2. Derive client pubkey (pipe private key into `wg pubkey`).
+    let client_pub = match run_wg_pubkey(&client_priv) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::Err {
+                message: format!("wg-enroll: wg pubkey: {e}"),
+            };
+        }
+    };
+
+    // 3. Derive SERVER pubkey from the on-disk private key. Must
+    //    match what install-time will push to the iface. If the file
+    //    doesn't exist yet (first enroll before first reload), we
+    //    can fall back to generating + persisting it now so the
+    //    rendered client .conf's PublicKey line matches reality.
+    let server_priv = match std::fs::read_to_string(&wg.key_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            // Generate + persist so both halves line up.
+            let g = match Command::new("wg").arg("genkey").output() {
+                Ok(o) if o.status.success() => o,
+                Ok(o) => {
+                    return Response::Err {
+                        message: format!(
+                            "wg-enroll: server key auto-gen failed: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                        ),
+                    };
+                }
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("wg-enroll: server key auto-gen: {e}"),
+                    };
+                }
+            };
+            let k = String::from_utf8_lossy(&g.stdout).trim().to_string();
+            if let Some(parent) = std::path::Path::new(&wg.key_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&wg.key_path, format!("{k}\n")) {
+                return Response::Err {
+                    message: format!("wg-enroll: write {}: {e}", wg.key_path),
+                };
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &wg.key_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            k
+        }
+    };
+    let server_pub = match run_wg_pubkey(&server_priv) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::Err {
+                message: format!("wg-enroll: server pubkey: {e}"),
+            };
+        }
+    };
+
+    // 4. Persist the new peer (using CLIENT pubkey, not private).
+    let peer = crate::config::WireguardPeer {
+        name: name.to_string(),
+        pubkey: client_pub.clone(),
+        allowed_ips: allowed_ips.to_string(),
+        preshared_key: None,
+        endpoint: None,
+        persistent_keepalive: None,
+    };
+    let mut new_cfg = (*cfg).clone();
+    new_cfg.wireguard[0].peers.push(peer);
+    let persist_resp = persist_and_swap(state, new_cfg, &format!("wg-enroll {name}"));
+    // Persist returns Response::Ok on success, Err on failure.
+    if matches!(persist_resp, Response::Err { .. }) {
+        return persist_resp;
+    }
+
+    // 5. Render the client-side .conf. Note: AllowedIPs = 0.0.0.0/0
+    //    is the "route-all" default — full-tunnel VPN. A split-
+    //    tunnel variant (e.g. only LAN subnets) can be operator-
+    //    edited on the client side; we don't over-spec here.
+    let mut conf = String::new();
+    let _ = write_client_conf(
+        &mut conf,
+        &client_priv,
+        allowed_ips,
+        &server_pub,
+        wg.listen_port,
+        endpoint_host,
+        dns,
+    );
+
+    Response::Value { value: conf }
+}
+
+fn run_wg_pubkey(priv_key: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("wg")
+        .arg("pubkey")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(priv_key.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("wg pubkey: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn write_client_conf(
+    out: &mut String,
+    client_priv: &str,
+    client_address: &str,
+    server_pub: &str,
+    server_port: u16,
+    endpoint_host: &str,
+    dns: Option<&str>,
+) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    writeln!(out, "[Interface]")?;
+    writeln!(out, "PrivateKey = {client_priv}")?;
+    writeln!(out, "Address = {client_address}")?;
+    if let Some(d) = dns {
+        writeln!(out, "DNS = {d}")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "[Peer]")?;
+    writeln!(out, "PublicKey = {server_pub}")?;
+    writeln!(out, "AllowedIPs = 0.0.0.0/0")?;
+    writeln!(out, "Endpoint = {endpoint_host}:{server_port}")?;
+    writeln!(out, "PersistentKeepalive = 25")?;
+    Ok(())
+}

@@ -187,6 +187,38 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                 .map_err(|e| format!("config-push: read {path}: {e}"))?;
             Ok(Request::ConfigPush { toml })
         }
+        "wg-enroll" => {
+            // Positional: name allowed_ips endpoint_host [--dns IP]
+            let name = args
+                .first()
+                .ok_or("wg-enroll: missing <name>")?
+                .clone();
+            let allowed_ips = args
+                .get(1)
+                .ok_or("wg-enroll: missing <allowed_ips>")?
+                .clone();
+            let endpoint_host = args
+                .get(2)
+                .ok_or("wg-enroll: missing <endpoint_host>")?
+                .clone();
+            // --dns IP is optional; scan remaining args.
+            let mut dns = None;
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--dns" {
+                    dns = args.get(i + 1).cloned();
+                    i += 2;
+                } else {
+                    return Err(format!("wg-enroll: unknown arg {:?}", args[i]));
+                }
+            }
+            Ok(Request::WgEnroll {
+                name,
+                allowed_ips,
+                endpoint_host,
+                dns,
+            })
+        }
         _ => Err(format!("unknown command: {cmd}")),
     }
 }
