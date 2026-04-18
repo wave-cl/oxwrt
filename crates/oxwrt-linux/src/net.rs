@@ -1141,6 +1141,9 @@ mod tests {
             radios: vec![],
             wifi: vec![],
             services: vec![],
+            port_forwards: vec![],
+            wireguard: vec![],
+            ddns: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),

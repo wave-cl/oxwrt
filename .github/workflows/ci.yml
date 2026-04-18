@@ -43,6 +43,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: oxwrt
+      # Even fmt needs the sibling squic-rust checkout because
+      # `cargo fmt` internally runs `cargo metadata`, which fails
+      # early on an unresolvable path dep.
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
