@@ -51,6 +51,15 @@ pub fn run() -> Result<(), Error> {
     // always yes (procd ran /lib/preinit/80_mount_root upstream) and
     // we skip. When Stage 4 removes procd-init, this becomes the hot
     // path.
+    // Stage 3 of the takeover: netdev renaming from DTS labels.
+    // On OpenWrt the target-specific /lib/preinit/04_set_netdev_label
+    // hook walks /sys/class/net/*/of_node/label and renames the
+    // interface to match. On the GL-MT6000 this is what makes the
+    // kernel's default ethX naming line up with the "lan1..lan5"
+    // labels we reference in oxwrt.toml. In coexist this has already
+    // happened upstream and our walk is all no-ops.
+    rename_netdevs_from_dts();
+
     if let Err(e) = mount_root_if_needed() {
         // Non-fatal: if we fail to set up the overlay here AND
         // procd-init didn't set it up either, /etc is read-only
@@ -798,6 +807,125 @@ fn bootstrap_clock_floor() {
             );
         }
     }
+}
+
+/// Rename network interfaces so their kernel name matches the
+/// DTS-declared label (or `openwrt,netdev-name` property). Equivalent
+/// of the target's /lib/preinit/04_set_netdev_label shell hook.
+///
+/// Walks `/sys/class/net/*/of_node/label` — each entry is one name.
+/// If the current ifname differs from the label, issue RTM_SETLINK
+/// (IFLA_IFNAME) via rtnetlink. Interface must be DOWN for the kernel
+/// to accept a rename; during preinit all interfaces ARE down
+/// (netifd hasn't brought anything up yet), so this is safe before
+/// `net::Net::bring_up`.
+///
+/// Spins its own tokio current-thread runtime — init::run() is sync
+/// and the async main runtime hasn't started yet. Best-effort: a
+/// single bad rename doesn't block the others, and a complete failure
+/// is logged but not propagated.
+///
+/// In coexist, procd-init's preinit already ran this and every
+/// netdev already has its final name. Every iteration here finds
+/// `cur == label` and no-ops — silent.
+fn rename_netdevs_from_dts() {
+    let rd = match std::fs::read_dir("/sys/class/net") {
+        Ok(rd) => rd,
+        Err(e) => {
+            tracing::warn!(error = %e, "netdev_rename: read /sys/class/net failed");
+            return;
+        }
+    };
+
+    // Gather (current_name, desired_label) pairs by reading sysfs.
+    // Two possible label sources match OpenWrt convention: `label`
+    // (standard) and `openwrt,netdev-name` (target-overridden).
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for entry in rd.flatten() {
+        let cur = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // Try target-specific name first, then the standard label.
+        let label = std::fs::read_to_string(
+            entry.path().join("of_node").join("openwrt,netdev-name"),
+        )
+        .or_else(|_| {
+            std::fs::read_to_string(entry.path().join("of_node").join("label"))
+        });
+        let Ok(label) = label else {
+            continue;
+        };
+        let label = label.trim().trim_end_matches('\0').to_string();
+        if label.is_empty() || label == cur {
+            continue;
+        }
+        pairs.push((cur, label));
+    }
+    if pairs.is_empty() {
+        return;
+    }
+
+    // Spin a current-thread runtime just for these netlink ops; drop
+    // it once all renames are dispatched.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(error = %e, "netdev_rename: tokio runtime build failed");
+            return;
+        }
+    };
+    rt.block_on(async {
+        use rtnetlink::{LinkUnspec, new_connection};
+        let (connection, handle, _) = match new_connection() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "netdev_rename: rtnetlink connection failed");
+                return;
+            }
+        };
+        let conn_task = tokio::spawn(connection);
+
+        for (cur, desired) in &pairs {
+            use futures_util::TryStreamExt;
+            let mut stream = handle
+                .link()
+                .get()
+                .match_name(cur.clone())
+                .execute();
+            let idx = match stream.try_next().await {
+                Ok(Some(msg)) => msg.header.index,
+                Ok(None) => {
+                    tracing::warn!(cur = %cur, "netdev_rename: link disappeared mid-scan");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(cur = %cur, error = %e, "netdev_rename: link_get failed");
+                    continue;
+                }
+            };
+            // Rename. In rtnetlink 0.20, LinkUnspec::name() attaches
+            // IFLA_IFNAME to the set() message — exact equivalent of
+            // `ip link set dev <cur> name <desired>`.
+            let req = LinkUnspec::new_with_index(idx)
+                .name(desired.clone())
+                .build();
+            match handle.link().set(req).execute().await {
+                Ok(()) => {
+                    tracing::info!(cur = %cur, desired = %desired, "netdev renamed");
+                }
+                Err(e) => {
+                    tracing::warn!(cur = %cur, desired = %desired, error = %e, "netdev rename failed");
+                }
+            }
+        }
+
+        drop(handle);
+        conn_task.abort();
+    });
 }
 
 /// If the rootfs overlay isn't already attached (i.e. /overlay has no
