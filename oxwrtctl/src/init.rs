@@ -46,6 +46,20 @@ pub fn run() -> Result<(), Error> {
     // it's benign in coexist, then remove procd-init ahead of it."
     load_modules();
 
+    // Stage 2 of the takeover: mount_root. Gate on "is the overlay
+    // already mounted?" — in coexist with procd-init the answer is
+    // always yes (procd ran /lib/preinit/80_mount_root upstream) and
+    // we skip. When Stage 4 removes procd-init, this becomes the hot
+    // path.
+    if let Err(e) = mount_root_if_needed() {
+        // Non-fatal: if we fail to set up the overlay here AND
+        // procd-init didn't set it up either, /etc is read-only
+        // squashfs and config-reload will fail. But oxwrtctl can
+        // still start the control plane on the in-memory config,
+        // so operators have a recovery path.
+        tracing::error!(error = %e, "mount_root_if_needed failed");
+    }
+
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
@@ -784,6 +798,69 @@ fn bootstrap_clock_floor() {
             );
         }
     }
+}
+
+/// If the rootfs overlay isn't already attached (i.e. /overlay has no
+/// mount entry in /proc/mounts), do a full libfstools-equivalent setup:
+/// find the rootfs partition, locate the overlay region after the
+/// squashfs tail, create a loop device at that offset, detect the
+/// f2fs filesystem on it (or format if first boot / DEADCODE marker),
+/// mount the f2fs, stack overlayfs with `lowerdir=/,upperdir=/overlay/
+/// upper,workdir=/overlay/work`, pivot_root into the stacked tree.
+/// Finally restore any sysupgrade config-backup tgz into upper.
+///
+/// In coexist mode (Stage 1-3), procd-init's preinit pipeline has
+/// already done all this before our pid-1 entry — /proc/mounts will
+/// show an `overlay` mount on `/` and an f2fs mount on /overlay.
+/// Detect and return early with a single info log.
+///
+/// Only the detect path is wired up at this stage. The hot path
+/// is stubbed (with a clear error) until Stage 4, where we actually
+/// remove procd-init and need to own the mount lifecycle. Landing
+/// the function now lets us verify the detection against real boot
+/// data without touching anything destructive.
+fn mount_root_if_needed() -> Result<(), Error> {
+    if overlay_is_attached()? {
+        tracing::info!(
+            "mount_root: rootfs overlay already attached upstream; skipping"
+        );
+        return Ok(());
+    }
+
+    // Hot path — reached only when procd-init is gone (Stage 4+).
+    // Intentionally stubbed: if we hit this during coexist mode
+    // development, something's gone wrong and we'd rather fail
+    // loudly than silently degrade. Stage 4 replaces the
+    // unimplemented!() with real loop0+f2fs+overlayfs+pivot_root
+    // logic that mirrors fstools/libfstools/{rootdisk,mount,overlay}.c.
+    Err(Error::Runtime(
+        "mount_root hot path unimplemented — reaching here means procd-init \
+         didn't set up the overlay. Stage 4 fills this in."
+            .to_string(),
+    ))
+}
+
+/// Parse /proc/mounts looking for an overlayfs mount on `/`. That's
+/// what fstools leaves us with after its pivot_root: root filesystem
+/// is of type "overlay" with `lowerdir=/,upperdir=/overlay/upper,...`.
+///
+/// We could also look at the `/overlay` entry (f2fs on loop0), but
+/// the overlay-on-/ signal is the definitive "the whole stack is
+/// set up" marker.
+fn overlay_is_attached() -> Result<bool, Error> {
+    let mounts = std::fs::read_to_string("/proc/mounts")
+        .map_err(Error::Io)?;
+    for line in mounts.lines() {
+        // Each line: "<src> <mountpoint> <fstype> <opts> <dump> <pass>"
+        let mut it = line.split_whitespace();
+        let _src = it.next();
+        let Some(mp) = it.next() else { continue };
+        let Some(fstype) = it.next() else { continue };
+        if mp == "/" && fstype == "overlay" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Load kernel modules from /etc/modules-boot.d/ and /etc/modules.d/.

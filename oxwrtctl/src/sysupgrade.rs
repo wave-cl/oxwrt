@@ -405,7 +405,7 @@ fn read_keep_list() -> Result<Vec<String>, Error> {
 /// is the GPT PARTLABEL assigned at image build time via the mediatek
 /// filogic DTS. For GL-MT6000 the labels are fixed: bl2, u-boot-env,
 /// factory, fip, kernel, rootfs, rootfs_data.
-fn resolve_partition(name: &str) -> Result<PathBuf, Error> {
+pub(crate) fn resolve_partition(name: &str) -> Result<PathBuf, Error> {
     let rd = std::fs::read_dir("/sys/class/block")
         .map_err(io("read /sys/class/block"))?;
     for e in rd.flatten() {
