@@ -48,7 +48,7 @@ OXCTL="$PROJ_ROOT/target/release/oxctl"
 BIN_HOST_FALLBACK="$PROJ_ROOT/target/release/oxwrtd"
 IMG_URL_BASE="https://downloads.openwrt.org/releases/25.12.2/targets/armsr/armv8"
 IMG_NAME="openwrt-25.12.2-armsr-armv8-generic-ext4-combined-efi.img"
-BOOT_TIMEOUT_S=120
+BOOT_TIMEOUT_S=${BOOT_TIMEOUT_S:-120}
 
 if [ ! -f "$BIN_LINUX" ]; then
     echo "Error: aarch64 oxwrtd not built. Run:" >&2
@@ -75,7 +75,10 @@ for cand in \
     /opt/local/share/qemu/edk2-aarch64-code.fd \
     /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
     /usr/local/share/qemu/edk2-aarch64-code.fd \
-    /Users/c/homebrew/share/qemu/edk2-aarch64-code.fd; do
+    /Users/c/homebrew/share/qemu/edk2-aarch64-code.fd \
+    /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+    /usr/share/AAVMF/AAVMF_CODE.fd \
+    /usr/share/edk2/aarch64/QEMU_EFI.fd; do
     if [ -f "$cand" ]; then EFI_FW="$cand"; break; fi
 done
 if [ -z "$EFI_FW" ]; then
