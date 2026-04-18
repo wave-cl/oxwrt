@@ -104,6 +104,17 @@ pub fn run() -> Result<(), Error> {
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
     let cfg = Config::load(&config_path)?;
 
+    // Generate per-phy hostapd.conf files at /etc/oxwrt/hostapd/ from
+    // the [[radios]] + [[wifi]] config. Bind-mount sources for the
+    // hostapd-5g / hostapd-2g services point here (writable overlay
+    // path), so changes via CRUD → reload → hostapd restart pick up the
+    // new SSID / passphrase without a reflash. Non-fatal: if the write
+    // fails, hostapd may start with stale or absent config, but the
+    // rest of the router still comes up.
+    if let Err(e) = crate::wifi::write_all(&cfg) {
+        tracing::error!(error = %e, "wifi: write_all failed at boot");
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()

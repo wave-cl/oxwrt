@@ -594,10 +594,12 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
 	cp config/services/corerad/corerad.toml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/corerad.toml
-	cp config/services/hostapd/hostapd-5g.conf \
-		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/hostapd-5g.conf
-	cp config/services/hostapd/hostapd-2g.conf \
-		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/hostapd-2g.conf
+	# Pre-create the generated-hostapd-conf dir as writable state.
+	# Content is written at boot by oxwrtctl wifi::write_all() from the
+	# [[radios]] + [[wifi]] entries. Staging the dir empty here avoids
+	# a first-boot race where hostapd's bind-mount source doesn't exist
+	# yet (bind of a missing path fails hard).
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt/hostapd
 	# Writable lease-file dir on the host side.
 	#
 	# DO NOT stage under files/var/ — OpenWrt ships /var as a symlink

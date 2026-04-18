@@ -13,6 +13,7 @@ mod net;
 mod sysupgrade;
 #[cfg(target_os = "linux")]
 mod wan_dhcp;
+mod wifi;
 
 use std::process::ExitCode;
 

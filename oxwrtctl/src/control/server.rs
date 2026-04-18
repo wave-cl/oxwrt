@@ -1492,6 +1492,17 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
     }
     let new_firewall_dump = crate::net::format_firewall_dump(&new_cfg);
 
+    // Phase 3b: regenerate per-phy hostapd.conf files at
+    // /etc/oxwrt/hostapd/. Must run BEFORE phase 4 (supervisor rebuild)
+    // so when the new hostapd-5g / hostapd-2g services come up they
+    // read the freshly-generated config rather than stale content from
+    // the previous boot. Failure is logged, not fatal — the services
+    // might start with an old config or fail to start entirely, but we
+    // don't want to block the rest of reload on it.
+    if let Err(e) = crate::wifi::write_all(&new_cfg) {
+        tracing::error!(error = %e, "reload: wifi::write_all failed");
+    }
+
     // Phase 4: rebuild supervisor.
     {
         let Ok(mut sup) = state.supervisor.lock() else {
