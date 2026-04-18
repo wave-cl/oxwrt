@@ -14,8 +14,8 @@ server4:
     - "%br-lan"
   plugins:
     - lease_time: 12h
-    - server_id: 192.168.1.1
-    - dns: 192.168.1.1
-    - router: 192.168.1.1
+    - server_id: 192.168.50.1
+    - dns: 192.168.50.1
+    - router: 192.168.50.1
     - netmask: 255.255.255.0
-    - range: /var/lib/coredhcp/leases.txt 192.168.1.100 192.168.1.250 12h
+    - range: /var/lib/coredhcp/leases.txt 192.168.50.100 192.168.50.250 12h

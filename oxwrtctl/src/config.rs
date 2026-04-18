@@ -643,7 +643,7 @@ name = "lan"
 type = "lan"
 bridge = "br-lan"
 members = ["eth1"]
-address = "192.168.1.1"
+address = "192.168.50.1"
 prefix = 24
 
 [control]
@@ -783,12 +783,18 @@ dnat_target = "10.53.0.2:15353"
                 );
             }
         }
-        // Also verify addresses point at 192.168.1.x (not the stale
-        // 192.168.8.x GL.iNet default the repo shipped with for a while).
+        // Also verify addresses point at the configured LAN subnet.
+        // 192.168.50.x is the current LAN (changed from 192.168.1.x
+        // after a subnet collision with upstream; 192.168.8.x was the
+        // original GL.iNet shipped default we no longer use).
         assert!(
             !text.contains("192.168.8."),
-            "coredhcp.yml references 192.168.8.x — stale GL.iNet default; \
-             our LAN is 192.168.1.x per config/oxwrt.toml"
+            "coredhcp.yml references 192.168.8.x — stale GL.iNet default"
+        );
+        assert!(
+            text.contains("192.168.50."),
+            "coredhcp.yml doesn't reference 192.168.50.x — out of sync with \
+             config/oxwrt.toml LAN definition"
         );
     }
 
