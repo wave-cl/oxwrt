@@ -104,6 +104,16 @@ pub fn run() -> Result<(), Error> {
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
     let cfg = Config::load(&config_path)?;
 
+    // Sanity-truncate coredhcp's persisted lease file if any lease falls
+    // outside the configured LAN subnet. This protects against the LAN
+    // being renumbered (e.g. 192.168.1.0/24 → 192.168.50.0/24 to fix a
+    // double-NAT collision): the range plugin fails fatally with
+    // "allocator did not re-allocate requested leased ip X" when it
+    // reads a pre-existing lease outside its pool. Losing DHCP lease
+    // persistence on a subnet change is an acceptable trade — clients
+    // re-DISCOVER within seconds.
+    truncate_stale_dhcp_leases(&cfg);
+
     // Generate per-phy hostapd.conf files at /etc/oxwrt/hostapd/ from
     // the [[radios]] + [[wifi]] config. Bind-mount sources for the
     // hostapd-5g / hostapd-2g services point here (writable overlay
@@ -1461,6 +1471,59 @@ fn overlay_is_attached() -> Result<bool, Error> {
 /// `iw` binary (staged into /usr/bin by the imagebuilder) because
 /// rolling our own nl80211 client is a lot of code for one ioctl
 /// equivalent. Fully idempotent — existing interfaces are left alone.
+/// Wipe /etc/oxwrt/coredhcp/leases.txt on LAN subnet change.
+///
+/// coredhcp's range plugin persists leases as a **SQLite database**
+/// (despite the `.txt` extension) and refuses to start — fatal error —
+/// if any persisted lease falls outside the currently-configured pool.
+/// Renumbering the LAN (e.g. 192.168.1.0/24 → 192.168.50.0/24) bricks
+/// DHCPv4 forever without intervention.
+///
+/// Reliable strategy: keep a plaintext marker file at
+/// /etc/oxwrt/coredhcp/.lan recording the last-booted LAN subnet in
+/// canonical form (`A.B.C.D/NN`). On every boot, compare to the
+/// configured LAN. If they differ, wipe the SQLite DB and refresh the
+/// marker. Losing DHCP lease persistence on a subnet change is an
+/// acceptable trade — clients re-DISCOVER within seconds.
+///
+/// Byte-scanning the SQLite file directly is unreliable because the
+/// engine may store string values in non-contiguous pages or in
+/// overflow chains, so literal IP bytes don't always appear in-file.
+fn truncate_stale_dhcp_leases(cfg: &Config) {
+    use crate::config::Network;
+
+    let Some(Network::Lan { address, prefix, .. }) = cfg.lan() else {
+        return;
+    };
+    let cur = format!("{address}/{prefix}");
+    let marker_path = "/etc/oxwrt/coredhcp/.lan";
+    let prev = std::fs::read_to_string(marker_path)
+        .ok()
+        .map(|s| s.trim().to_string());
+    if prev.as_deref() == Some(cur.as_str()) {
+        return; // no change since last boot
+    }
+    tracing::warn!(
+        prev = ?prev,
+        current = %cur,
+        "LAN subnet changed since last boot; wiping coredhcp lease database"
+    );
+    let lease_path = "/etc/oxwrt/coredhcp/leases.txt";
+    // Truncate to 0 bytes rather than removing. The file must exist
+    // because it's a bind-mount source for the dhcp container; removing
+    // it makes container spawn fail with ENOENT and the service can
+    // never start. SQLite with OPEN_CREATE on a 0-byte file initializes
+    // a fresh database on first write, which is exactly what we want.
+    if let Err(e) = std::fs::write(lease_path, b"") {
+        tracing::warn!(error = %e, "failed to truncate stale leases file");
+    }
+    // Also update the marker so next boot is a no-op.
+    if let Some(parent) = std::path::Path::new(marker_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(marker_path, &cur);
+}
+
 fn create_wifi_ap_interfaces() {
     let iw_path = std::path::Path::new("/usr/bin/iw");
     if !iw_path.exists() {

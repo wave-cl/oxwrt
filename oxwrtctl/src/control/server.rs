@@ -860,6 +860,32 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
                 },
             }
         }
+        "nft" => {
+            // Dump the live nftables ruleset from the host netns. Uses
+            // /usr/sbin/nft (shipped by the `nftables` package in the
+            // base image), runs in-process from pid-1 context — no
+            // container / namespace dance needed, it's just looking at
+            // the same kernel state oxwrtctl installed.
+            use std::process::Command;
+            let out = Command::new("/usr/sbin/nft")
+                .args(["list", "ruleset"])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => Response::Value {
+                    value: String::from_utf8_lossy(&o.stdout).into_owned(),
+                },
+                Ok(o) => Response::Err {
+                    message: format!(
+                        "diag nft: exit {:?}: {}",
+                        o.status.code(),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                },
+                Err(e) => Response::Err {
+                    message: format!("diag nft: spawn: {e}"),
+                },
+            }
+        }
         "dmesg" => {
             // Read the kernel ring buffer via klogctl(SYSLOG_ACTION_READ_ALL).
             // Needs CAP_SYSLOG (we have it as pid 1). A 256KB buffer fits
@@ -886,7 +912,7 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, ping, traceroute, dig)"
+                 modules, dmesg, nft, ping, traceroute, dig)"
             ),
         },
     }
