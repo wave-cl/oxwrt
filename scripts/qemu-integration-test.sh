@@ -176,7 +176,11 @@ TOML
 # ext4 loopback mount + overlay injection (same offset trick as
 # qemu-openwrt-boot.sh — Docker Desktop's partition scanner is flaky).
 OFFSET=$((262656 * 512))
-docker run --rm --privileged --platform linux/arm64 \
+# Native-platform alpine is fine — this container only does file-copy
+# + ext4 mount/umount, no aarch64 execution. Forcing linux/arm64 here
+# would require qemu-user-static on x86_64 runners (CI breaks with
+# "exec format error" without it).
+docker run --rm --privileged \
     -v "$BUILD_DIR:/work" -v "$PROJ_ROOT:/repo:ro" \
     alpine:latest sh -ec "
 apk add --no-cache e2fsprogs util-linux >/dev/null
