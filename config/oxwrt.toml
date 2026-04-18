@@ -212,6 +212,32 @@ src = "lan"
 proto = "icmp"
 action = "accept"
 
+# ---------------- Dynamic DNS ----------------
+#
+# Push the current WAN IP to third-party DDNS providers on lease
+# change. Each entry is one (provider, domain, credential) triple;
+# the updater polls every 5 minutes and only fires when the IP
+# actually changed. Zero entries → feature off.
+#
+# Providers supported today: duckdns, cloudflare.
+#
+# Example (commented — fill in + uncomment to enable):
+#
+# [[ddns]]
+# provider = "duckdns"
+# name = "home"
+# domain = "myrouter"              # myrouter.duckdns.org
+# token = "REDACTED-TOKEN"
+#
+# [[ddns]]
+# provider = "cloudflare"
+# name = "cf-home"
+# zone_id = "ZZZZZ"
+# record_id = "RRRRR"
+# domain = "vpn.example.com"       # FQDN of the A record
+# api_token = "REDACTED-TOKEN"
+# ttl = 60
+
 # ---------------- Port Forwards ----------------
 #
 # External WAN port → internal LAN host:port. Each entry expands at

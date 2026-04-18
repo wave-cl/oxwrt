@@ -317,6 +317,9 @@ mod tests {
                     security: Default::default(),
                 },
             ],
+            port_forwards: vec![],
+            wireguard: vec![],
+            ddns: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),

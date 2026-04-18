@@ -56,6 +56,17 @@ sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
+# HTTP client for the DDNS updater. rustls-tls shares the already-
+# pulled-in rustls+ring stack from quinn (no openssl libcrypto drag-
+# in). Default features are off to avoid bundling everything; we
+# only need json + https + charset. Blocking feature isn't used —
+# we run in the existing tokio runtime.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "http2",
+    "charset",
+    "json",
+] }
 
 [profile.release]
 opt-level = "z"

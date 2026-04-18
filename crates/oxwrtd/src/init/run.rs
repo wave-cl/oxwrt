@@ -540,7 +540,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         supervisor,
         logd.clone(),
         firewall_dump,
-        wan_lease,
+        wan_lease.clone(),
     );
 
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);
@@ -557,6 +557,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             }
         })
     };
+
+    // DDNS updater. Polls the shared WAN lease and pushes the
+    // current IP to every configured [[ddns]] provider when it
+    // changes. No-op if the list is empty. Safe to start this
+    // before the first DHCP lease lands — the task internally
+    // skips ticks where the lease is still None.
+    crate::ddns::spawn(cfg.ddns.clone(), wan_lease.clone());
 
     // AP-state watcher. Fires a warn-log if any expected AP iface
     // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s

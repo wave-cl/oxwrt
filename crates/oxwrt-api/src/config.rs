@@ -55,6 +55,14 @@ pub struct Config {
     /// on first boot and persisted at the path named by `key_path`.
     #[serde(default)]
     pub wireguard: Vec<Wireguard>,
+    /// Dynamic-DNS updaters. Each entry watches the current WAN IP
+    /// (from the DHCP lease) and pushes to a third-party provider's
+    /// update API when the address changes — closes the loop on
+    /// port-forwards + wg-enroll endpoints that reference a stable
+    /// hostname pointing to a dynamic WAN address. Zero entries =
+    /// feature off.
+    #[serde(default)]
+    pub ddns: Vec<Ddns>,
     pub control: Control,
 }
 
@@ -656,6 +664,59 @@ fn default_bind_readonly() -> bool {
 pub struct Control {
     pub listen: Vec<String>,
     pub authorized_keys: PathBuf,
+}
+
+/// A dynamic-DNS entry. One entry → one (provider, domain, credential)
+/// triple. The `provider` tag selects which update URL + auth scheme
+/// the runtime uses; other fields are provider-specific (see each
+/// variant's doc).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum Ddns {
+    /// DuckDNS — a free subdomain-on-duckdns.org provider. Update
+    /// API is a single GET: https://www.duckdns.org/update?domains=
+    /// {domain}&token={token}&ip={ip}
+    Duckdns {
+        /// Unique tag for CRUD + logs (not used in the request).
+        name: String,
+        /// Bare subdomain — "myrouter" for myrouter.duckdns.org.
+        /// Multiple comma-separated subdomains are allowed by the
+        /// provider; we pass the string through verbatim.
+        domain: String,
+        /// DuckDNS account token (UUID-style string).
+        token: String,
+    },
+    /// Cloudflare — PUT /zones/{zone_id}/dns_records/{record_id} with
+    /// Bearer token auth. The operator is expected to have created
+    /// the A record once via the dashboard (or API); we only rotate
+    /// its `content` as the WAN IP changes.
+    Cloudflare {
+        name: String,
+        zone_id: String,
+        record_id: String,
+        /// FQDN of the A record — used verbatim as the PUT body's
+        /// `name` field. Cloudflare requires this even on the
+        /// record-specific PUT route to protect against typos.
+        domain: String,
+        /// API token with Zone.DNS:Edit scope for `zone_id`.
+        api_token: String,
+        /// TTL in seconds. 60 is Cloudflare's minimum on most plans.
+        #[serde(default = "default_cf_ttl")]
+        ttl: u32,
+    },
+}
+
+fn default_cf_ttl() -> u32 {
+    60
+}
+
+impl Ddns {
+    /// Name tag — used in logs + CRUD. All variants carry it.
+    pub fn name(&self) -> &str {
+        match self {
+            Ddns::Duckdns { name, .. } | Ddns::Cloudflare { name, .. } => name,
+        }
+    }
 }
 
 impl Wireguard {

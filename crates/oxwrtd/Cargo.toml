@@ -40,6 +40,10 @@ rand_core.workspace = true
 quinn.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# DDNS module — HTTP client for third-party update APIs. See
+# src/ddns.rs for provider list + rationale. rustls-native-roots
+# avoids bundling a webpki-roots.rs into firmware.
+reqwest.workspace = true
 flate2.workspace = true
 tar.workspace = true
 

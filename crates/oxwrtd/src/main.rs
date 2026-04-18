@@ -9,6 +9,8 @@ pub use oxwrt_linux::{container, logd, net, sysupgrade, wan_dhcp, wifi, wireguar
 mod control;
 
 #[cfg(target_os = "linux")]
+mod ddns;
+#[cfg(target_os = "linux")]
 mod init;
 
 use std::process::ExitCode;
