@@ -410,6 +410,19 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         }
     }
 
+    // WireGuard bring-up (if any [[wireguard]] entries): creates
+    // wg0, writes /etc/oxwrt/wg0.key if missing, applies the peer
+    // list via `wg setconf`, brings the link up. Runs after
+    // `net.bring_up` so addresses from matching `[[networks]]
+    // type="simple"` entries are already assigned before wg starts
+    // routing. Kmod-wireguard + wireguard-tools packages must be
+    // in the image — without them the `ip link add type wireguard`
+    // or `wg` invocations fail at runtime and the error is logged
+    // (non-fatal: the rest of the router stays up).
+    if let Err(e) = crate::wireguard::setup_wireguard(&cfg) {
+        tracing::error!(error = %e, "wireguard setup failed; tunnels disabled");
+    }
+
     let wan_lease: control::SharedLease =
         std::sync::Arc::new(std::sync::RwLock::new(None));
 

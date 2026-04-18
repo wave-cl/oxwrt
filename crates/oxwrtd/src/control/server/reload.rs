@@ -110,6 +110,18 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
     }
     let new_firewall_dump = crate::net::format_firewall_dump(&new_cfg);
 
+    // Phase 3a: re-apply wireguard config. Picks up new/removed
+    // [[wireguard]] entries and peer-list updates made via CRUD
+    // since the last install — without this, `oxctl wg-peer add …`
+    // + `reload` would persist the peer in oxwrt.toml but never
+    // push it to the running wg iface, so the tunnel stays silently
+    // broken until the next reboot.
+    if let Err(e) = crate::wireguard::setup_wireguard(&new_cfg) {
+        tracing::error!(error = %e, "reload: wireguard reapply failed");
+        // Non-fatal: the rest of the reload continues so a bad wg
+        // config doesn't knock the router offline.
+    }
+
     // Phase 3b: regenerate per-phy hostapd.conf files at
     // /etc/oxwrt/hostapd/. Must run BEFORE phase 4 (supervisor rebuild)
     // so when the new hostapd-5g / hostapd-2g services come up they

@@ -171,6 +171,16 @@ action = "accept"
 [control]
 listen = ["0.0.0.0:51820"]
 authorized_keys = "/etc/oxwrt/authorized_keys"
+
+# WireGuard: declared here so wg-peer CRUD has somewhere to attach.
+# The iface bring-up fails inside armsr/armv8 (stock image lacks
+# kmod-wireguard); the oxwrtd code logs the error and continues,
+# which is the desired degraded-mode behavior. CRUD still works
+# because it only touches the Config, not the kernel.
+[[wireguard]]
+name = "wg0"
+listen_port = 51820
+key_path = "/etc/oxwrt/wg0.key"
 TOML
 
 # ext4 loopback mount + overlay injection (same offset trick as
@@ -299,6 +309,22 @@ echo "-- radio CRUD --"
 # Radio must exist before wifi references it — do radio first.
 R=$(run_cmd radio add '{"phy":"phy0","band":"2g","channel":6}'); check_ok "radio add" "$R"
 R=$(run_cmd radio list); check "radio list (has phy0)" "phy0" "$R"
+
+echo "-- wg-peer CRUD --"
+# Valid pubkey is 44-char base64 ending with '='. Use a fixed test
+# key; its private half is never exercised (no actual handshake in CI).
+R=$(run_cmd wg-peer list); check "wg-peer list (empty)" "[]" "$R"
+R=$(run_cmd wg-peer add '{"name":"alice","pubkey":"aXlSNXL0yz8P6Fkb6Xa9W3Fkq7cLKgqx7qVqEHS9f00=","allowed_ips":"10.8.0.2/32"}')
+check_ok "wg-peer add alice" "$R"
+R=$(run_cmd wg-peer get alice); check "wg-peer get" "10.8.0.2/32" "$R"
+R=$(run_cmd wg-peer list); check "wg-peer list (has alice)" "alice" "$R"
+# Reject malformed pubkey.
+R=$(run_cmd wg-peer add '{"name":"bad","pubkey":"too-short","allowed_ips":"10.8.0.3/32"}')
+check_err "wg-peer add bad pubkey" "44-char base64" "$R"
+# Reject bad CIDR.
+R=$(run_cmd wg-peer add '{"name":"bad2","pubkey":"bbbbbFkq7cLKgqx7qVqEHS9f00NL0yz8P6Fkb6Xa9W3=","allowed_ips":"notacidr"}')
+check_err "wg-peer add bad cidr" "missing /prefix" "$R"
+R=$(run_cmd wg-peer remove alice); check_ok "wg-peer remove" "$R"
 
 echo "-- port-forward CRUD --"
 # Expand minimal test config to include a LAN for auto-detect, via an

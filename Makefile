@@ -269,6 +269,8 @@ IMAGEBUILDER_PROFILE ?= glinet_gl-mt6000
 IMAGEBUILDER_PACKAGES := \
 	kmod-veth \
 	kmod-nft-nat \
+	kmod-wireguard \
+	wireguard-tools \
 	nftables \
 	-netifd \
 	-uci \

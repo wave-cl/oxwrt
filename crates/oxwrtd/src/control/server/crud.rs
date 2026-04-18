@@ -747,3 +747,181 @@ pub(super) fn handle_crud_port_forward(
         }
     }
 }
+
+pub(super) fn handle_crud_wg_peer(
+    state: &ControlState,
+    action: &CrudAction,
+) -> Response {
+    use crate::config::WireguardPeer;
+    let cfg = state.config_snapshot();
+    // MVP: one wg iface supported. The index 0 convention keeps the
+    // JSON payloads flat — peer CRUD without a `parent_iface` field —
+    // while leaving room for a future multi-iface `wg-peer@wg1` syntax
+    // if/when a second tunnel becomes a real requirement.
+    if cfg.wireguard.is_empty() {
+        return Response::Err {
+            message: "wg-peer: no [[wireguard]] iface declared in config \
+                      (add one before managing peers)"
+                .to_string(),
+        };
+    }
+    match action {
+        CrudAction::List => match serde_json::to_string_pretty(&cfg.wireguard[0].peers) {
+            Ok(json) => Response::Value { value: json },
+            Err(e) => Response::Err {
+                message: format!("serialize: {e}"),
+            },
+        },
+        CrudAction::Get { name } => {
+            match cfg.wireguard[0].peers.iter().find(|p| p.name == *name) {
+                Some(peer) => match serde_json::to_string_pretty(peer) {
+                    Ok(json) => Response::Value { value: json },
+                    Err(e) => Response::Err {
+                        message: format!("serialize: {e}"),
+                    },
+                },
+                None => Response::Err {
+                    message: format!("wg-peer not found: {name}"),
+                },
+            }
+        }
+        CrudAction::Add { json } => {
+            let item: WireguardPeer = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            if cfg.wireguard[0].peers.iter().any(|p| p.name == item.name) {
+                return Response::Err {
+                    message: format!("wg-peer already exists: {}", item.name),
+                };
+            }
+            if let Err(e) = validate_wg_peer(&item) {
+                return Response::Err { message: e };
+            }
+            let mut new_cfg = (*cfg).clone();
+            let item_name = item.name.clone();
+            new_cfg.wireguard[0].peers.push(item);
+            persist_and_swap(state, new_cfg, &format!("added wg-peer {item_name}"))
+        }
+        CrudAction::Update { name, json } => {
+            let idx = match cfg.wireguard[0].peers.iter().position(|p| p.name == *name) {
+                Some(i) => i,
+                None => {
+                    return Response::Err {
+                        message: format!("wg-peer not found: {name}"),
+                    };
+                }
+            };
+            let mut existing = match serde_json::to_value(&cfg.wireguard[0].peers[idx]) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("serialize existing: {e}"),
+                    };
+                }
+            };
+            let partial: serde_json::Value = match serde_json::from_str(json) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("invalid JSON: {e}"),
+                    };
+                }
+            };
+            json_merge(&mut existing, &partial);
+            let updated: WireguardPeer = match serde_json::from_value(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::Err {
+                        message: format!("merged value invalid: {e}"),
+                    };
+                }
+            };
+            if let Err(e) = validate_wg_peer(&updated) {
+                return Response::Err { message: e };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.wireguard[0].peers[idx] = updated;
+            persist_and_swap(state, new_cfg, &format!("updated wg-peer {name}"))
+        }
+        CrudAction::Remove { name } => {
+            if !cfg.wireguard[0].peers.iter().any(|p| p.name == *name) {
+                return Response::Err {
+                    message: format!("wg-peer not found: {name}"),
+                };
+            }
+            let mut new_cfg = (*cfg).clone();
+            new_cfg.wireguard[0].peers.retain(|p| p.name != *name);
+            persist_and_swap(state, new_cfg, &format!("removed wg-peer {name}"))
+        }
+    }
+}
+
+/// Validate the shape of a WireGuard peer before persisting. Cheap
+/// structural checks only — we don't round-trip through `wg` here
+/// (no system deps in this crate), we just ensure the pubkey looks
+/// like a 32-byte base64 value and allowed_ips parses as a CIDR
+/// list. Malformed-at-install is still caught at apply time, but
+/// rejecting early gives operators an immediate "your typo is
+/// here" instead of a silent dead peer.
+fn validate_wg_peer(p: &crate::config::WireguardPeer) -> Result<(), String> {
+    if p.name.is_empty() {
+        return Err("wg-peer: name must not be empty".into());
+    }
+    // Base64 of 32 bytes → 44 chars with one '=' padding.
+    if p.pubkey.len() != 44 || !p.pubkey.ends_with('=') {
+        return Err(format!(
+            "wg-peer {}: pubkey must be 44-char base64 ending in '='",
+            p.name
+        ));
+    }
+    if let Some(psk) = &p.preshared_key {
+        if psk.len() != 44 || !psk.ends_with('=') {
+            return Err(format!(
+                "wg-peer {}: preshared_key must be 44-char base64",
+                p.name
+            ));
+        }
+    }
+    // allowed_ips: comma-separated CIDRs, each parseable.
+    if p.allowed_ips.trim().is_empty() {
+        return Err(format!(
+            "wg-peer {}: allowed_ips must not be empty",
+            p.name
+        ));
+    }
+    for cidr in p.allowed_ips.split(',').map(str::trim) {
+        let Some((addr, prefix)) = cidr.split_once('/') else {
+            return Err(format!(
+                "wg-peer {}: allowed_ips entry {:?} missing /prefix",
+                p.name, cidr
+            ));
+        };
+        // Accept both v4 and v6 numerically; we don't enforce which.
+        let ip_ok = addr.parse::<std::net::Ipv4Addr>().is_ok()
+            || addr.parse::<std::net::Ipv6Addr>().is_ok();
+        if !ip_ok {
+            return Err(format!(
+                "wg-peer {}: allowed_ips entry {:?} has invalid address",
+                p.name, cidr
+            ));
+        }
+        let prefix: u8 = prefix.parse().map_err(|_| {
+            format!(
+                "wg-peer {}: allowed_ips entry {:?} has invalid prefix",
+                p.name, cidr
+            )
+        })?;
+        if prefix > 128 {
+            return Err(format!(
+                "wg-peer {}: allowed_ips prefix {} out of range",
+                p.name, prefix
+            ));
+        }
+    }
+    Ok(())
+}

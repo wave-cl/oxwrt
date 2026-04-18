@@ -47,6 +47,14 @@ pub struct Config {
     /// by default (no ports exposed).
     #[serde(default, rename = "port_forwards")]
     pub port_forwards: Vec<PortForward>,
+    /// WireGuard roadwarrior server(s). Each entry is one wg iface
+    /// (e.g. wg0) with a list of allowed client peers. Peers are
+    /// CRUD-managed at runtime via `oxctl wg-peer …`, so this is
+    /// often a small stub in the on-disk config that grows as
+    /// clients are provisioned. Server keypair is auto-generated
+    /// on first boot and persisted at the path named by `key_path`.
+    #[serde(default)]
+    pub wireguard: Vec<Wireguard>,
     pub control: Control,
 }
 
@@ -194,6 +202,73 @@ pub struct PortForward {
 
 fn default_wan_src() -> String {
     "wan".to_string()
+}
+
+/// A WireGuard server interface declaration. One entry → one wg iface
+/// (typically "wg0") hosting multiple peers. The iface is brought up
+/// by the netdev init step using the `wg` userspace tool; firewall
+/// policy lives in `[[firewall.zones]]` keyed on the iface name
+/// (declare a matching `[[networks]] type=simple iface=wg0` to expose
+/// the wg0 address to routes + zone enumeration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wireguard {
+    /// Unique name for CRUD + config references; also the kernel
+    /// iface name unless `iface` is set explicitly.
+    pub name: String,
+    /// Kernel iface name (e.g. "wg0"). Defaults to `name`.
+    #[serde(default)]
+    pub iface: Option<String>,
+    /// UDP port to bind on. Inbound traffic on the WAN iface to this
+    /// port must be accepted by `[[firewall.rules]]` for the tunnel
+    /// to establish — no magic hole-punch here.
+    pub listen_port: u16,
+    /// Path to the server's 32-byte Curve25519 private key (base64
+    /// or raw 32 bytes — the installer accepts both, writing back
+    /// in whichever was found). Auto-generated on first boot if
+    /// missing, assuming the parent dir exists and is writable.
+    #[serde(default = "default_wg_key_path")]
+    pub key_path: String,
+    /// Known peers. Add/remove via `oxctl wg-peer` RPC; this list is
+    /// the canonical source of truth (persisted in oxwrt.toml).
+    #[serde(default)]
+    pub peers: Vec<WireguardPeer>,
+}
+
+fn default_wg_key_path() -> String {
+    "/etc/oxwrt/wg0.key".to_string()
+}
+
+/// A single WireGuard peer (client). Keyed by `name` for CRUD; the
+/// pubkey is the cryptographic identity. `allowed_ips` is a comma-
+/// separated list of CIDRs that source-route through the tunnel
+/// (conventionally a single /32 per client for roadwarrior setups).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireguardPeer {
+    pub name: String,
+    /// Base64-encoded Curve25519 public key (44 chars). Validated
+    /// at CRUD add-time via the wg tool's parser so a typo here
+    /// fails fast, not silently at install time.
+    pub pubkey: String,
+    /// CIDR list the peer is allowed to source from, comma-separated.
+    /// Example: "10.8.0.2/32" for a single-client roadwarrior, or
+    /// "10.8.0.0/24,192.168.100.0/24" for site-to-site.
+    pub allowed_ips: String,
+    /// Optional 32-byte preshared symmetric key (base64). Adds a
+    /// second layer of post-quantum-ish security — not required
+    /// for a working tunnel.
+    #[serde(default)]
+    pub preshared_key: Option<String>,
+    /// Optional endpoint for dialing this peer (site-to-site only).
+    /// Roadwarrior clients connect TO the server, so they leave
+    /// this empty — the server learns the client's address at
+    /// handshake time.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Keepalive interval in seconds. 25 is the canonical "NAT
+    /// keepalive" value (keeps NAT mappings alive through most
+    /// consumer routers). 0 / None = disabled.
+    #[serde(default)]
+    pub persistent_keepalive: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -583,6 +658,52 @@ pub struct Control {
     pub authorized_keys: PathBuf,
 }
 
+impl Wireguard {
+    /// Render this server + its peers into the text format consumed by
+    /// `wg setconf <iface>`. Does NOT include the PrivateKey line —
+    /// the caller wires that in from disk. Separating keeps this fn
+    /// pure + unit-testable without touching a real key on disk.
+    ///
+    /// The shape:
+    ///   [Interface]
+    ///   ListenPort = 51820
+    ///   PrivateKey = <filled by caller>
+    ///
+    ///   [Peer]
+    ///   PublicKey = ...
+    ///   AllowedIPs = 10.8.0.2/32
+    ///   (optional) PresharedKey / Endpoint / PersistentKeepalive
+    ///
+    /// Matches wg-quick(8)'s config format so an operator can also
+    /// feed the output directly into the upstream tool if they want.
+    pub fn render_config(&self, private_key_b64: &str) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        writeln!(s, "[Interface]").unwrap();
+        writeln!(s, "ListenPort = {}", self.listen_port).unwrap();
+        writeln!(s, "PrivateKey = {}", private_key_b64).unwrap();
+        for peer in &self.peers {
+            writeln!(s).unwrap();
+            writeln!(s, "[Peer]").unwrap();
+            writeln!(s, "# {}", peer.name).unwrap();
+            writeln!(s, "PublicKey = {}", peer.pubkey).unwrap();
+            writeln!(s, "AllowedIPs = {}", peer.allowed_ips).unwrap();
+            if let Some(psk) = &peer.preshared_key {
+                writeln!(s, "PresharedKey = {}", psk).unwrap();
+            }
+            if let Some(ep) = &peer.endpoint {
+                writeln!(s, "Endpoint = {}", ep).unwrap();
+            }
+            if let Some(ka) = peer.persistent_keepalive {
+                if ka > 0 {
+                    writeln!(s, "PersistentKeepalive = {}", ka).unwrap();
+                }
+            }
+        }
+        s
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let bytes = std::fs::read(path).map_err(|source| Error::Read {
@@ -739,6 +860,74 @@ dnat_target = "10.53.0.2:15353"
         let dnat = &cfg.firewall.rules[2];
         assert_eq!(dnat.action, super::Action::Dnat);
         assert_eq!(dnat.dnat_target.as_deref(), Some("10.53.0.2:15353"));
+    }
+
+    /// WireGuard section parses, peer list defaults, `iface` defaults
+    /// to name when absent, optional peer fields stay None.
+    #[test]
+    fn wireguard_section_roundtrip() {
+        let toml_text = r#"
+hostname = "r"
+
+[[networks]]
+name = "wan"
+type = "wan"
+iface = "eth0"
+mode = "dhcp"
+
+[[networks]]
+name = "wg"
+type = "simple"
+iface = "wg0"
+address = "10.8.0.1"
+prefix = 24
+
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/x"
+
+[[wireguard]]
+name = "wg0"
+listen_port = 51820
+
+[[wireguard.peers]]
+name = "alice"
+pubkey = "aXlSNXL0yz8P6Fkb6Xa9W3Fkq7cLKgqx7qVqEHS9f00="
+allowed_ips = "10.8.0.2/32"
+
+[[wireguard.peers]]
+name = "bob"
+pubkey = "bbbbbFkq7cLKgqx7qVqEHS9f00NL0yz8P6Fkb6Xa9W3="
+allowed_ips = "10.8.0.3/32"
+persistent_keepalive = 25
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.wireguard.len(), 1);
+        let wg = &cfg.wireguard[0];
+        assert_eq!(wg.name, "wg0");
+        assert!(wg.iface.is_none(), "iface defaults to None → use name");
+        assert_eq!(wg.listen_port, 51820);
+        assert_eq!(wg.key_path, "/etc/oxwrt/wg0.key", "default key_path");
+        assert_eq!(wg.peers.len(), 2);
+        assert_eq!(wg.peers[0].name, "alice");
+        assert!(wg.peers[0].preshared_key.is_none());
+        assert_eq!(wg.peers[1].persistent_keepalive, Some(25));
+
+        // render_config output has the expected shape.
+        let rendered = wg.render_config("SERVER_PRIVKEY_PLACEHOLDER");
+        assert!(rendered.starts_with("[Interface]\n"));
+        assert!(rendered.contains("ListenPort = 51820"));
+        assert!(rendered.contains("PrivateKey = SERVER_PRIVKEY_PLACEHOLDER"));
+        assert!(rendered.contains("# alice\n"));
+        assert!(rendered.contains("AllowedIPs = 10.8.0.2/32"));
+        assert!(rendered.contains("PersistentKeepalive = 25"));
+        // no persistent_keepalive on alice, no line
+        let alice_block = rendered.split("# alice").nth(1).unwrap();
+        let alice_block = alice_block.split("[Peer]").next().unwrap_or(alice_block);
+        assert!(
+            !alice_block.contains("PersistentKeepalive"),
+            "alice had no PersistentKeepalive, line must not appear"
+        );
     }
 
     /// Port-forward section parses, applies serde defaults (`src = "wan"`
