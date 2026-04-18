@@ -1451,6 +1451,20 @@ impl PreparedContainer {
             // (not /dev/pts/ptmx), so materialize the conventional symlink
             // inside the container's tmpfs /dev.
             let _ = rustix::fs::symlink(c"pts/ptmx", c"/dev/ptmx");
+            // Standard character-device nodes. Without these, any service
+            // that opens /dev/null, /dev/zero, /dev/urandom, /dev/random,
+            // /dev/tty fails with ENOENT — seen with hostapd ("Could not
+            // open /dev/urandom"), and dropbear would also hit it if it
+            // ever needed the RNG (dropbear reads /dev/urandom on some
+            // crypto paths). Major/minor numbers per Linux mem-major (1).
+            use rustix::fs::{FileType, Mode, mknodat, CWD};
+            let chr = FileType::CharacterDevice;
+            let _ = mknodat(CWD, c"/dev/null",    chr, Mode::from(0o666), rustix::fs::makedev(1, 3));
+            let _ = mknodat(CWD, c"/dev/zero",    chr, Mode::from(0o666), rustix::fs::makedev(1, 5));
+            let _ = mknodat(CWD, c"/dev/full",    chr, Mode::from(0o666), rustix::fs::makedev(1, 7));
+            let _ = mknodat(CWD, c"/dev/random",  chr, Mode::from(0o666), rustix::fs::makedev(1, 8));
+            let _ = mknodat(CWD, c"/dev/urandom", chr, Mode::from(0o666), rustix::fs::makedev(1, 9));
+            let _ = mknodat(CWD, c"/dev/tty",     chr, Mode::from(0o666), rustix::fs::makedev(5, 0));
         }
 
         unmount(self.put_old_after_pivot.as_c_str(), UnmountFlags::DETACH)

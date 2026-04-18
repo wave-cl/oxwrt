@@ -328,6 +328,43 @@ caps = [
 # seccomp = true        # default
 # landlock = true       # default
 
+# --- hostapd: wifi AP on the 5 GHz radio ---
+#
+# First-cut AP on phy1 (MT7976 5 GHz), SSID "oxwrt", WPA2-PSK, bridged
+# into br-lan so wired + wifi clients share the LAN DHCP/DNS/RA. The
+# config and PSK are baked into the image for bring-up; runtime
+# reconfig + per-radio [[wifi]] schema is future work.
+#
+# net_mode=host because hostapd needs nl80211 on the host netns, and
+# the created AP interface needs to end up in the host br-lan bridge.
+[[services]]
+name = "hostapd"
+rootfs = "/usr/lib/oxwrt/services/hostapd/rootfs"
+entrypoint = ["/sbin/hostapd", "/etc/hostapd-5g.conf"]
+net_mode = "host"
+memory_max = 67108864
+pids_max = 16
+depends_on = []
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/hostapd/hostapd-5g.conf"
+target = "/etc/hostapd-5g.conf"
+
+# hostapd writes its ctrl socket here; must be writable. tmpfs on
+# /var/run inside the container is fine (ephemeral).
+[[services.binds]]
+source = "/etc/oxwrt/hostapd-run"
+target = "/var/run/hostapd"
+readonly = false
+
+# hostapd needs NET_ADMIN (iface config), NET_RAW (EAPOL packets), and
+# SYS_MODULE is NOT needed — modules are loaded at init.
+[services.security]
+caps = [
+  "SETUID", "SETGID", "SETPCAP",
+  "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW",
+]
+
 # --- corerad: IPv6 Router Advertisement daemon ---
 #
 # Sends ICMPv6 RAs on br-lan so clients SLAAC from our ULA /64. Pairs

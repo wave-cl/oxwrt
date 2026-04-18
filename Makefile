@@ -77,9 +77,58 @@ rust-oxwrtctl:
 BUILD_SERVICES := build-services
 AR_AARCH64     ?= $(shell command -v /Users/c/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v /opt/homebrew/opt/binutils/bin/ar 2>/dev/null || command -v aarch64-linux-gnu-ar 2>/dev/null || echo ar)
 
-.PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh services-corerad
+.PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh services-corerad services-hostapd
 
-services-stage: services-dns services-ntp services-dhcp services-debug-ssh services-corerad
+services-stage: services-dns services-ntp services-dhcp services-debug-ssh services-corerad services-hostapd
+
+# ── hostapd (wifi AP daemon) ────────────────────────────────────────
+#
+# Alpine ships hostapd 2.10 with the nl80211 driver compiled in and a
+# standard libnl/libssl/libcrypto link chain. Pull it the same way we
+# pull dropbear: aarch64 docker → apk fetch → extract binary and its
+# .so deps. Keeps the "Rust-first, C via stable distro packages"
+# pattern: zero local C toolchain, reproducible across developer
+# machines.
+#
+# Output layout (build-services/hostapd/):
+#   sbin/hostapd
+#   lib/libnl-3.so.200
+#   lib/libnl-genl-3.so.200
+#   lib/libssl.so.3
+#   lib/libcrypto.so.3
+#   lib/ld-musl-aarch64.so.1   (shared with debug-ssh; keep local copy
+#                               so the service container doesn't depend
+#                               on anything outside its rootfs)
+#
+# We pull libnl-3.so.200 and libnl-genl-3.so.200 from the `libnl3`
+# package; libssl/libcrypto come in as transitive deps of hostapd.
+
+services-hostapd: $(BUILD_SERVICES)/hostapd/sbin/hostapd
+$(BUILD_SERVICES)/hostapd/sbin/hostapd:
+	mkdir -p $(BUILD_SERVICES)/hostapd/sbin $(BUILD_SERVICES)/hostapd/bin $(BUILD_SERVICES)/hostapd/lib
+	# Also pull `iw`: hostapd's nl80211 driver does NOT auto-create AP
+	# interfaces from the `phyN-ifaceN` naming convention anymore (that's
+	# an OpenWrt-netifd layer on top). We use `iw phy phy1 interface add
+	# phy1-ap0 type __ap` at service pre-start; the binary lives next to
+	# hostapd in the same rootfs.
+	docker run --rm --platform linux/arm64 \
+		-v $(CURDIR)/$(BUILD_SERVICES)/hostapd:/out \
+		alpine:3.20 sh -c '\
+		apk add --no-cache hostapd iw && \
+		cp /usr/sbin/hostapd /out/sbin/hostapd && \
+		cp /usr/sbin/iw /out/bin/iw && \
+		cp /lib/ld-musl-aarch64.so.1 /out/lib/ld-musl-aarch64.so.1 && \
+		for bin in /usr/sbin/hostapd /usr/sbin/iw; do \
+			for lib in $$(ldd $$bin 2>/dev/null | awk "/=>/{print \$$3}"); do \
+				case "$$lib" in \
+					/lib/ld-musl-*|/lib/libc.musl-*) ;; \
+					*) [ -f "$$lib" ] && cp -n "$$lib" /out/lib/ || true ;; \
+				esac; \
+			done; \
+		done'
+	@echo ""
+	@echo "Staged hostapd under $(BUILD_SERVICES)/hostapd/:"
+	@find $(BUILD_SERVICES)/hostapd -type f -ls
 
 # ── CoreRAD (IPv6 Router Advertisement daemon) ──────────────────────
 #
@@ -486,9 +535,42 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtctl
 	# Service binaries at the rootfs-root paths the oxwrt.toml
 	# entrypoints expect.
-	for svc in dns ntp dhcp corerad; do \
+	for svc in dns ntp dhcp corerad hostapd; do \
 		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc; \
 	done
+	# hostapd container: binary + .so deps from Alpine stage. Needs
+	# /sbin and /lib directories under its rootfs. Mirrors the debug-
+	# ssh pattern.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/sbin \
+	         $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/lib
+	cp $(BUILD_SERVICES)/hostapd/sbin/hostapd \
+	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/sbin/hostapd
+	cp $(BUILD_SERVICES)/hostapd/lib/ld-musl-aarch64.so.1 \
+	   $(BUILD_SERVICES)/hostapd/lib/libnl-3.so.200 \
+	   $(BUILD_SERVICES)/hostapd/lib/libnl-genl-3.so.200 \
+	   $(BUILD_SERVICES)/hostapd/lib/libssl.so.3 \
+	   $(BUILD_SERVICES)/hostapd/lib/libcrypto.so.3 \
+	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/lib/
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/sbin/hostapd
+	# hostapd's ctrl socket host-side dir (bind-mounted rw into the
+	# container). Pre-create so the first start doesn't fail on an
+	# mkdir inside a read-only rootfs.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt/hostapd-run
+	# Stage `iw` at a host path too. oxwrtctl init uses it to pre-
+	# create the AP-mode netdev on phy1 BEFORE hostapd spawns
+	# (hostapd's nl80211 driver doesn't auto-create from the
+	# "phyN-ifaceM" naming convention; OpenWrt's netifd did that).
+	# Same binary lives inside the hostapd rootfs above; it's
+	# <200 KB and sharing avoids a brittle cross-rootfs invoke.
+	install -d $(IMAGEBUILDER_DIR)/files/usr/bin
+	cp $(BUILD_SERVICES)/hostapd/bin/iw $(IMAGEBUILDER_DIR)/files/usr/bin/iw
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/iw
+	# iw's musl + libnl runtime libs go in /usr/lib so the host-side
+	# invocation doesn't depend on service rootfs layout.
+	install -d $(IMAGEBUILDER_DIR)/files/usr/lib
+	cp $(BUILD_SERVICES)/hostapd/lib/libnl-3.so.200 \
+	   $(BUILD_SERVICES)/hostapd/lib/libnl-genl-3.so.200 \
+	   $(IMAGEBUILDER_DIR)/files/usr/lib/
 	cp -L $(BUILD_SERVICES)/dns/hickory-dns \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dns/rootfs/hickory-dns
 	cp -L $(BUILD_SERVICES)/ntp/ntp-daemon \
@@ -510,6 +592,8 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/dhcp/coredhcp.yml
 	cp config/services/corerad/corerad.toml \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/corerad.toml
+	cp config/services/hostapd/hostapd-5g.conf \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/hostapd-5g.conf
 	# Writable lease-file dir on the host side.
 	#
 	# DO NOT stage under files/var/ — OpenWrt ships /var as a symlink
@@ -534,7 +618,7 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/coredhcp/leases.txt
 	# Minimal passwd/group inside service rootfs (see per-package
 	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
-	for svc in dns ntp dhcp corerad; do \
+	for svc in dns ntp dhcp corerad hostapd; do \
 		printf 'root:x:0:0:root:/:/bin/false\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
 			> $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc/passwd; \
 		printf 'root:x:0:\nnobody:x:65534:\n' \

@@ -80,6 +80,16 @@ pub fn run() -> Result<(), Error> {
     // happened upstream and our walk is all no-ops.
     rename_netdevs_from_dts();
 
+    // Wifi AP interfaces. Once the mt76 driver has registered phy0/phy1,
+    // we need AP-mode netdevs on them before hostapd can start (hostapd
+    // with driver=nl80211 does not auto-create from the `phyN-` prefix
+    // convention — OpenWrt's netifd did that on top). Idempotent: `iw
+    // interface add` returns EEXIST if the iface is already there, which
+    // we log and ignore. Skipped silently when iw isn't shipped (image
+    // without wifi) or when the phys aren't registered (driver not
+    // loaded / no hardware).
+    create_wifi_ap_interfaces();
+
     if let Err(e) = mount_root_if_needed() {
         // Non-fatal: if we fail to set up the overlay here AND
         // procd-init didn't set it up either, /etc is read-only
@@ -1432,6 +1442,58 @@ fn overlay_is_attached() -> Result<bool, Error> {
 /// Stage 1 of the procd-init takeover; safe under current (coexist)
 /// configuration where procd-init loads modules before us —
 /// every finit_module returns EEXIST.
+/// Create AP-mode netdevs on every available wifi phy. Names follow
+/// OpenWrt's convention: `phy<N>-ap0` on `phy<N>`. Uses the bundled
+/// `iw` binary (staged into /usr/bin by the imagebuilder) because
+/// rolling our own nl80211 client is a lot of code for one ioctl
+/// equivalent. Fully idempotent — existing interfaces are left alone.
+fn create_wifi_ap_interfaces() {
+    let iw_path = std::path::Path::new("/usr/bin/iw");
+    if !iw_path.exists() {
+        tracing::debug!("iw not present, skipping wifi AP interface creation");
+        return;
+    }
+    let phys_dir = std::path::Path::new("/sys/class/ieee80211");
+    let rd = match std::fs::read_dir(phys_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("no /sys/class/ieee80211 (wifi driver not loaded); skipping");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to enumerate wifi phys");
+            return;
+        }
+    };
+    for ent in rd.flatten() {
+        let Some(phy) = ent.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let ifname = format!("{phy}-ap0");
+        // If the iface already exists, skip — `iw` returns EEXIST via
+        // exit code, but checking /sys avoids the process spawn.
+        if std::path::Path::new(&format!("/sys/class/net/{ifname}")).exists() {
+            tracing::info!(phy, ifname, "wifi AP iface already exists");
+            continue;
+        }
+        let status = std::process::Command::new(iw_path)
+            .args(["phy", &phy, "interface", "add", &ifname, "type", "__ap"])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                tracing::info!(phy, ifname, "created wifi AP interface");
+            }
+            Ok(s) => {
+                tracing::warn!(phy, ifname, exit = ?s.code(),
+                    "iw interface add failed (phy may not support AP mode)");
+            }
+            Err(e) => {
+                tracing::warn!(phy, ifname, error = %e, "failed to spawn iw");
+            }
+        }
+    }
+}
+
 fn load_modules() {
     // Resolve the running kernel release once — matches `uname -r`.
     let kernel_release = match rustix::system::uname()
