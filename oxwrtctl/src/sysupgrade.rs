@@ -155,18 +155,28 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
 
 // ── fwtool trailer parsing ─────────────────────────────────────────
 
-/// fwtool appends a 12-byte little-endian footer plus a variable-length
-/// JSON metadata block to the end of the tar.gz stream:
+/// fwtool appends a 16-byte **big-endian** footer, preceded by a
+/// variable-length metadata block. The layout observed on real
+/// OpenWrt 25.12 mediatek/filogic sysupgrade.bin:
 ///
 ///     ... tar.gz bytes ...
-///     [ metadata JSON (N bytes) ]
-///     [ crc32: 4 bytes LE ] [ length-of-json: 4 bytes LE ] [ magic: "FWx0" 4 bytes ]
+///     [ metadata (size - 16 bytes) ]         # includes 8-byte pad + JSON
+///     [ magic "FWx0"                4 bytes ]
+///     [ crc32 (BE)                  4 bytes ]
+///     [ type (BE, =1 "metadata")    4 bytes ]
+///     [ size (BE, total trailer)    4 bytes ]
 ///
-/// We extract the length, seek back, read the JSON, and deserialize.
-/// The CRC check is omitted — if it matters to us it'll fail JSON
-/// parse anyway; stock sysupgrade's fwtool only uses the CRC to
-/// detect truncation during `wget`, which doesn't apply here (we
-/// already have the full file via FwUpdate SHA-256 check).
+/// `size` is the length of the ENTIRE trailer including the 16-byte
+/// fixed header — so the metadata bytes run from (EOF - size) through
+/// (EOF - 16). An earlier version of this code assumed little-endian
+/// and a 12-byte footer; that guess was wrong and the native
+/// self-update path silently rejected every valid image with
+/// `magic not found (got [0, 0, 1, 0x40])` — those four bytes are
+/// the BE size field we should have been reading first.
+///
+/// CRC is not verified here — the sQUIC FwUpdate RPC already checks
+/// a SHA-256 of the whole stream before writing FW_STAGING_PATH, so
+/// a torn stream can't reach this code path.
 #[derive(Debug)]
 struct FwtoolMeta {
     supported_devices: Vec<String>,
@@ -205,34 +215,52 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
         .metadata()
         .map_err(io("stat image"))?
         .len();
-    if total < 12 {
-        return Err(Error::Fwtool("image too small to have fwtool trailer".into()));
+    if total < 16 {
+        return Err(Error::Fwtool(
+            "image too small to have 16-byte fwtool trailer".into(),
+        ));
     }
 
-    f.seek(SeekFrom::Start(total - 12)).map_err(io("seek trailer"))?;
-    let mut footer = [0u8; 12];
+    // Fixed 16-byte trailer: magic (4) + crc (4) + type (4) + size (4).
+    f.seek(SeekFrom::Start(total - 16)).map_err(io("seek trailer"))?;
+    let mut footer = [0u8; 16];
     f.read_exact(&mut footer).map_err(io("read trailer"))?;
 
-    let magic = &footer[8..12];
+    let magic = &footer[0..4];
     if magic != b"FWx0" {
         return Err(Error::Fwtool(format!(
             "fwtool magic not found (got {magic:?}); image not fwtool-wrapped"
         )));
     }
-    let meta_len = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]) as u64;
-    if meta_len == 0 || meta_len > 65536 {
+
+    // size is big-endian and covers the *entire* trailer from the
+    // metadata-block start through the 16 trailer bytes.
+    let total_trailer_size = u32::from_be_bytes([footer[12], footer[13], footer[14], footer[15]])
+        as u64;
+    if total_trailer_size < 16 || total_trailer_size > 65_536 {
         return Err(Error::Fwtool(format!(
-            "fwtool metadata length implausible: {meta_len} bytes"
+            "fwtool trailer size implausible: {total_trailer_size} bytes"
         )));
     }
 
     let tar_len = total
-        .checked_sub(12 + meta_len)
-        .ok_or_else(|| Error::Fwtool("fwtool metadata overruns image".into()))?;
+        .checked_sub(total_trailer_size)
+        .ok_or_else(|| Error::Fwtool("fwtool trailer overruns image".into()))?;
 
+    // Metadata block is (size - 16) bytes starting at tar_len.
+    let meta_len = (total_trailer_size - 16) as usize;
     f.seek(SeekFrom::Start(tar_len)).map_err(io("seek meta"))?;
-    let mut meta_bytes = vec![0u8; meta_len as usize];
+    let mut meta_bytes = vec![0u8; meta_len];
     f.read_exact(&mut meta_bytes).map_err(io("read meta"))?;
+
+    // Metadata is JSON, but OpenWrt's fwtool prepends an 8-byte
+    // zero-padding header (possibly a sub-type field). Find the first
+    // '{' and parse from there.
+    let json_start = meta_bytes
+        .iter()
+        .position(|&b| b == b'{')
+        .ok_or_else(|| Error::Fwtool("fwtool metadata: no JSON opening '{' found".into()))?;
+    let json_bytes = &meta_bytes[json_start..];
 
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -240,7 +268,7 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
         #[serde(default)]
         compat_version: String,
     }
-    let raw: Raw = serde_json::from_slice(&meta_bytes)
+    let raw: Raw = serde_json::from_slice(json_bytes)
         .map_err(|e| Error::Fwtool(format!("metadata json: {e}")))?;
     Ok((
         tar_len,
@@ -644,17 +672,26 @@ mod tests {
     use std::io::Write as _;
 
     /// Build a synthetic sysupgrade.bin with a minimal fwtool trailer
-    /// around a given payload. Not a valid tar — only parse_fwtool_trailer
-    /// is exercised here.
+    /// (big-endian, matching real OpenWrt fwtool output). Not a valid
+    /// tar — only parse_fwtool_trailer is exercised here.
+    ///
+    /// Layout: payload || 8-byte pad || JSON || "FWx0" || crc(BE) ||
+    ///         type(BE=1) || size(BE)
+    /// where size counts magic onward PLUS the metadata that precedes.
     fn synth_image(payload: &[u8], meta_json: &str) -> tempfile::NamedTempFile {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(payload).unwrap();
+        // Metadata section: 8-byte pad + JSON
+        let pad = [0u8; 8];
+        tmp.write_all(&pad).unwrap();
         tmp.write_all(meta_json.as_bytes()).unwrap();
-        // crc (unchecked by our parser) + len + magic
-        let meta_len = meta_json.len() as u32;
-        tmp.write_all(&0u32.to_le_bytes()).unwrap();
-        tmp.write_all(&meta_len.to_le_bytes()).unwrap();
+        let meta_section_len = pad.len() + meta_json.len();
+        // Fixed 16-byte trailer: magic + crc + type + size (all BE u32).
         tmp.write_all(b"FWx0").unwrap();
+        tmp.write_all(&0u32.to_be_bytes()).unwrap(); // crc (unchecked)
+        tmp.write_all(&1u32.to_be_bytes()).unwrap(); // type = metadata
+        let total_trailer_size = (meta_section_len + 16) as u32;
+        tmp.write_all(&total_trailer_size.to_be_bytes()).unwrap();
         tmp.flush().unwrap();
         tmp
     }
@@ -699,12 +736,34 @@ mod tests {
     fn rejects_implausible_metadata_length() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(b"tar-bytes").unwrap();
-        // Pretend the metadata is 100 MB long — should reject.
-        tmp.write_all(&0u32.to_le_bytes()).unwrap();
-        tmp.write_all(&(100_000_000u32).to_le_bytes()).unwrap();
+        // Trailer: magic + crc + type + size=100_000_000 (BE). Parser
+        // should refuse — no legit metadata is that big.
         tmp.write_all(b"FWx0").unwrap();
+        tmp.write_all(&0u32.to_be_bytes()).unwrap();
+        tmp.write_all(&1u32.to_be_bytes()).unwrap();
+        tmp.write_all(&(100_000_000u32).to_be_bytes()).unwrap();
         tmp.flush().unwrap();
         let e = parse_fwtool_trailer(tmp.path()).unwrap_err();
         assert!(matches!(e, Error::Fwtool(_)));
+    }
+
+    /// Sanity-check against a real OpenWrt-produced sysupgrade.bin.
+    /// Skipped if the file isn't available (only the dev host that
+    /// ran `make imagebuilder-image-pid1` has it staged).
+    #[test]
+    fn parses_real_sysupgrade_bin() {
+        let candidates = [
+            "imagebuilder/openwrt-imagebuilder-25.12.2-mediatek-filogic.Linux-x86_64/bin/targets/mediatek/filogic/openwrt-25.12.2-mediatek-filogic-glinet_gl-mt6000-squashfs-sysupgrade.bin",
+            "../imagebuilder/openwrt-imagebuilder-25.12.2-mediatek-filogic.Linux-x86_64/bin/targets/mediatek/filogic/openwrt-25.12.2-mediatek-filogic-glinet_gl-mt6000-squashfs-sysupgrade.bin",
+        ];
+        let real = candidates.iter().find(|p| Path::new(p).exists());
+        let Some(real) = real else {
+            eprintln!("parses_real_sysupgrade_bin: image not staged, skipping");
+            return;
+        };
+        let (_, meta) = parse_fwtool_trailer(Path::new(real))
+            .expect("real sysupgrade.bin should parse");
+        meta.check_board("glinet,gl-mt6000")
+            .expect("real image should advertise gl-mt6000");
     }
 }
