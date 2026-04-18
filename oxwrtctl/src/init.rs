@@ -829,6 +829,68 @@ fn bootstrap_clock_floor() {
     }
 }
 
+/// Populate /dev with device nodes discovered via sysfs.
+///
+/// Equivalent of procd's `early_dev()` (procd/utils/mkdev.c). Walks
+/// /sys/dev/block/M:N/uevent and /sys/dev/char/M:N/uevent; each
+/// entry lists `MAJOR=`, `MINOR=`, `DEVNAME=`. mknod the node at
+/// /dev/<DEVNAME> with the right major:minor.
+///
+/// We need this only when the kernel lacks CONFIG_DEVTMPFS. On
+/// kernels that have devtmpfs, the kernel populates /dev itself as
+/// soon as we mount it; this fallback is a no-op because all
+/// expected nodes are already present (mknod would EEXIST, which
+/// we tolerate).
+///
+/// No udev-rule processing, no permission tweaking — every node gets
+/// mode 0600, owner root. That's enough for oxwrtctl's needs.
+fn populate_dev_from_sys() {
+    use std::ffi::CString;
+    for (kind, mode_bits) in [("block", libc::S_IFBLK), ("char", libc::S_IFCHR)] {
+        let dir = format!("/sys/dev/{kind}");
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let Some(_mm) = name.to_str() else { continue };
+            // entry.path() here is the symlink (e.g.,
+            // /sys/dev/block/179:7 → ../../devices/...), which we
+            // can still read uevent from.
+            let uevent_path = entry.path().join("uevent");
+            let Ok(content) = std::fs::read_to_string(&uevent_path) else { continue };
+            let mut major: Option<u32> = None;
+            let mut minor: Option<u32> = None;
+            let mut devname: Option<&str> = None;
+            for line in content.lines() {
+                if let Some(v) = line.strip_prefix("MAJOR=") {
+                    major = v.parse().ok();
+                } else if let Some(v) = line.strip_prefix("MINOR=") {
+                    minor = v.parse().ok();
+                } else if let Some(v) = line.strip_prefix("DEVNAME=") {
+                    devname = Some(v);
+                }
+            }
+            let (Some(major), Some(minor), Some(devname)) = (major, minor, devname) else {
+                continue;
+            };
+            let devpath = format!("/dev/{devname}");
+            // Create parent dirs if the DEVNAME contains "/" (e.g.
+            // "bus/usb/001/001").
+            if let Some(parent) = std::path::Path::new(&devpath).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let Ok(cpath) = CString::new(devpath.as_bytes()) else { continue };
+            let dev = unsafe { libc::makedev(major, minor) };
+            let rc = unsafe { libc::mknod(cpath.as_ptr(), mode_bits | 0o600, dev) };
+            if rc != 0 {
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno != libc::EEXIST {
+                    tracing::debug!(path = devpath, errno, "mknod failed");
+                }
+            }
+        }
+    }
+}
+
 /// Rename network interfaces so their kernel name matches the
 /// DTS-declared label (or `openwrt,netdev-name` property). Equivalent
 /// of the target's /lib/preinit/04_set_netdev_label shell hook.
@@ -1712,6 +1774,12 @@ fn early_mounts() -> Result<(), Error> {
     use rustix::mount::{MountFlags, mount};
 
     let nsnd = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
+    // /dev is attempted as devtmpfs first; if the kernel lacks
+    // CONFIG_DEVTMPFS (confirmed on the mediatek/filogic image
+    // we ship) the mount returns ENODEV and we retry with tmpfs +
+    // populate_dev_from_sys(). That fallback does what procd's
+    // `early_dev()` does: walks /sys/dev/{block,char}/M:N/uevent for
+    // each device, mknod's the corresponding /dev/<name>.
     let mounts: &[(&str, &str, &str, MountFlags)] = &[
         ("proc", "/proc", "proc", nsnd),
         ("sysfs", "/sys", "sysfs", nsnd),
@@ -1757,7 +1825,28 @@ fn early_mounts() -> Result<(), Error> {
             // a real problem for /dev — without devtmpfs we'd need to
             // mknod the device nodes by hand. Log loudly.
             Err(rustix::io::Errno::NODEV) => {
-                tracing::warn!(target = target, fstype = fstype, "early_mounts: ENODEV (kernel lacks fstype?)");
+                // Fallback for /dev: mount tmpfs + populate via mknod.
+                if *target == "/dev" && *fstype == "devtmpfs" {
+                    tracing::warn!("early_mounts: devtmpfs unavailable; falling back to tmpfs + mknod");
+                    let tmpfs_opts = std::ffi::CString::new("mode=0755,size=512K").unwrap();
+                    match mount(
+                        "tmpfs",
+                        "/dev",
+                        "tmpfs",
+                        MountFlags::NOSUID,
+                        Some(tmpfs_opts.as_c_str()),
+                    ) {
+                        Ok(()) => {
+                            populate_dev_from_sys();
+                            tracing::info!("early_mounts: /dev populated via mknod");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "early_mounts: tmpfs fallback on /dev failed");
+                        }
+                    }
+                } else {
+                    tracing::warn!(target = target, fstype = fstype, "early_mounts: ENODEV (kernel lacks fstype?)");
+                }
             }
             // ENOENT = target path doesn't exist AND nothing is
             // mounted there. Can happen for /dev/pts or /sys/fs/cgroup
