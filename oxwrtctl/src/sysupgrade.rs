@@ -330,6 +330,66 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
 /// keep.d, etc.). Our image has a small, predictable list —
 /// /etc/oxwrt/, /etc/dropbear/, /etc/oxwrt.toml. If operators need
 /// to extend it, /etc/sysupgrade.conf is the hook and we read it.
+/// Recursively archive a directory into a tar::Builder, skipping any
+/// entry that isn't a regular file, directory, or symlink.
+///
+/// Why not `tb.append_dir_all(...)`: that method recurses via
+/// `std::fs::metadata` + `fs::File::open`, and calls `append_path_with_
+/// name` which tries to archive whatever it finds. UNIX domain sockets,
+/// FIFOs, block/char devices all fail with "X can not be archived" from
+/// the `tar` crate, and there's no filter hook — one unsupported entry
+/// inside the walk aborts the whole backup.
+///
+/// Implementation mirrors append_dir_all's semantics for the cases we do
+/// handle (regular + dir + symlink), logging + skipping the rest.
+fn tar_append_dir_filtered<W: std::io::Write>(
+    tb: &mut tar::Builder<W>,
+    archive_path: &Path,
+    disk_path: &Path,
+) -> Result<(), Error> {
+    // Add the directory entry itself first so empty dirs get preserved.
+    tb.append_dir(archive_path, disk_path)
+        .map_err(io(format!("tar dir {}", disk_path.display())))?;
+    let rd = std::fs::read_dir(disk_path)
+        .map_err(io(format!("read_dir {}", disk_path.display())))?;
+    for ent in rd {
+        let ent = ent.map_err(io(format!("read_dir entry {}", disk_path.display())))?;
+        let sub_disk = ent.path();
+        let sub_archive = archive_path.join(ent.file_name());
+        let ft = ent
+            .file_type()
+            .map_err(io(format!("file_type {}", sub_disk.display())))?;
+        if ft.is_symlink() {
+            // tar::Builder::append_path_with_name handles symlinks
+            // correctly — records the link target without dereferencing.
+            let target = std::fs::read_link(&sub_disk)
+                .map_err(io(format!("readlink {}", sub_disk.display())))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_mtime(0);
+            tb.append_link(&mut header, &sub_archive, &target)
+                .map_err(io(format!("tar symlink {}", sub_disk.display())))?;
+        } else if ft.is_dir() {
+            tar_append_dir_filtered(tb, &sub_archive, &sub_disk)?;
+        } else if ft.is_file() {
+            let mut f = File::open(&sub_disk)
+                .map_err(io(format!("open {}", sub_disk.display())))?;
+            tb.append_file(&sub_archive, &mut f)
+                .map_err(io(format!("tar file {}", sub_disk.display())))?;
+        } else {
+            // Socket / FIFO / block / char / unknown — skip. Preserving
+            // these across a reboot is meaningless (runtime-scoped).
+            tracing::info!(
+                path = %sub_disk.display(),
+                "backup: skipping non-archivable entry (socket/fifo/device)"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn build_config_backup_in_memory() -> Result<Vec<u8>, Error> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -346,12 +406,13 @@ fn build_config_backup_in_memory() -> Result<Vec<u8>, Error> {
                 continue;
             }
             if p.is_dir() {
-                // append_dir_all prepends the path as-is — strip leading
-                // '/' so the tar looks like "etc/oxwrt/" not "/etc/oxwrt/"
-                // (stock sysupgrade's restore expects relative paths).
+                // Manual walk instead of append_dir_all so we can filter
+                // out non-regular/non-symlink entries (UNIX domain sockets,
+                // FIFOs, device nodes) — tar can't archive those and the
+                // whole backup fails if one is present. Seen in the wild:
+                // hostapd's ctrl socket under /etc/oxwrt/hostapd-*-run/.
                 let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();
-                tb.append_dir_all(&stripped, p)
-                    .map_err(io(format!("tar dir {}", p.display())))?;
+                tar_append_dir_filtered(&mut tb, &stripped, p)?;
             } else {
                 let mut f = File::open(p).map_err(io(format!("open {}", p.display())))?;
                 let stripped: PathBuf = p.strip_prefix("/").unwrap_or(p).into();

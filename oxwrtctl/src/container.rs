@@ -1467,6 +1467,25 @@ impl PreparedContainer {
             let _ = mknodat(CWD, c"/dev/tty",     chr, Mode::from(0o666), rustix::fs::makedev(5, 0));
         }
 
+        // Writable /tmp tmpfs — every service needs a scratch area for
+        // lockfiles, PID files, UNIX control sockets, etc. Without this
+        // the container's /tmp sits on the read-only squashfs rootfs
+        // and the first `mkdir /tmp/foo` fails with EROFS (seen with
+        // hostapd: "mkdir[ctrl_interface]: No such file or directory").
+        // mode=1777 so non-root service UIDs can write to it.
+        let tmp_target = c"/tmp";
+        // Ensure the mount point exists on the rootfs even if the image
+        // forgot to create it. mkdir will fail if it already exists as
+        // a directory, which is fine.
+        let _ = rustix::fs::mkdir(tmp_target, rustix::fs::Mode::from(0o1777));
+        let _ = mount(
+            c"tmpfs",
+            tmp_target,
+            c"tmpfs",
+            MountFlags::NOSUID | MountFlags::NODEV,
+            Some(c"mode=1777"),
+        );
+
         unmount(self.put_old_after_pivot.as_c_str(), UnmountFlags::DETACH)
             .map_err(|e| rustix::io::Errno::from_raw_os_error(map_step_err("unmount .old_root", e)))?;
         Ok(())

@@ -536,7 +536,9 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	# Service binaries at the rootfs-root paths the oxwrt.toml
 	# entrypoints expect.
 	for svc in dns ntp dhcp corerad hostapd; do \
-		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc; \
+		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc \
+		         $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/tmp; \
+		chmod 1777 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/tmp; \
 	done
 	# hostapd container: binary + .so deps from Alpine stage. Needs
 	# /sbin and /lib directories under its rootfs. Mirrors the debug-
@@ -552,10 +554,10 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 	   $(BUILD_SERVICES)/hostapd/lib/libcrypto.so.3 \
 	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/lib/
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/sbin/hostapd
-	# hostapd's ctrl socket host-side dir (bind-mounted rw into the
-	# container). Pre-create so the first start doesn't fail on an
-	# mkdir inside a read-only rootfs.
-	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt/hostapd-run
+	# hostapd ctrl socket lives on each container's tmpfs /tmp — no
+	# host-side dir needed. Previously staged under /etc/oxwrt/ but
+	# that broke sysupgrade's config-backup tar step (UNIX domain
+	# sockets can't be archived as tar members).
 	# Stage `iw` at a host path too. oxwrtctl init uses it to pre-
 	# create the AP-mode netdev on phy1 BEFORE hostapd spawns
 	# (hostapd's nl80211 driver doesn't auto-create from the
@@ -594,6 +596,8 @@ imagebuilder-stage: rust-oxwrtctl services-stage services-debug-ssh
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/corerad/corerad.toml
 	cp config/services/hostapd/hostapd-5g.conf \
 		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/hostapd-5g.conf
+	cp config/services/hostapd/hostapd-2g.conf \
+		$(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/hostapd-2g.conf
 	# Writable lease-file dir on the host side.
 	#
 	# DO NOT stage under files/var/ — OpenWrt ships /var as a symlink

@@ -328,17 +328,14 @@ caps = [
 # seccomp = true        # default
 # landlock = true       # default
 
-# --- hostapd: wifi AP on the 5 GHz radio ---
+# --- hostapd-5g: 5 GHz wifi AP on phy1 ---
 #
-# First-cut AP on phy1 (MT7976 5 GHz), SSID "oxwrt", WPA2-PSK, bridged
-# into br-lan so wired + wifi clients share the LAN DHCP/DNS/RA. The
-# config and PSK are baked into the image for bring-up; runtime
-# reconfig + per-radio [[wifi]] schema is future work.
-#
-# net_mode=host because hostapd needs nl80211 on the host netns, and
-# the created AP interface needs to end up in the host br-lan bridge.
+# One hostapd process per radio (failure isolation: one radio crashing
+# doesn't take the other down). Same rootfs, different config + ctrl
+# socket dir. Both bridged into br-lan → same DHCP/DNS/RA/firewall for
+# every wifi + wired client.
 [[services]]
-name = "hostapd"
+name = "hostapd-5g"
 rootfs = "/usr/lib/oxwrt/services/hostapd/rootfs"
 entrypoint = ["/sbin/hostapd", "/etc/hostapd-5g.conf"]
 net_mode = "host"
@@ -350,15 +347,38 @@ depends_on = []
 source = "/usr/lib/oxwrt/services/hostapd/hostapd-5g.conf"
 target = "/etc/hostapd-5g.conf"
 
-# hostapd writes its ctrl socket here; must be writable. tmpfs on
-# /var/run inside the container is fine (ephemeral).
-[[services.binds]]
-source = "/etc/oxwrt/hostapd-run"
-target = "/var/run/hostapd"
-readonly = false
+# hostapd's ctrl socket lives on the container's /tmp tmpfs (always
+# writable, always ephemeral — matches what the socket actually is).
+# The former /etc/oxwrt/hostapd-run/ bind put UNIX domain sockets
+# under the sysupgrade.conf-preserved tree, which broke the config-
+# backup tar step ("socket can not be archived").
 
-# hostapd needs NET_ADMIN (iface config), NET_RAW (EAPOL packets), and
-# SYS_MODULE is NOT needed — modules are loaded at init.
+[services.security]
+caps = [
+  "SETUID", "SETGID", "SETPCAP",
+  "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW",
+]
+
+# --- hostapd-2g: 2.4 GHz wifi AP on phy0 ---
+#
+# Different SSID ("oxwrt-2g") during bring-up so it's obvious which
+# band a client is on. Separate ctrl socket dir to avoid collision with
+# the 5 GHz instance.
+[[services]]
+name = "hostapd-2g"
+rootfs = "/usr/lib/oxwrt/services/hostapd/rootfs"
+entrypoint = ["/sbin/hostapd", "/etc/hostapd-2g.conf"]
+net_mode = "host"
+memory_max = 67108864
+pids_max = 16
+depends_on = []
+
+[[services.binds]]
+source = "/usr/lib/oxwrt/services/hostapd/hostapd-2g.conf"
+target = "/etc/hostapd-2g.conf"
+
+# See hostapd-5g note — ctrl socket lives on container tmpfs /tmp.
+
 [services.security]
 caps = [
   "SETUID", "SETGID", "SETPCAP",
