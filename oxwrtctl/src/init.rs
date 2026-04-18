@@ -955,18 +955,306 @@ fn mount_root_if_needed() -> Result<(), Error> {
         return Ok(());
     }
 
-    // Hot path — reached only when procd-init is gone (Stage 4+).
-    // Intentionally stubbed: if we hit this during coexist mode
-    // development, something's gone wrong and we'd rather fail
-    // loudly than silently degrade. Stage 4 replaces the
-    // unimplemented!() with real loop0+f2fs+overlayfs+pivot_root
-    // logic that mirrors fstools/libfstools/{rootdisk,mount,overlay}.c.
-    Err(Error::Runtime(
-        "mount_root hot path unimplemented — reaching here means procd-init \
-         didn't set up the overlay. Stage 4 fills this in."
-            .to_string(),
-    ))
+    tracing::warn!("mount_root: no upstream overlay; engaging hot path");
+    mount_root_hot_path()
 }
+
+/// The actual libfstools-in-Rust path. Assumes we're pid 1 with the
+/// rootfs mounted read-only on `/` (kernel's default from `root=` on
+/// the cmdline), /proc, /sys, /dev, /tmp already set up by
+/// `early_mounts`, and nobody else has touched the overlay region.
+///
+/// Steps (matches fstools `rootdisk.c` + `mount.c` + `overlay.c`):
+///  1. Find rootfs block device from GPT PARTLABEL=rootfs.
+///  2. Parse squashfs superblock magic + bytes_used; align to 64 KiB
+///     → overlay_off.
+///  3. Detect what's at overlay_off:
+///      - f2fs superblock magic at +0x400 → existing overlay, just
+///        mount it.
+///      - DEADCODE or ones/junk → unformatted. Scan forward ≤256 KiB
+///        for a gzip-wrapped config backup (from sysupgrade) and
+///        stash it in RAM if present.
+///  4. Create /dev/loopN (LOOP_CTL_GET_FREE), bind to rootfs fd with
+///     lo_offset = overlay_off. **Leak the rootfs fd.**
+///  5. mkfs.f2fs the loop device if needed (shell out — writing an
+///     f2fs formatter in Rust is a hundred times more code than
+///     shelling out).
+///  6. Mount f2fs on the loop device at /overlay.
+///  7. Build /overlay/upper + /overlay/work, stack overlayfs at /mnt
+///     with lowerdir=/.
+///  8. pivot_root: /mnt → /, old / → /mnt/rom.
+///  9. mount_move /rom/{proc,sys,dev,tmp,overlay} into the new root.
+/// 10. If step 3 found a backup, tar-extract it over the new /.
+fn mount_root_hot_path() -> Result<(), Error> {
+    use rustix::mount::{MountFlags, mount, mount_move};
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
+
+    // 1. Rootfs partition.
+    let rootfs_dev = crate::sysupgrade::resolve_partition("rootfs")
+        .map_err(|e| Error::Runtime(format!("mount_root: resolve_partition: {e}")))?;
+    tracing::info!(dev = %rootfs_dev.display(), "mount_root: using rootfs device");
+
+    // 2. Parse squashfs superblock for bytes_used. Keep the fd — we
+    // later reuse it as the loop backing.
+    let mut rootfs_file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&rootfs_dev)
+        .map_err(Error::Io)?;
+    let mut sb = [0u8; 96];
+    rootfs_file.read_exact(&mut sb).map_err(Error::Io)?;
+    if &sb[..4] != b"hsqs" {
+        return Err(Error::Runtime(format!(
+            "mount_root: {} is not squashfs (magic {:02x?})",
+            rootfs_dev.display(),
+            &sb[..4]
+        )));
+    }
+    let bytes_used = u64::from_le_bytes(sb[40..48].try_into().unwrap());
+    // Align UP to 64 KiB — matches libfstools ROOTDEV_OVERLAY_ALIGN.
+    let overlay_off = (bytes_used + 0xFFFF) & !0xFFFF;
+    tracing::info!(
+        bytes_used,
+        overlay_off,
+        "mount_root: squashfs header parsed"
+    );
+
+    // 3. Check what's at overlay_off.
+    let mut probe = [0u8; 0x420];
+    rootfs_file
+        .seek(SeekFrom::Start(overlay_off))
+        .map_err(Error::Io)?;
+    rootfs_file.read_exact(&mut probe).map_err(Error::Io)?;
+    const F2FS_MAGIC: u32 = 0xF2F5_2010;
+    let f2fs_at = u32::from_le_bytes(probe[0x400..0x404].try_into().unwrap());
+    let first_le = u32::from_le_bytes(probe[0..4].try_into().unwrap());
+
+    let (needs_format, backup_tgz): (bool, Option<Vec<u8>>) = if f2fs_at == F2FS_MAGIC {
+        tracing::info!("mount_root: existing f2fs overlay detected");
+        (false, None)
+    } else if first_le == 0xDEADC0DE || first_le == 0xFFFFFFFF {
+        // Scan forward ≤256 KiB looking for gzip magic 1f 8b 08 00.
+        tracing::info!(marker = format!("{first_le:#010x}"), "mount_root: unformatted marker; scanning for config backup");
+        let backup = scan_for_backup_tgz(&mut rootfs_file, overlay_off)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "mount_root: backup scan failed");
+                None
+            });
+        (true, backup)
+    } else {
+        // Something in the overlay region but not f2fs — bail loudly
+        // rather than format and potentially destroy user data.
+        return Err(Error::Runtime(format!(
+            "mount_root: overlay region has unknown content \
+             (first_le={first_le:#010x}, f2fs_probe={f2fs_at:#010x})"
+        )));
+    };
+
+    // 4. Create loop device.
+    let loop_dev = create_loop_device(&rootfs_file, overlay_off)?;
+    tracing::info!(loop_dev = %loop_dev.display(), "mount_root: loop device attached");
+    // CRUCIAL: leak the rootfs_file so its fd stays alive for the
+    // loop device's lifetime. If dropped, LO_FLAGS_AUTOCLEAR fires
+    // and the loop detaches the next time we umount — meaning the
+    // next sysupgrade will fail with "device busy" at best and
+    // silent corruption at worst.
+    std::mem::forget(rootfs_file);
+
+    // 5. Format if needed. Shell out to mkfs.f2fs — implementing
+    // f2fs formatting in Rust is way too much for one firmware
+    // feature.
+    if needs_format {
+        tracing::info!(dev = %loop_dev.display(), "mount_root: formatting f2fs");
+        let status = std::process::Command::new("/usr/sbin/mkfs.f2fs")
+            .args(["-q", "-f", "-l", "rootfs_data"])
+            .arg(&loop_dev)
+            .status()
+            .map_err(Error::Io)?;
+        if !status.success() {
+            return Err(Error::Runtime(format!(
+                "mount_root: mkfs.f2fs exited {status}"
+            )));
+        }
+    }
+
+    // 6. Mount f2fs at /overlay.
+    std::fs::create_dir_all("/overlay").map_err(Error::Io)?;
+    mount(&loop_dev, "/overlay", "f2fs", MountFlags::NOATIME, None::<&std::ffi::CStr>)
+        .map_err(|e| Error::Runtime(format!("mount_root: mount f2fs: {e}")))?;
+
+    // 7. Stack overlayfs.
+    std::fs::create_dir_all("/overlay/upper").map_err(Error::Io)?;
+    std::fs::create_dir_all("/overlay/work").map_err(Error::Io)?;
+    std::fs::create_dir_all("/mnt").map_err(Error::Io)?;
+    let overlay_opts = std::ffi::CString::new(
+        "lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work",
+    )
+    .expect("no NUL in overlay opts");
+    mount(
+        "overlayfs:/overlay",
+        "/mnt",
+        "overlay",
+        MountFlags::NOATIME,
+        Some(overlay_opts.as_c_str()),
+    )
+    .map_err(|e| Error::Runtime(format!("mount_root: mount overlay: {e}")))?;
+
+    // 8. pivot_root. `/mnt/rom` must exist BEFORE the call.
+    std::fs::create_dir_all("/mnt/rom").map_err(Error::Io)?;
+    // fstools moves /proc BEFORE pivot_root — if /proc isn't in the
+    // new root, pivot_root can fail with EINVAL ("shared parent").
+    mount_move("/proc", "/mnt/proc")
+        .map_err(|e| Error::Runtime(format!("mount_root: move /proc: {e}")))?;
+    rustix::process::pivot_root("/mnt", "/mnt/rom")
+        .map_err(|e| Error::Runtime(format!("mount_root: pivot_root: {e}")))?;
+    std::env::set_current_dir("/").map_err(Error::Io)?;
+
+    // 9. Move the rest. sys/dev/tmp/overlay — in that order. /overlay
+    // must move last because we depend on the original /overlay bind
+    // until we unmount /rom.
+    for (src, dst) in [
+        ("/rom/sys", "/sys"),
+        ("/rom/dev", "/dev"),
+        ("/rom/tmp", "/tmp"),
+        ("/rom/overlay", "/overlay"),
+    ] {
+        if std::path::Path::new(src).exists() {
+            if let Err(e) = mount_move(src, dst) {
+                tracing::warn!(src, dst, error = %e, "mount_root: move failed");
+            }
+        }
+    }
+
+    // 10. Restore backup.
+    if let Some(tgz) = backup_tgz {
+        tracing::info!(bytes = tgz.len(), "mount_root: restoring config backup");
+        if let Err(e) = extract_tgz_over_root(&tgz) {
+            tracing::warn!(error = %e, "mount_root: backup restore failed");
+        }
+    }
+
+    // Keep a note that we did this, for the logs.
+    tracing::info!("mount_root: hot path complete, overlay live");
+    Ok(())
+}
+
+/// Scan forward from `overlay_off` up to 256 KiB looking for a gzip
+/// header (1f 8b 08 00). If found, return the bytes from there to
+/// end-of-scan (gzip is self-delimiting so the tail after the gzip
+/// trailer is ignored by gunzip).
+fn scan_for_backup_tgz(
+    f: &mut std::fs::File,
+    overlay_off: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX_SCAN: usize = 256 * 1024;
+    f.seek(SeekFrom::Start(overlay_off)).map_err(Error::Io)?;
+    let mut buf = vec![0u8; MAX_SCAN];
+    let n = f.read(&mut buf).map_err(Error::Io)?;
+    buf.truncate(n);
+    // Gzip magic with exact FLG=0 byte — matches fstools'
+    // cpu_to_le32(0x88b1f) expectation.
+    let needle: [u8; 4] = [0x1f, 0x8b, 0x08, 0x00];
+    for i in 0..buf.len().saturating_sub(4) {
+        if buf[i..i + 4] == needle {
+            tracing::info!(offset = i, "mount_root: gzip magic located in overlay region");
+            return Ok(Some(buf[i..].to_vec()));
+        }
+    }
+    Ok(None)
+}
+
+/// Create a loop device bound to `backing`'s fd at `offset`. Returns
+/// the `/dev/loopN` path. Leaves the backing fd OPEN (caller must
+/// `std::mem::forget` it or otherwise keep it alive).
+fn create_loop_device(backing: &std::fs::File, offset: u64) -> Result<PathBuf, Error> {
+    use std::os::fd::AsRawFd;
+
+    // Constants lifted from <linux/loop.h>. Use `_` as the ioctl
+    // request type — libc has it as c_int on some arches and c_ulong
+    // on others, and letting inference pick avoids a per-arch cfg.
+    const LOOP_CTL_GET_FREE: u32 = 0x4C82;
+    const LOOP_SET_FD: u32 = 0x4C00;
+    const LOOP_SET_STATUS64: u32 = 0x4C04;
+    const LO_FLAGS_AUTOCLEAR: u32 = 4;
+
+    // loop_info64 layout — matches <linux/loop.h>. 232 bytes on
+    // most arches. We only need lo_offset; the rest stays zero.
+    #[repr(C)]
+    struct LoopInfo64 {
+        lo_device: u64,
+        lo_inode: u64,
+        lo_rdevice: u64,
+        lo_offset: u64,
+        lo_sizelimit: u64,
+        lo_number: u32,
+        lo_encrypt_type: u32,
+        lo_encrypt_key_size: u32,
+        lo_flags: u32,
+        lo_file_name: [u8; 64],
+        lo_crypt_name: [u8; 64],
+        lo_encrypt_key: [u8; 32],
+        lo_init: [u64; 2],
+    }
+
+    // Get a free loop number via the control device.
+    let ctl = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/loop-control")
+        .map_err(Error::Io)?;
+    let num = unsafe { libc::ioctl(ctl.as_raw_fd(), LOOP_CTL_GET_FREE as _) };
+    if num < 0 {
+        return Err(Error::Runtime(format!(
+            "LOOP_CTL_GET_FREE: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let loop_dev = PathBuf::from(format!("/dev/loop{num}"));
+    let lf = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&loop_dev)
+        .map_err(Error::Io)?;
+    // Associate backing fd.
+    if unsafe { libc::ioctl(lf.as_raw_fd(), LOOP_SET_FD as _, backing.as_raw_fd() as libc::c_ulong) } < 0 {
+        return Err(Error::Runtime(format!(
+            "LOOP_SET_FD: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Set offset + autoclear flag.
+    let mut info: LoopInfo64 = unsafe { std::mem::zeroed() };
+    info.lo_offset = offset;
+    info.lo_flags = LO_FLAGS_AUTOCLEAR;
+    if unsafe { libc::ioctl(lf.as_raw_fd(), LOOP_SET_STATUS64 as _, &info as *const _ as libc::c_ulong) } < 0 {
+        return Err(Error::Runtime(format!(
+            "LOOP_SET_STATUS64: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Intentionally leak the loop fd too — keeping it open guards
+    // against another process opening the loop device with a
+    // different offset. Matches fstools rootdisk.c lifetime model.
+    std::mem::forget(lf);
+    Ok(loop_dev)
+}
+
+/// Extract a gzipped tar over `/`. Used to restore a sysupgrade
+/// config backup that was embedded in the overlay region.
+///
+/// Does NOT merge passwd/group/shadow (which stock does) — our
+/// image has a fixed /etc/passwd and the backup only needs to
+/// restore /etc/oxwrt/, /etc/dropbear/authorized_keys etc.
+fn extract_tgz_over_root(bytes: &[u8]) -> Result<(), Error> {
+    use flate2::read::GzDecoder;
+    let gz = GzDecoder::new(bytes);
+    let mut ar = tar::Archive::new(gz);
+    ar.unpack("/").map_err(Error::Io)
+}
+
+/// Parse /proc/mounts looking for an overlayfs mount on `/`. That's
 
 /// Parse /proc/mounts looking for an overlayfs mount on `/`. That's
 /// what fstools leaves us with after its pivot_root: root filesystem
