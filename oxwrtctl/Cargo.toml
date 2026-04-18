@@ -12,6 +12,10 @@ path = "src/main.rs"
 [dependencies]
 oxwrt-api.workspace = true
 oxwrt-proto.workspace = true
+# Daemon's `--client` subcommand calls into oxwrtctl-cli's run() so
+# operator muscle memory (`oxwrtctl --client …`) keeps working after
+# the CLI got extracted into its own bin/lib crate.
+oxwrtctl-cli.workspace = true
 squic.workspace = true
 tokio.workspace = true
 serde.workspace = true

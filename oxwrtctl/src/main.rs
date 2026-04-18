@@ -88,38 +88,11 @@ fn print_usage() {
     );
 }
 
-/// Read the Ed25519 signing-key seed from disk and print the derived
-/// **public** key as hex to stdout. Used to bootstrap sQUIC clients — the
-/// public key has to be known out-of-band before `dial()` can pin it, so
-/// an operator would typically run this once over a serial or physical
-/// channel right after first boot to learn the server key.
-///
-/// Default path is `/etc/oxwrt/key.ed25519`; a different path can be
-/// supplied as a single positional argument.
+// run_print_server_key moved to oxwrtctl-cli as
+// `oxwrtctl_cli::print_server_key` and is called from both `oxwrtctl
+// --print-server-key` and `oxctl --print-server-key`.
 fn run_print_server_key(args: Vec<String>) -> ExitCode {
-    let path = args
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "/etc/oxwrt/key.ed25519".to_string());
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("oxwrtctl: read {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if bytes.len() != 32 {
-        eprintln!(
-            "oxwrtctl: {path}: expected 32-byte Ed25519 seed, got {} bytes",
-            bytes.len()
-        );
-        return ExitCode::FAILURE;
-    }
-    let seed: [u8; 32] = bytes.as_slice().try_into().unwrap();
-    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let verifying = signing.verifying_key();
-    println!("{}", hex::encode(verifying.to_bytes()));
-    ExitCode::SUCCESS
+    oxwrtctl_cli::print_server_key(args)
 }
 
 fn init_tracing() {
@@ -327,23 +300,10 @@ fn run_services_only() -> ExitCode {
 }
 
 fn run_client(args: Vec<String>) -> ExitCode {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("oxwrtctl: failed to build tokio runtime: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    match rt.block_on(control::client::run(args)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("oxwrtctl: client failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    // Delegated to the oxwrtctl-cli crate so the daemon and the
+    // standalone `oxctl` binary share one implementation. Prints
+    // its own error on failure.
+    oxwrtctl_cli::run_client_sync(args)
 }
 
 // -------- --smoke-ns --------

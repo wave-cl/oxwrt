@@ -1,4 +1,5 @@
-pub mod client;
+// client moved to the oxwrtctl-cli crate. The daemon's `--client`
+// subcommand in main.rs now calls oxwrtctl_cli::run_client_sync.
 #[cfg(target_os = "linux")]
 pub mod server;
 pub mod validate;
@@ -115,12 +116,14 @@ impl ControlState {
 // format_response, default_config_text, FrameError}` call site keeps
 // resolving. This keeps the diff on the split to the manifest + a
 // single use-line, rather than touching every caller.
-pub use oxwrt_proto::{FrameError, format_response, parse_request, read_frame, write_frame};
-// default_config_text is consumed only by the linux-only reset
-// handler; re-export it under the same cfg to avoid an unused-import
-// warning on the macOS CLI build.
+// Re-exports consumed by the linux-only server module; cfg-gated
+// so macOS host builds don't warn about unused imports (the CLI was
+// extracted into the oxwrtctl-cli crate, so no caller here uses
+// these on macOS anymore).
 #[cfg(target_os = "linux")]
-pub use oxwrt_proto::default_config_text;
+pub use oxwrt_proto::{
+    FrameError, default_config_text, format_response, parse_request, read_frame, write_frame,
+};
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]

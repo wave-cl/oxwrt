@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["oxwrtctl", "crates/oxwrt-api", "crates/oxwrt-proto"]
+members = ["oxwrtctl", "crates/oxwrt-api", "crates/oxwrt-proto", "crates/oxwrtctl-cli"]
 
 [workspace.package]
 version = "0.1.1"
@@ -11,6 +11,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 oxwrt-api = { path = "crates/oxwrt-api" }
 oxwrt-proto = { path = "crates/oxwrt-proto" }
+oxwrtctl-cli = { path = "crates/oxwrtctl-cli" }
 squic = { path = "../squic-rust" }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",

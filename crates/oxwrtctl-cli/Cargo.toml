@@ -1,0 +1,37 @@
+[package]
+name = "oxwrtctl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The operator-facing CLI client. Installs as `oxctl` on developer
+# Macs; ALSO exposed as a library so the on-device daemon's `--client`
+# subcommand can call the same run() and stay compatible with operator
+# muscle memory (`oxwrtctl --client …`).
+#
+# Compiles on every target the workspace builds on — the point of the
+# split is that an M1 Mac doesn't need rustix/netlink/nft/seccomp/
+# landlock/dhcproto/tar/flate2 on its compile graph just to talk to
+# the router.
+
+[lib]
+name = "oxwrtctl_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxctl"
+path = "src/main.rs"
+
+[dependencies]
+oxwrt-api.workspace = true
+oxwrt-proto.workspace = true
+squic.workspace = true
+quinn.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+# Used only by the `--print-server-key` subcommand.
+ed25519-dalek.workspace = true
+tracing-subscriber.workspace = true

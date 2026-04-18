@@ -1168,6 +1168,7 @@ dependencies = [
  "netlink-packet-route 0.29.0",
  "oxwrt-api",
  "oxwrt-proto",
+ "oxwrtctl-cli",
  "quinn",
  "rand",
  "rand_core 0.6.4",
@@ -1188,6 +1189,21 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "oxwrtctl-cli"
+version = "0.1.1"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "oxwrt-api",
+ "oxwrt-proto",
+ "quinn",
+ "squic",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing-subscriber",
 ]
 

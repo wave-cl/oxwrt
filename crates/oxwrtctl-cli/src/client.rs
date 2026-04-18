@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 
-use crate::control::{FrameError, format_response, parse_request, read_frame, write_frame};
-use crate::rpc::Response;
+use oxwrt_api::rpc::{Request, Response};
+use oxwrt_proto::{FrameError, format_response, parse_request, read_frame, write_frame};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("usage: oxwrtctl --client <addr> <cmd> [args...]")]
+    #[error("usage: oxctl [--client] <addr> <cmd> [args...]")]
     Usage,
     #[error("invalid remote address: {0}")]
     Address(String),
@@ -54,7 +54,7 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
     write_frame(&mut send, &request).await?;
 
     // For FwUpdate: stream the raw firmware bytes before finishing.
-    if let (crate::rpc::Request::FwUpdate { size, .. }, Some(path)) =
+    if let (Request::FwUpdate { size, .. }, Some(path)) =
         (&request, &fw_image_path)
     {
         eprintln!("uploading {path} ({size} bytes)...");
@@ -98,7 +98,7 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
                 // FwProgress: display inline progress, don't print as
                 // a normal response line.
                 if let Response::FwProgress { bytes_received } = &resp {
-                    if let Some(crate::rpc::Request::FwUpdate { size, .. }) = fw_image_path.as_ref().and(Some(&request)) {
+                    if let Some(Request::FwUpdate { size, .. }) = fw_image_path.as_ref().and(Some(&request)) {
                         let pct = (*bytes_received as f64 / *size as f64 * 100.0) as u32;
                         eprint!("\r  {bytes_received}/{size} bytes ({pct}%)");
                     }
@@ -115,7 +115,7 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
             }
             Err(FrameError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // For FwApply, connection drop = reboot = success.
-                if matches!(request, crate::rpc::Request::FwApply { .. }) {
+                if matches!(request, Request::FwApply { .. }) {
                     eprintln!("connection closed — router is rebooting");
                 }
                 break;
