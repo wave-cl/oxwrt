@@ -213,8 +213,14 @@ echo "=== [3/5] booting QEMU ==="
 # hostfwd forwards udp:51820 so oxctl on the host reaches the VM's
 # control plane at 127.0.0.1:51820. tcp:2222 is handy for dropping
 # into the VM via ssh during debug (no-op otherwise).
+# CPU choice: on macOS arm64 HVF is used implicitly and `-cpu max`
+# gives native speed. Under TCG on x86_64 runners, `-cpu max` is
+# dramatically slower because it emulates SVE + every optional
+# extension. `cortex-a72` is fast under TCG and modern enough for
+# OpenWrt's armsr/armv8 kernel. On HVF (Apple Silicon) both work;
+# `max` would be marginally better but consistency wins.
 qemu-system-aarch64 \
-    -M virt -cpu max -m 512M -smp 2 \
+    -M virt -cpu cortex-a72 -m 512M -smp 2 \
     -nographic -no-reboot \
     -bios "$EFI_FW" \
     -drive if=virtio,format=raw,file="$BUILD_DIR/img-test.img" \
@@ -225,19 +231,24 @@ QPID=$!
 # Ensure VM is always cleaned up — even on ^C, test failure, or error.
 trap 'kill $QPID 2>/dev/null || true; wait $QPID 2>/dev/null || true' EXIT INT TERM
 
-# Poll control plane. Exponential-ish backoff is overkill; a 2s
-# poll matches how fast the handshake should succeed once listening.
+# Poll control plane. Track wall time, not loop iterations — every
+# oxctl handshake attempt can take up to ~10s on cold-boot CI hosts
+# before timing out, so counting `+= 2` per loop massively underbids
+# the real elapsed and the timeout never fires within job limits.
 export SQUIC_SERVER_KEY="$SERVER_KEY"
 READY=0
-elapsed=0
+start_ts=$(date +%s)
 echo "waiting for control plane (up to ${BOOT_TIMEOUT_S}s)..."
-while [ $elapsed -lt $BOOT_TIMEOUT_S ]; do
+while : ; do
+    elapsed=$(($(date +%s) - start_ts))
+    if [ $elapsed -ge $BOOT_TIMEOUT_S ]; then
+        break
+    fi
     if $CLIENT 127.0.0.1:51820 status 2>/dev/null | grep -q "supervisor uptime"; then
         READY=1
         break
     fi
     sleep 2
-    elapsed=$((elapsed + 2))
 done
 if [ $READY -eq 0 ]; then
     echo "FAIL: control plane never became ready. last 20 lines of boot log:"

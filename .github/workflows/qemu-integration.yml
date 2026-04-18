@@ -110,14 +110,17 @@ jobs:
         run: ./scripts/qemu-integration-test.sh
 
       # ── Failure diagnostics ─────────────────────────────────────
-      - name: dump boot log on failure
-        if: failure()
+      # Run on any non-success — catches cancellation (job timeout)
+      # as well as explicit test failures. Without this, a VM that
+      # never reaches "control plane listening" leaves no trace.
+      - name: dump boot log
+        if: failure() || cancelled()
         run: |
           echo "=== tail of /tmp/armvirt-qemu/boot.log ==="
-          tail -200 /tmp/armvirt-qemu/boot.log || true
+          tail -300 /tmp/armvirt-qemu/boot.log || true
 
-      - name: upload artifacts on failure
-        if: failure()
+      - name: upload boot log
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: qemu-boot-log
