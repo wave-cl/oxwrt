@@ -886,6 +886,48 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
                 },
             }
         }
+        "sysctl" => {
+            // Tiny networking-sysctl snapshot for troubleshooting. Reads
+            // a fixed set of flags the router relies on — forwarding,
+            // rp_filter, accept_ra, etc. Returns one line per flag.
+            const ENTRIES: &[&str] = &[
+                "/proc/sys/net/ipv4/ip_forward",
+                "/proc/sys/net/ipv4/conf/all/forwarding",
+                "/proc/sys/net/ipv4/conf/all/rp_filter",
+                "/proc/sys/net/ipv6/conf/all/forwarding",
+                "/proc/sys/net/ipv6/conf/all/accept_ra",
+                "/proc/sys/net/bridge/bridge-nf-call-iptables",
+            ];
+            let mut out = String::new();
+            for p in ENTRIES {
+                match std::fs::read_to_string(p) {
+                    Ok(s) => {
+                        out.push_str(&format!("{p}: {}\n", s.trim()));
+                    }
+                    Err(e) => {
+                        out.push_str(&format!("{p}: ERR {e}\n"));
+                    }
+                }
+            }
+            Response::Value { value: out }
+        }
+        "conntrack" => {
+            // Dump the kernel's conntrack table. Useful for tracing
+            // "packet left the client but did it reach NAT?" — a LAN
+            // IP never appearing here means the packet didn't traverse
+            // FORWARD; an entry with original src=LAN-ip but no reply
+            // means egress worked but no return.
+            match std::fs::read_to_string("/proc/net/nf_conntrack") {
+                Ok(s) if s.is_empty() => Response::Value {
+                    value: "(conntrack table empty — is nf_conntrack loaded?)\n"
+                        .to_string(),
+                },
+                Ok(s) => Response::Value { value: s },
+                Err(e) => Response::Err {
+                    message: format!("diag conntrack: {e}"),
+                },
+            }
+        }
         "dmesg" => {
             // Read the kernel ring buffer via klogctl(SYSLOG_ACTION_READ_ALL).
             // Needs CAP_SYSLOG (we have it as pid 1). A 256KB buffer fits
@@ -912,7 +954,7 @@ async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Respo
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, ping, traceroute, dig)"
+                 modules, dmesg, nft, conntrack, sysctl, ping, traceroute, dig)"
             ),
         },
     }
