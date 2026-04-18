@@ -38,6 +38,26 @@ pub enum Error {
 pub fn run() -> Result<(), Error> {
     early_mounts()?;
 
+    // Temporary diagnostic: log /dev contents and /proc/mounts after
+    // early_mounts. Helps pinpoint why /dev/mmcblk0pN isn't available
+    // when mount_root tries to open it on the standalone pid1 path.
+    {
+        let mut dev_entries: Vec<String> = std::fs::read_dir("/dev")
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        dev_entries.sort();
+        tracing::info!(count = dev_entries.len(), sample = ?dev_entries.iter().take(20).collect::<Vec<_>>(), "diag: /dev entries after early_mounts");
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+            for line in mounts.lines().take(15) {
+                tracing::info!(line, "diag: /proc/mounts");
+            }
+        }
+    }
+
     // Stage 1 of the procd-init takeover: kernel module loading.
     // Walk /etc/modules-boot.d/ then /etc/modules.d/ and finit_module
     // each entry. In coexist mode (procd-init still runs preinit
@@ -1726,20 +1746,22 @@ fn early_mounts() -> Result<(), Error> {
         }
         match mount(*source, *target, *fstype, *flags, no_data) {
             Ok(()) => {
-                tracing::debug!(target = target, fstype = fstype, "mounted");
+                tracing::info!(target = target, fstype = fstype, "early_mounts: mounted");
             }
-            // EBUSY = target already mounted. ENODEV = fs type can't
-            // be mounted on this target (e.g., devtmpfs when /dev is
-            // already a different fs). Both mean "someone beat us to
-            // it" — fine when not running as true PID 1 (SSH dev test,
-            // container that already has /proc etc.).
-            Err(rustix::io::Errno::BUSY) | Err(rustix::io::Errno::NODEV) => {
-                tracing::debug!(target = target, "mount skipped (already mounted)");
+            // EBUSY = target already mounted (upstream or prior run).
+            Err(rustix::io::Errno::BUSY) => {
+                tracing::info!(target = target, "early_mounts: already mounted (EBUSY)");
+            }
+            // ENODEV = fs type can't be mounted on this target, e.g.,
+            // devtmpfs when the kernel lacks CONFIG_DEVTMPFS. This is
+            // a real problem for /dev — without devtmpfs we'd need to
+            // mknod the device nodes by hand. Log loudly.
+            Err(rustix::io::Errno::NODEV) => {
+                tracing::warn!(target = target, fstype = fstype, "early_mounts: ENODEV (kernel lacks fstype?)");
             }
             // ENOENT = target path doesn't exist AND nothing is
             // mounted there. Can happen for /dev/pts or /sys/fs/cgroup
             // if their parent tmpfs/sysfs doesn't have them yet.
-            // Log and continue — cgroup v2 setup later will retry.
             Err(rustix::io::Errno::NOENT) => {
                 tracing::warn!(
                     target = target,
