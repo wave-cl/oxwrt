@@ -113,25 +113,27 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
         None
     };
 
-    // Step 3: OPEN the image file before pivot so the inode stays
-    // accessible through the fd even after /tmp becomes unreachable.
-    // Files open across a pivot_root continue to work — only name
-    // lookups break. The image is ~22 MiB so we don't slurp it into
-    // memory; keep it on disk (via the old-root path, now hidden)
-    // and stream through the open fd.
-    let image_file = File::open(image_path)
-        .map_err(io(format!("open {} pre-pivot", image_path.display())))?;
+    // Step 3: Open TWO independent file handles before pivot. We need
+    // one per tar-member-extraction pass in flash_image, since we can't
+    // reliably assume the tar places `root` before `kernel` (on this
+    // target the actual order is kernel, then root — the opposite of
+    // what stock sysupgrade's emmc_upgrade_tar suggests). Streaming in
+    // tar order would force us to write kernel first, which breaks
+    // the "rootfs-before-kernel" safety property; two passes let us
+    // write in the canonical order regardless of the archive's order.
+    //
+    // try_clone() shares the underlying file offset on Linux, so
+    // independent offsets require independent open(2) calls. Files
+    // open across pivot_root continue to work — only name lookups
+    // break — so opening here is safe and survives the pivot.
+    let img_for_root = File::open(image_path)
+        .map_err(io(format!("open {} (root pass)", image_path.display())))?;
+    let img_for_kernel = File::open(image_path)
+        .map_err(io(format!("open {} (kernel pass)", image_path.display())))?;
 
     // Pre-flight: walk the tar listing once BEFORE the destructive
-    // writes in flash_image. If the tar is malformed or missing
-    // kernel/root members, we want to know NOW, not after we've
-    // zeroed the kernel partition head.
-    //
-    // Crucial: open a SEPARATE File for the scan — try_clone shares
-    // the underlying offset, so reading through the clone would
-    // advance the "real" file's offset too, and the subsequent
-    // flash_image stream would find an empty tar. (Lesson paid for
-    // in a v13 live test.)
+    // writes in flash_image. Catches malformed images, missing
+    // kernel/root members, etc. before we've committed any writes.
     preflight_tar(image_path)?;
 
     // Step 4: resolve partitions ahead of pivot. After the pivot,
@@ -150,7 +152,14 @@ pub fn apply(image_path: &Path, keep_settings: bool) -> Result<(), Error> {
     pivot_to_ramfs()?;
 
     // Step 6-7: flash.
-    flash_image(image_file, tar_len, &kern_dev, &root_dev, backup_tgz.as_deref())?;
+    flash_image(
+        img_for_root,
+        img_for_kernel,
+        tar_len,
+        &kern_dev,
+        &root_dev,
+        backup_tgz.as_deref(),
+    )?;
 
     // Step 8: sync + reboot.
     tracing::warn!("sysupgrade: flash complete, rebooting");
@@ -568,6 +577,49 @@ fn preflight_tar(image_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+// ── per-member extract helper ──────────────────────────────────────
+
+/// Stream a single tar member (by basename) from `image_file` to
+/// `out_dev`. Returns the number of bytes written. Consumes
+/// `image_file`. Used twice from flash_image — once for "root", once
+/// for "kernel". Each call uses an independent File handle so the
+/// tar iteration offsets don't collide.
+fn extract_and_write(
+    image_file: File,
+    tar_len: u64,
+    member_basename: &str,
+    out_dev: &Path,
+) -> Result<u64, Error> {
+    let limited = image_file.take(tar_len);
+    let mut ar = tar::Archive::new(limited);
+    for entry in ar.entries().map_err(io("tar entries"))? {
+        let mut entry = match entry {
+            Ok(e) => e,
+            // Past tar_len we hit the fwtool trailer; if we already
+            // found the member we'd have returned, so this is a
+            // genuine "not found" case. Let the "missing member"
+            // error below fire.
+            Err(_) => break,
+        };
+        let path = entry.path().map_err(io("tar entry path"))?.into_owned();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name != member_basename {
+            continue;
+        }
+        let mut out = OpenOptions::new()
+            .write(true)
+            .open(out_dev)
+            .map_err(io(format!("open {}", out_dev.display())))?;
+        let n = std::io::copy(&mut entry, &mut out)
+            .map_err(io(format!("write {member_basename}")))?;
+        out.sync_all().map_err(io(format!("fsync {member_basename}")))?;
+        return Ok(n);
+    }
+    Err(Error::Image(format!(
+        "tar missing {member_basename} member"
+    )))
+}
+
 // ── flash ──────────────────────────────────────────────────────────
 
 /// Stream `image_path`'s root and kernel tar members to the eMMC
@@ -576,16 +628,33 @@ fn preflight_tar(image_path: &Path) -> Result<(), Error> {
 /// valid kernel or a zeroed kernel — never a valid-looking kernel
 /// pointing at a half-flashed rootfs).
 fn flash_image(
-    image_file: File,
+    img_for_root: File,
+    img_for_kernel: File,
     tar_len: u64,
     kern_dev: &Path,
     root_dev: &Path,
     backup_tgz: Option<&[u8]>,
 ) -> Result<(), Error> {
+    // Canonical write order (matches stock emmc.sh's safety model):
+    //
+    //   1. Zero first 4 KiB of kernel partition — invalidates the FIT
+    //      magic so U-Boot won't try to boot the old kernel if we die
+    //      between here and step 3.
+    //   2. Write rootfs in full.
+    //   3. Write kernel in full.
+    //
+    // A power cut at ANY point between steps 1 and 3 leaves the board
+    // in a "kernel unbootable, recovery needed" state — never a
+    // "valid-looking kernel pointing at half-flashed rootfs" state.
+    // That's worth the occasional recovery over a silent brick.
+    //
+    // We extract root and kernel via TWO independent passes because
+    // the actual tar archive on mediatek/filogic interleaves them in
+    // the order (CONTROL, kernel, root) — streaming in tar order
+    // would force kernel-first. Two passes with independent File
+    // handles keeps the safety ordering.
 
-    // Step 1: zero the first 4 KiB of the kernel partition. Invalidates
-    // the existing FIT header so U-Boot refuses to boot the old kernel
-    // if we die before writing the new one.
+    // Step 1.
     {
         let mut f = OpenOptions::new()
             .write(true)
@@ -597,82 +666,25 @@ fn flash_image(
     }
     tracing::info!(dev = %kern_dev.display(), "sysupgrade: kernel head zeroed");
 
-    // The sysupgrade.bin for this target is a plain POSIX tar (no
-    // gzip wrapper) with the fwtool FWx0 trailer appended. Earlier
-    // versions of this code wrapped the read in GzDecoder thinking
-    // the outer layer was .tar.gz — that assumption held for nand
-    // targets but not for mediatek/filogic emmc, where tar ships
-    // uncompressed. Size-limit to pre-trailer length so tar doesn't
-    // see the FWx0 footer as spurious header bytes past EOF.
-    let limited = image_file.take(tar_len);
-    let mut ar = tar::Archive::new(limited);
+    // Step 2: extract and write rootfs.
+    tracing::info!(dev = %root_dev.display(), "sysupgrade: writing rootfs");
+    let root_bytes_written = extract_and_write(
+        img_for_root,
+        tar_len,
+        "root",
+        root_dev,
+    )?;
+    tracing::info!(bytes = root_bytes_written, "sysupgrade: rootfs written");
 
-    // Walk the tar once. We need both `root` and `kernel` members;
-    // tar doesn't support random access so we stream each member as
-    // we encounter it.
-    //
-    // Invariant: `root` MUST be written before `kernel` (see emmc.sh
-    // ordering comment above). The stock tar places them root-first
-    // already, but we defensively check and fail loudly if the order
-    // is reversed.
-    let mut root_bytes_written: u64 = 0;
-    let mut kernel_seen = false;
-    let mut root_seen = false;
-
-    for entry in ar.entries().map_err(io("tar entries"))? {
-        let mut entry = entry.map_err(io("tar entry"))?;
-        let path = entry.path().map_err(io("tar entry path"))?.into_owned();
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        match name {
-            "root" => {
-                if kernel_seen {
-                    return Err(Error::Image(
-                        "tar order: kernel precedes root (dangerous)".into(),
-                    ));
-                }
-                tracing::info!(dev = %root_dev.display(), "sysupgrade: writing rootfs");
-                let mut f = OpenOptions::new()
-                    .write(true)
-                    .open(root_dev)
-                    .map_err(io(format!("open {}", root_dev.display())))?;
-                root_bytes_written = std::io::copy(&mut entry, &mut f)
-                    .map_err(io("write rootfs"))?;
-                f.sync_all().map_err(io("fsync rootfs"))?;
-                root_seen = true;
-                tracing::info!(bytes = root_bytes_written, "sysupgrade: rootfs written");
-            }
-            "kernel" => {
-                if !root_seen {
-                    // We can still continue — we just might lose the
-                    // "atomic" property. Don't abort: a sysupgrade.bin
-                    // shipping only a kernel is a valid operator
-                    // choice in some workflows.
-                    tracing::warn!("sysupgrade: kernel member without preceding root");
-                }
-                tracing::info!(dev = %kern_dev.display(), "sysupgrade: writing kernel");
-                let mut f = OpenOptions::new()
-                    .write(true)
-                    .open(kern_dev)
-                    .map_err(io(format!("open {}", kern_dev.display())))?;
-                let n = std::io::copy(&mut entry, &mut f)
-                    .map_err(io("write kernel"))?;
-                f.sync_all().map_err(io("fsync kernel after write"))?;
-                kernel_seen = true;
-                tracing::info!(bytes = n, "sysupgrade: kernel written");
-            }
-            _ => {
-                // CONTROL, directories, dtb (unused on GL-MT6000) — skip.
-            }
-        }
-    }
-
-    if !root_seen {
-        return Err(Error::Image("tar missing root member".into()));
-    }
+    // Step 3: extract and write kernel.
+    tracing::info!(dev = %kern_dev.display(), "sysupgrade: writing kernel");
+    let kernel_bytes_written = extract_and_write(
+        img_for_kernel,
+        tar_len,
+        "kernel",
+        kern_dev,
+    )?;
+    tracing::info!(bytes = kernel_bytes_written, "sysupgrade: kernel written");
 
     // Step 3: write the backup tgz past the rootfs, or zero a marker
     // there to force overlay reformat.
