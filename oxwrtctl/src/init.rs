@@ -429,44 +429,47 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         (&net, cfg.primary_wan())
     {
         let handle = net_handle.handle().clone();
-        match wan_dhcp::acquire(&handle, iface, Duration::from_secs(15)).await {
-            Ok(lease) => {
-                if let Err(e) = wan_dhcp::apply_lease(&handle, iface, &lease).await {
-                    tracing::error!(iface = %iface, error = %e, "wan dhcp: apply_lease failed");
-                }
-                *wan_lease.write().unwrap() = Some(lease.clone());
-                let _ = wan_dhcp::spawn_renewal_loop(
-                    handle,
-                    iface.clone(),
-                    lease,
-                    wan_lease.clone(),
-                );
-
-                // Now that we have a WAN lease, fire a one-shot SNTP
-                // query against a hard-coded IP to snap the system
-                // clock to real-time. We can't use the ntpd-rs service
-                // for this: it needs DNS to resolve pool.ntp.org, which
-                // needs the dns container up, which needs us past this
-                // boot phase. And without NTP the bootstrap-clock-floor
-                // is only accurate to build-time ± replay_window — fine
-                // for operators who flash and immediately connect, but
-                // broken for images that sat for hours before boot.
-                //
-                // time.cloudflare.com (162.159.200.1) — anycast, very
-                // reliable, no DNS needed. Not authenticated (NTS would
-                // need time and roots both), but we only use the result
-                // to initialize a floor; ntpd-rs takes over for ongoing
-                // discipline.
-                tokio::spawn(async {
-                    if let Err(e) = sntp_bootstrap_clock("162.159.200.1:123").await {
-                        tracing::warn!(error = %e, "sntp bootstrap failed");
+        let iface = iface.clone();
+        let wan_lease_clone = wan_lease.clone();
+        // Spawn acquire + renewal as a single background task so initial
+        // failure (e.g. WAN cable not plugged at boot) doesn't give up
+        // forever. The task retries acquire with 10s→5min backoff until
+        // the link is usable, then spawns the normal renewal loop and
+        // triggers SNTP bootstrap. Keeps oxwrt boot deterministic — we
+        // don't block userspace-init waiting for DHCP.
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(10);
+            let lease = loop {
+                match wan_dhcp::acquire(&handle, &iface, Duration::from_secs(15)).await {
+                    Ok(l) => break l,
+                    Err(e) => {
+                        tracing::warn!(
+                            iface = %iface, error = %e, backoff_s = backoff.as_secs(),
+                            "wan dhcp: initial acquire failed; retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(300));
                     }
-                });
+                }
+            };
+            if let Err(e) = wan_dhcp::apply_lease(&handle, &iface, &lease).await {
+                tracing::error!(iface = %iface, error = %e, "wan dhcp: apply_lease failed");
             }
-            Err(e) => {
-                tracing::warn!(iface = %iface, error = %e, "wan dhcp: no lease acquired");
+            *wan_lease_clone.write().unwrap() = Some(lease.clone());
+            let _ = wan_dhcp::spawn_renewal_loop(
+                handle,
+                iface.clone(),
+                lease,
+                wan_lease_clone,
+            );
+            // SNTP bootstrap once WAN is up. See historical comment:
+            // time.cloudflare.com (162.159.200.1) is anycast, no DNS
+            // needed, used only to initialize the clock floor before
+            // ntpd-rs takes over.
+            if let Err(e) = sntp_bootstrap_clock("162.159.200.1:123").await {
+                tracing::warn!(error = %e, "sntp bootstrap failed");
             }
-        }
+        });
     }
 
     let firewall_dump = if net.is_some() {

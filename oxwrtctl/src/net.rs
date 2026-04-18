@@ -354,6 +354,29 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .accept()
         .add_to_batch(&mut batch);
 
+    // Accept DHCPv4 OFFER/ACK on the WAN iface. Our DHCP client sends
+    // DISCOVER/REQUEST via AF_PACKET raw socket (bypasses iptables)
+    // but RECEIVES via a UDP socket bound 0.0.0.0:68. The replies land
+    // in the INPUT chain before the client has an IP, so conntrack has
+    // no "established" entry yet, and without this rule the default-
+    // drop policy silently swallows every OFFER. Symptom: wan_dhcp
+    // acquire() times out on every retry even though the link is up
+    // and the upstream has a working DHCP server.
+    //
+    // Gated on WAN being in DHCP mode — static WAN doesn't need it,
+    // and inserting it on a static WAN would needlessly accept DHCP
+    // chatter arriving on that iface.
+    if let Some(Network::Wan { iface: wan_if, wan: WanConfig::Dhcp, .. }) =
+        cfg.primary_wan()
+    {
+        let mut r = Rule::new(&input)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .iiface(wan_if)
+            .map_err(|e| Error::Firewall(e.to_string()))?;
+        r = r.dport(68, rustables::Protocol::UDP);
+        r.accept().add_to_batch(&mut batch);
+    }
+
     // Emit each config rule into the right chain.
     for rule in &cfg.firewall.rules {
         // ct_state rules go into both input + forward.
