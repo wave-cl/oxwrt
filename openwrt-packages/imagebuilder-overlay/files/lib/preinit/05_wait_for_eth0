@@ -1,0 +1,33 @@
+#!/bin/sh
+# OpenWrt preinit hook: wait up to 5 seconds for the ethernet
+# driver to probe and create eth0 before the rest of preinit runs.
+#
+# Without this hook the boot log carries two avoidable errors on
+# MT7986 (GL-MT6000 Flint 2):
+#   Cannot find device "eth0"                       (fw_check)
+#   sendto(): Network unreachable  (× 3)            (failsafe netmsg)
+#
+# The mtk_soc_eth platform driver probes ~700 ms after preinit
+# starts — preinit's failsafe announcement tries to broadcast on
+# eth0 before the netdev exists, so the kernel's routing table has
+# no matching output iface and each sendto() fails with ENETUNREACH.
+#
+# Gate on /sys/class/net/eth0 rather than ifconfig/ip lookups to
+# avoid spawning a subprocess 20x in the common case; sysfs check
+# is a syscall stat().
+#
+# 5-second cap is generous — the driver usually shows up in <1 s.
+# A timeout just falls through to the rest of preinit, preserving
+# OpenWrt's "best-effort boot continues" contract.
+
+wait_for_eth0() {
+    local i=0
+    while [ $i -lt 50 ]; do
+        [ -e /sys/class/net/eth0 ] && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+boot_hook_add preinit_essential wait_for_eth0

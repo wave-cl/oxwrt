@@ -491,12 +491,20 @@ endef
 
 define imagebuilder_stage_bare
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
-	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear
+	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear \
+	         $(IMAGEBUILDER_DIR)/files/lib/preinit
 	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
 	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
+	# Preinit hooks: wait for the ethernet driver to probe eth0
+	# before the rest of preinit runs. Without this, failsafe's
+	# netmsg broadcast hits "Network unreachable" x3 and fw_check
+	# logs "Cannot find device eth0" on the MT7986 bootup.
+	cp openwrt-packages/imagebuilder-overlay/files/lib/preinit/*  \
+	   $(IMAGEBUILDER_DIR)/files/lib/preinit/
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/lib/preinit/*
 	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
 		cp "$$HOME/.ssh/id_ed25519.pub" $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
 		chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
