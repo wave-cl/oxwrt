@@ -489,16 +489,10 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         });
     }
 
-    // DHCPv6-PD on WAN. Gated on the operator setting `ipv6_pd=true`
-    // — without it the task doesn't spawn and the static ULA path in
-    // [[networks]] keeps working unchanged. Acquire runs in a
-    // background task with the same retry-until-success pattern as
-    // v4 DHCP. On success: assign per-subnet /64s to each
-    // LAN/Simple with `ipv6_subnet_id`, regen corerad so the new
-    // prefix gets advertised. Renewal is not yet implemented —
-    // valid_lifetime is typically hours/days on real ISPs so first
-    // acquire carries the router for a long time; follow-up PR will
-    // add T1/T2 Renew/Rebind.
+    // DHCPv6-PD on WAN. Gated on `ipv6_pd = true`. Acquire → apply
+    // → corerad regen → kick off a renewal loop that handles T1
+    // Renew / T2 Rebind / expiry-restart per RFC 8415 § 18.2.10.
+    let v6_lease: wan_dhcp6::SharedV6Lease = std::sync::Arc::new(std::sync::RwLock::new(None));
     if let (
         Some(net_handle),
         Some(Network::Wan {
@@ -511,6 +505,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         let handle = net_handle.handle().clone();
         let iface = iface.clone();
         let cfg_clone = cfg.clone();
+        let v6_lease_clone = v6_lease.clone();
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(10);
             let lease = loop {
@@ -537,22 +532,23 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Err(e) = wan_dhcp6::apply_delegation(&handle, &cfg_clone, &lease).await {
                 tracing::error!(error = %e, "v6 apply_delegation failed");
             }
-            // Regenerate corerad so the delegated /64s replace the
-            // ULA in advertised prefixes. We read the shared cfg
-            // via a clone — a concurrent reload would already have
-            // regenerated from its own new_cfg.
-            //
-            // NOTE: This replaces the ipv6_address-based corerad
-            // config derived at boot. For networks with both a
-            // static ipv6_address AND an ipv6_subnet_id, the
-            // delegated /64 wins via rtnetlink's "most-recently-
-            // added" tie-break.
             let new_cfg = wan_dhcp6::cfg_with_delegated_prefix(&cfg_clone, &lease);
             if let Err(e) = crate::corerad::write_config(&new_cfg) {
                 tracing::error!(error = %e, "corerad regen after PD failed");
             }
+            // Drive renew/rebind/re-Solicit for the lifetime of this
+            // boot. Detached — JoinHandle intentionally dropped like
+            // the v4 renewal loop.
+            drop(wan_dhcp6::spawn_renewal_loop(
+                iface,
+                lease,
+                v6_lease_clone,
+                cfg_clone,
+                handle,
+            ));
         });
     }
+    let _ = v6_lease; // reserved for future diag exposure
 
     let firewall_dump = if net.is_some() {
         if let Err(e) = net::install_firewall(&cfg) {

@@ -356,6 +356,297 @@ async fn request_phase(
     }
 }
 
+// ── Phase 3: Renew / Rebind ────────────────────────────────────────
+//
+// Renew (RFC 8415 § 18.2.4): Sent from the client to the server that
+// issued the current lease when T1 elapses. Includes ClientId +
+// ServerId + IA_PD with the current prefix in an IAPrefix — the
+// server confirms by echoing it in its Reply with updated lifetimes.
+//
+// Rebind (RFC 8415 § 18.2.5): Sent when T1→T2 passes without a
+// Renew Reply. Same shape as Renew but WITHOUT ServerId (we've
+// given up on the original server; any server that recognizes our
+// IA_PD can answer). Always multicast to ff02::1:2.
+//
+// Both share the Reply-parsing logic from request_phase, refactored
+// into `recv_reply_ia_pd` below.
+
+async fn recv_reply_ia_pd(
+    sock: &tokio::net::UdpSocket,
+    timeout: Duration,
+) -> Result<(Ipv6Addr, u8, u32, u32, u32, u32), Error> {
+    let deadline = Instant::now() + timeout;
+    let mut rx = [0u8; 2048];
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(Error::Timeout("Reply"))?;
+        let (n, _from) = tokio::time::timeout(remaining, sock.recv_from(&mut rx))
+            .await
+            .map_err(|_| Error::Timeout("Reply"))??;
+        let msg = Message::decode(&mut dhcproto::Decoder::new(&rx[..n]))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+        if msg.msg_type() != MessageType::Reply {
+            continue;
+        }
+        let iapd =
+            find_iapd(msg.opts()).ok_or_else(|| Error::BadReply("Reply missing IA_PD".into()))?;
+        let iaprefix = find_iaprefix(&iapd.opts)
+            .ok_or_else(|| Error::BadReply("IA_PD missing IAPrefix".into()))?;
+        return Ok((
+            iaprefix.prefix_ip,
+            iaprefix.prefix_len,
+            iaprefix.preferred_lifetime,
+            iaprefix.valid_lifetime,
+            iapd.t1,
+            iapd.t2,
+        ));
+    }
+}
+
+/// Send a Renew (unicast-or-multicast, we always multicast) and
+/// await a Reply with the refreshed lease.
+pub async fn renew(
+    iface: &str,
+    prev: &DhcpV6Lease,
+    timeout: Duration,
+) -> Result<DhcpV6Lease, Error> {
+    let ifindex = read_iface_index(iface)?;
+    let sock = build_socket(ifindex)?;
+    let msg = build_renew_or_rebind(
+        MessageType::Renew,
+        &prev.client_duid,
+        prev.iaid,
+        Some(&prev.server_id),
+        prev.prefix,
+        prev.prefix_len,
+    );
+    send_multicast(&sock, ifindex, &msg).await?;
+    let (prefix, plen, preferred, valid, t1, t2) = recv_reply_ia_pd(&sock, timeout).await?;
+    Ok(DhcpV6Lease {
+        prefix: mask_v6_prefix(prefix, plen),
+        prefix_len: plen,
+        preferred_lifetime: preferred,
+        valid_lifetime: valid,
+        t1,
+        t2,
+        iaid: prev.iaid,
+        server_id: prev.server_id.clone(),
+        client_duid: prev.client_duid.clone(),
+        acquired_at: Instant::now(),
+    })
+}
+
+/// Send a Rebind (multicast, no ServerId) and await a Reply from
+/// whichever server responds. Used when Renew failed for T1→T2.
+pub async fn rebind(
+    iface: &str,
+    prev: &DhcpV6Lease,
+    timeout: Duration,
+) -> Result<DhcpV6Lease, Error> {
+    let ifindex = read_iface_index(iface)?;
+    let sock = build_socket(ifindex)?;
+    let msg = build_renew_or_rebind(
+        MessageType::Rebind,
+        &prev.client_duid,
+        prev.iaid,
+        None, // no ServerId in Rebind
+        prev.prefix,
+        prev.prefix_len,
+    );
+    send_multicast(&sock, ifindex, &msg).await?;
+    let (prefix, plen, preferred, valid, t1, t2) = recv_reply_ia_pd(&sock, timeout).await?;
+    Ok(DhcpV6Lease {
+        prefix: mask_v6_prefix(prefix, plen),
+        prefix_len: plen,
+        preferred_lifetime: preferred,
+        valid_lifetime: valid,
+        t1,
+        t2,
+        iaid: prev.iaid,
+        // Rebind may be answered by a different server; update
+        // server_id for the next Renew.
+        server_id: prev.server_id.clone(),
+        client_duid: prev.client_duid.clone(),
+        acquired_at: Instant::now(),
+    })
+}
+
+async fn send_multicast(
+    sock: &tokio::net::UdpSocket,
+    ifindex: u32,
+    msg: &Message,
+) -> Result<(), Error> {
+    let mut buf = Vec::new();
+    msg.encode(&mut dhcproto::Encoder::new(&mut buf))
+        .map_err(|e| Error::Encode(e.to_string()))?;
+    let dst = SocketAddrV6::new(
+        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x1, 0x2),
+        547,
+        0,
+        ifindex,
+    );
+    sock.send_to(&buf, dst).await?;
+    Ok(())
+}
+
+/// Spawn the renewal loop. Follows the RFC 8415 § 18.2.10 state
+/// machine: after `t1` secs, Renew; if no Reply by `t2`, Rebind;
+/// if no Reply by `valid_lifetime`, re-acquire via Solicit. Applies
+/// each new lease via `apply_delegation` + regenerates corerad so
+/// an ISP prefix rotation is transparent to LAN clients.
+pub fn spawn_renewal_loop(
+    iface: String,
+    initial: DhcpV6Lease,
+    shared: SharedV6Lease,
+    cfg: Config,
+    handle: rtnetlink::Handle,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lease = initial;
+        *shared.write().unwrap() = Some(lease.clone());
+        loop {
+            // Sleep until T1. Values of 0 mean "use discretion"
+            // (RFC 8415 § 14.2). For IA_PD a missing/zero T1 is
+            // common; default to 0.5 * valid_lifetime, capped at
+            // 1 day to avoid re-renewing a dead lease forever.
+            let t1 = if lease.t1 == 0 || lease.t1 == u32::MAX {
+                (lease.valid_lifetime / 2).min(86400)
+            } else {
+                lease.t1
+            };
+            let t2 = if lease.t2 == 0 || lease.t2 == u32::MAX {
+                (lease.valid_lifetime * 4 / 5).min(86400)
+            } else {
+                lease.t2
+            };
+            let renew_at = lease.acquired_at + Duration::from_secs(u64::from(t1));
+            let rebind_at = lease.acquired_at + Duration::from_secs(u64::from(t2));
+            let expire_at =
+                lease.acquired_at + Duration::from_secs(u64::from(lease.valid_lifetime));
+
+            // Sleep until renew_at.
+            if let Some(wait) = renew_at.checked_duration_since(Instant::now()) {
+                tokio::time::sleep(wait).await;
+            }
+
+            // Try Renew up to a few times spread between now and rebind_at.
+            let mut renewed = None;
+            while Instant::now() < rebind_at {
+                match renew(&iface, &lease, Duration::from_secs(5)).await {
+                    Ok(new_lease) => {
+                        tracing::info!(
+                            prefix = %new_lease.prefix,
+                            valid = new_lease.valid_lifetime,
+                            "dhcpv6-pd: Renew ok"
+                        );
+                        renewed = Some(new_lease);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "dhcpv6-pd: Renew failed; retry");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                }
+            }
+
+            // If Renew window passed with no luck, Rebind.
+            if renewed.is_none() {
+                while Instant::now() < expire_at {
+                    match rebind(&iface, &lease, Duration::from_secs(5)).await {
+                        Ok(new_lease) => {
+                            tracing::warn!(
+                                prefix = %new_lease.prefix,
+                                "dhcpv6-pd: Rebind ok (original server down)"
+                            );
+                            renewed = Some(new_lease);
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "dhcpv6-pd: Rebind failed; retry");
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                        }
+                    }
+                }
+            }
+
+            // If both failed and valid_lifetime expired, re-Solicit
+            // from scratch. This is the "ISP dropped our state and
+            // needs us to start over" path. The new prefix may differ,
+            // apply_delegation + corerad regen take care of that.
+            let new_lease = match renewed {
+                Some(l) => l,
+                None => {
+                    tracing::warn!(
+                        "dhcpv6-pd: lease expired without successful Renew/Rebind; \
+                         restarting Solicit"
+                    );
+                    match acquire(&iface, Duration::from_secs(30)).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!(error = %e, "dhcpv6-pd: re-Solicit failed; giving up for 60s");
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            // If the prefix changed, re-apply delegation + regen
+            // corerad so everything downstream reflects the new /56.
+            let prefix_changed =
+                new_lease.prefix != lease.prefix || new_lease.prefix_len != lease.prefix_len;
+            lease = new_lease;
+            *shared.write().unwrap() = Some(lease.clone());
+            if prefix_changed {
+                if let Err(e) = apply_delegation(&handle, &cfg, &lease).await {
+                    tracing::warn!(error = %e, "dhcpv6-pd: apply_delegation (post-renew) failed");
+                }
+                let new_cfg = cfg_with_delegated_prefix(&cfg, &lease);
+                if let Err(e) = crate::corerad::write_config(&new_cfg) {
+                    tracing::warn!(error = %e, "dhcpv6-pd: corerad regen (post-renew) failed");
+                }
+            }
+        }
+    })
+}
+
+fn build_renew_or_rebind(
+    mt: MessageType,
+    duid: &[u8],
+    iaid: u32,
+    server_id: Option<&[u8]>,
+    prefix: Ipv6Addr,
+    prefix_len: u8,
+) -> Message {
+    use dhcproto::v6::IAPrefix;
+    let mut msg = Message::new(mt);
+    msg.opts_mut().insert(DhcpOption::ClientId(duid.to_vec()));
+    if let Some(sid) = server_id {
+        msg.opts_mut().insert(DhcpOption::ServerId(sid.to_vec()));
+    }
+    msg.opts_mut().insert(DhcpOption::ElapsedTime(0));
+    // Include the current IA_PD + IAPrefix so the server knows we're
+    // asking to refresh the specific prefix we already hold.
+    let iaprefix = IAPrefix {
+        preferred_lifetime: 0,
+        valid_lifetime: 0,
+        prefix_len,
+        prefix_ip: prefix,
+        opts: DhcpOptions::new(),
+    };
+    let mut iapd_opts = DhcpOptions::new();
+    iapd_opts.insert(DhcpOption::IAPrefix(iaprefix));
+    let iapd = IAPD {
+        id: iaid,
+        t1: 0,
+        t2: 0,
+        opts: iapd_opts,
+    };
+    msg.opts_mut().insert(DhcpOption::IAPD(iapd));
+    msg
+}
+
 // ── Message builders ────────────────────────────────────────────────
 
 fn build_message(mt: MessageType, duid: &[u8], iaid: u32) -> Message {
