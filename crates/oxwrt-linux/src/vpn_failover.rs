@@ -213,6 +213,36 @@ pub fn spawn(
                                 wan_iface.clone(),
                             );
                             if prev_endpoint_key.as_ref() != Some(&key) {
+                                // Remove the prior exemption BEFORE
+                                // installing the new one. Otherwise
+                                // a profile swap leaves the old
+                                // /32 permanently in the main table —
+                                // harmless routing-wise (it just
+                                // points at WAN for an IP we're no
+                                // longer using), but accumulates
+                                // across CRUD cycles + clutters
+                                // `ip route`. Only skip the remove
+                                // when the endpoint IP is exactly
+                                // the same (e.g. profile stayed,
+                                // only wan_gw changed) — otherwise
+                                // we'd yank the live exemption.
+                                if let Some((_, prev_ip, _, _)) = &prev_endpoint_key {
+                                    if *prev_ip != endpoint_ip {
+                                        if let Err(e) =
+                                            vpn_routing::remove_endpoint_exemption(
+                                                &handle,
+                                                *prev_ip,
+                                            )
+                                            .await
+                                        {
+                                            tracing::debug!(
+                                                prev_ip = %prev_ip,
+                                                error = %e,
+                                                "vpn failover: stale exemption cleanup failed"
+                                            );
+                                        }
+                                    }
+                                }
                                 if let Err(e) = vpn_routing::install_endpoint_exemption(
                                     &handle,
                                     endpoint_ip,
@@ -271,6 +301,20 @@ pub fn spawn(
             } else {
                 if let Err(e) = vpn_routing::clear_table_51_default(&handle).await {
                     tracing::warn!(error = %e, "vpn failover: clear_table_51_default failed");
+                }
+                // Kill-switch transition: no active profile means
+                // no endpoint is reachable-through-tunnel. Remove
+                // the /32 exemption so it doesn't linger forever
+                // across a profile delete-and-re-add cycle.
+                if let Some((_, prev_ip, _, _)) = &prev_endpoint_key {
+                    if let Err(e) =
+                        vpn_routing::remove_endpoint_exemption(&handle, *prev_ip).await
+                    {
+                        tracing::debug!(
+                            prev_ip = %prev_ip, error = %e,
+                            "vpn failover: exemption cleanup on killswitch failed"
+                        );
+                    }
                 }
                 *active.lock().unwrap() = None;
                 prev_endpoint_key = None;

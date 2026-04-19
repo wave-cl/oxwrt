@@ -64,6 +64,17 @@ fn build_tarball() -> Result<Vec<u8>, String> {
     // /etc/oxwrt/ — recursive. Walk in sorted order for reproducible
     // tarballs (useful for SHA diffs between backups — if nothing
     // changed, the hash matches).
+    //
+    // `/etc/oxwrt/vpn/` is skipped: those files are WireGuard
+    // client private keys for `[[vpn_client]]` profiles. Including
+    // them in backups would make a casually-shared backup file a
+    // complete VPN-identity compromise. The sQUIC signing seed and
+    // wg SERVER key are different — those ARE in the backup
+    // because recovering onto the same device is the whole point
+    // of backup/restore; losing them is more painful than their
+    // blast radius. vpn_client keys are per-provider secrets the
+    // operator re-downloads from Mullvad / Proton / etc. if lost —
+    // cheap to regenerate, expensive to leak.
     let mut paths: Vec<PathBuf> = Vec::new();
     walk_collect(Path::new(OXWRT_DIR), &mut paths).map_err(|e| e.to_string())?;
     paths.sort();
@@ -75,6 +86,10 @@ fn build_tarball() -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?
             .to_string_lossy()
             .to_string();
+        // Skip the vpn/ subtree — see comment above.
+        if is_vpn_key_path(&rel) {
+            continue;
+        }
         let archive_name = format!("oxwrt/{rel}");
         if path.is_dir() {
             continue; // we'll mkdir on extract from the file paths
@@ -244,6 +259,39 @@ fn swap_live(stage: &Path) -> Result<(), String> {
         copy_tree(&src_dir, Path::new(OXWRT_DIR))?;
     }
     Ok(())
+}
+
+/// Should this path (relative to /etc/oxwrt/) be excluded from
+/// backups? `/etc/oxwrt/vpn/` holds provider-supplied private
+/// keys for `[[vpn_client]]` profiles; we keep them out of the
+/// backup so a stolen backup file isn't an instant VPN-identity
+/// compromise. Operator re-downloads from Mullvad / Proton on
+/// restore — trivial compared to regenerating identities baked
+/// into server-side secrets that ARE backed up.
+fn is_vpn_key_path(rel: &str) -> bool {
+    rel == "vpn" || rel.starts_with("vpn/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_vpn_key_path;
+
+    #[test]
+    fn excludes_vpn_subtree() {
+        assert!(is_vpn_key_path("vpn"));
+        assert!(is_vpn_key_path("vpn/mullvad-primary.key"));
+        assert!(is_vpn_key_path("vpn/deep/nested.key"));
+    }
+
+    #[test]
+    fn includes_everything_else() {
+        assert!(!is_vpn_key_path(""));
+        assert!(!is_vpn_key_path("key.ed25519"));
+        assert!(!is_vpn_key_path("authorized_keys"));
+        assert!(!is_vpn_key_path("wg0.key")); // server key, different dir
+        assert!(!is_vpn_key_path("debug-ssh-keys/dropbear_ed25519_host_key"));
+        assert!(!is_vpn_key_path("vpnsomething.conf")); // prefix trap
+    }
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {

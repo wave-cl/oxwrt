@@ -25,11 +25,11 @@
 //! Ordering inside this module:
 //!   - `install_policy_rules` + `install_table_51_blackhole` run
 //!     on every reload and at boot. Each per-iface rule is
-//!     idempotent (EEXIST tolerated). Stale rules from a
-//!     previous via_vpn=true that's now false are currently NOT
-//!     cleaned — operators changing that flag live should reboot
-//!     for the cleanest result. Follow-up: track installed rules
-//!     on ControlState and diff.
+//!     idempotent (EEXIST tolerated). Stale rules (from zones
+//!     whose via_vpn just flipped false) are cleaned via the
+//!     `INSTALLED_IIF_RULES` static: we diff the new iface set
+//!     against the last-installed set and `del` the leftovers
+//!     before adding new ones.
 //!   - `set_table_51_default` + `clear_table_51_default` are called
 //!     by the coordinator on active-profile change.
 //!   - `install_endpoint_exemption` is called by the coordinator
@@ -38,7 +38,9 @@
 //!     the-tunnel recursion — the wg peer itself needs to be
 //!     reached via WAN, not via the thing we're trying to bring up.
 
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::sync::Mutex;
 
 use futures_util::stream::TryStreamExt;
 use rtnetlink::packet_route::{
@@ -61,6 +63,14 @@ pub const VPN_TABLE: u32 = 51;
 /// for an operator to squeeze rules in front.
 pub const VPN_RULE_PRIORITY: u32 = 1000;
 
+/// Set of ifaces we've installed `ip rule iif <iface> lookup 51`
+/// for. Lets reload remove rules for zones that just toggled
+/// via_vpn off. Static because `Net` is reconstructed on every
+/// reload but the kernel's rtnetlink state persists; tracking on
+/// ControlState would forget across the reload that spawns a
+/// fresh coordinator.
+static INSTALLED_IIF_RULES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
 /// Install one `ip rule iif <zone_iface> lookup 51` per iface of
 /// a via_vpn firewall zone. Idempotent — duplicate adds are
 /// tolerated (EEXIST). Safe to call on every reload because
@@ -77,6 +87,40 @@ pub async fn install_policy_rules(
     handle: &Handle,
     via_vpn_ifaces: &[String],
 ) -> Result<(), Error> {
+    // Diff against what we installed last time. Rules for ifaces
+    // that were in the previous set but aren't in this one are
+    // removed; rules for new ifaces are added. Rules that stay
+    // are already in the kernel — EEXIST is the tell.
+    let new_set: HashSet<String> = via_vpn_ifaces.iter().cloned().collect();
+    let old_set = {
+        let guard = INSTALLED_IIF_RULES.lock().unwrap();
+        guard.clone().unwrap_or_default()
+    };
+    for iface in old_set.difference(&new_set) {
+        // rtnetlink 0.20's RuleHandle::del takes a RuleMessage
+        // directly (no builder). Easiest way to build a matching
+        // one is to reuse RuleAddRequest as a construction helper
+        // and pull its message_mut clone — same fields we'd have
+        // emitted on add, so the kernel's match-by-attributes
+        // finds the right rule.
+        let mut add_builder = handle
+            .rule()
+            .add()
+            .v4()
+            .input_interface(iface.clone())
+            .table_id(VPN_TABLE)
+            .priority(VPN_RULE_PRIORITY)
+            .action(RuleAction::ToTable);
+        let msg = add_builder.message_mut().clone();
+        let res = handle.rule().del(msg).execute().await;
+        match res {
+            Ok(()) => tracing::info!(iif = %iface, "vpn_routing: stale iif rule removed"),
+            Err(e) if is_noent(&e) => {
+                tracing::debug!(iif = %iface, "vpn_routing: iif rule already gone");
+            }
+            Err(e) => tracing::warn!(iif = %iface, error = %e, "vpn_routing: iif rule del failed"),
+        }
+    }
     for iface in via_vpn_ifaces {
         let res = handle
             .rule()
@@ -103,6 +147,9 @@ pub async fn install_policy_rules(
             Err(e) => return Err(Error::Rtnetlink(e)),
         }
     }
+    // Track what's live now so the NEXT reload knows what to
+    // diff against.
+    *INSTALLED_IIF_RULES.lock().unwrap() = Some(new_set);
     Ok(())
 }
 
