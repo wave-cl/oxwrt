@@ -10,7 +10,7 @@ use super::clock::sntp_bootstrap_clock;
 use super::modules::load_modules;
 use super::netdev::{create_wifi_ap_interfaces, rename_netdevs_from_dts};
 use super::preinit::*;
-use super::watchdog::spawn_watchdog_pet;
+use super::watchdog::{spawn_heartbeat, spawn_watchdog_pet};
 use super::*;
 
 pub fn run() -> Result<(), Error> {
@@ -381,6 +381,11 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // and give up — the system will reboot in 30s, at which point the
     // operator will notice something's wrong.
     spawn_watchdog_pet();
+    // Heartbeat ticks the counter the pet thread gates on. Must
+    // be spawned on the same runtime as the rest of oxwrtd so a
+    // stall there stops the tick → pet thread stops feeding →
+    // kernel reboots the board.
+    spawn_heartbeat();
 
     // Enable cgroup v2 controllers once so per-service memory/cpu/pids
     // limits from config take effect when `container::setup_cgroup` writes

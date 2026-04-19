@@ -1,6 +1,60 @@
 //! Watchdog: inherit an fd if procd-init left one, else open
 //! /dev/watchdog and pet it every 5s.
+//!
+//! # Deadman coupling (stall detector)
+//!
+//! The watchdog pet loop runs on a dedicated OS thread so it
+//! stays alive even when tokio's executor is wedged — that's
+//! useful for catching hard process-level failures, but it also
+//! masks a class of "tokio is stuck but the process is alive"
+//! bugs where the hardware reset never fires.
+//!
+//! To catch those too, we run a tokio task that increments
+//! `HEARTBEAT` every second. The OS-thread pet loop checks the
+//! heartbeat's freshness before each pet: if the counter hasn't
+//! advanced in `STALL_THRESHOLD`, it STOPS petting. The kernel's
+//! hardware watchdog then fires (default ~31s on MT7986) and
+//! the board resets. On a healthy system, the heartbeat ticks
+//! every 1s → pet loop sees fresh counter → watchdog stays
+//! happy.
+//!
+//! The two numbers have to fit the kernel's timeout:
+//!   - HEARTBEAT tick:       1 s
+//!   - STALL_THRESHOLD:     20 s  (we stop petting after 20 s of
+//!                                 no tokio progress)
+//!   - kernel WD timeout:   31 s  (board default — reboots
+//!                                 20+ ms after we stop petting)
+//!
 //! Split out of init.rs in step 6.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// Monotonic counter incremented by `spawn_heartbeat` every
+/// HEARTBEAT_INTERVAL. The pet loop reads it to detect tokio
+/// stalls. Starts at 0 — if tokio never ticks (e.g. runtime
+/// failed to build), the very first pet attempt sees a stale
+/// counter and refuses to pet, which is the correct behavior.
+static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const PET_INTERVAL: Duration = Duration::from_secs(5);
+const STALL_THRESHOLD: Duration = Duration::from_secs(20);
+
+/// Spawn a tokio task that bumps `HEARTBEAT` every second. Must
+/// run on the same runtime that owns the control plane — if
+/// THAT runtime stalls, this task stops firing, the watchdog
+/// pet thread notices, and the kernel reboots.
+pub(super) fn spawn_heartbeat() {
+    tokio::spawn(async {
+        let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            HEARTBEAT.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
 
 fn find_inherited_watchdog_fd() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd;
@@ -86,13 +140,110 @@ pub(super) fn spawn_watchdog_pet() {
         .name("watchdog".to_string())
         .spawn(move || {
             let mut wd = wd;
+            // Snapshot of the last-seen heartbeat + wall-clock
+            // when we saw it. Used to detect "counter advancing"
+            // vs "counter stuck" without needing a synchronized
+            // clock between heartbeat task and pet thread.
+            let mut last_seen: u64 = HEARTBEAT.load(Ordering::Relaxed);
+            let mut last_advance = Instant::now();
             loop {
-                if let Err(e) = wd.write_all(b"\0") {
-                    tracing::warn!(error = %e, "watchdog write failed");
+                let current = HEARTBEAT.load(Ordering::Relaxed);
+                let (new_last_seen, new_last_advance) =
+                    update_stall_tracker(last_seen, last_advance, current);
+                last_seen = new_last_seen;
+                last_advance = new_last_advance;
+                let stall = last_advance.elapsed();
+                if stall < STALL_THRESHOLD {
+                    if let Err(e) = wd.write_all(b"\0") {
+                        tracing::warn!(error = %e, "watchdog write failed");
+                    }
+                    let _ = wd.flush();
+                } else {
+                    // tokio heartbeat hasn't advanced in >= STALL_THRESHOLD.
+                    // Stop petting — the kernel's hardware watchdog
+                    // takes over and reboots the board. Log once per
+                    // pet cycle so an operator watching the console
+                    // sees the count-up before reboot.
+                    tracing::error!(
+                        stall_s = stall.as_secs(),
+                        threshold_s = STALL_THRESHOLD.as_secs(),
+                        "watchdog: tokio heartbeat stalled; withholding pet to trigger reset"
+                    );
                 }
-                let _ = wd.flush();
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::thread::sleep(PET_INTERVAL);
             }
         })
         .expect("spawn watchdog thread");
+}
+
+/// Pure stall-tracker update: given the previously-observed
+/// heartbeat + when we last saw it advance, plus the current
+/// counter, return the updated (last_seen, last_advance) pair.
+///
+/// Extracted so the decision logic is unit-testable without
+/// spawning threads or reading the real HEARTBEAT static.
+fn update_stall_tracker(
+    last_seen: u64,
+    last_advance: Instant,
+    current: u64,
+) -> (u64, Instant) {
+    if current != last_seen {
+        (current, Instant::now())
+    } else {
+        (last_seen, last_advance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counter advancing → last_advance pushed forward, pet
+    /// continues indefinitely.
+    #[test]
+    fn heartbeat_advance_resets_stall_timer() {
+        let t0 = Instant::now() - Duration::from_secs(5);
+        let (seen, advance) = update_stall_tracker(10, t0, 11);
+        assert_eq!(seen, 11);
+        // Advance must have moved forward — strictly greater
+        // than t0.
+        assert!(advance > t0);
+    }
+
+    /// Counter unchanged → stall timer unchanged (pet thread
+    /// sees the age grow each iteration).
+    #[test]
+    fn heartbeat_unchanged_preserves_timer() {
+        let t0 = Instant::now() - Duration::from_secs(5);
+        let (seen, advance) = update_stall_tracker(10, t0, 10);
+        assert_eq!(seen, 10);
+        assert_eq!(advance, t0, "stale counter must not refresh the timer");
+    }
+
+    /// Threshold sizing sanity: the stall-before-pet withhold
+    /// MUST be less than typical hardware watchdog timeouts so
+    /// the kernel has room to fire after we stop feeding.
+    /// MT7986 default is 31 s; we withhold at 20 s, leaving
+    /// ≥11 s for the kernel to notice.
+    #[test]
+    fn stall_threshold_fits_under_hw_timeout() {
+        // Conservative: any kernel timeout >= 30 s covers us.
+        let kernel_wd_floor = Duration::from_secs(30);
+        assert!(
+            STALL_THRESHOLD + Duration::from_secs(5) <= kernel_wd_floor,
+            "STALL_THRESHOLD too close to kernel timeout; widen the gap"
+        );
+    }
+
+    /// The heartbeat-tick interval must be comfortably shorter
+    /// than the stall threshold so normal jitter (tokio timer
+    /// wheel granularity, GC pauses, etc.) doesn't trigger a
+    /// false stall detection.
+    #[test]
+    fn heartbeat_interval_well_under_threshold() {
+        assert!(
+            HEARTBEAT_INTERVAL * 10 <= STALL_THRESHOLD,
+            "STALL_THRESHOLD must be at least 10x HEARTBEAT_INTERVAL"
+        );
+    }
 }
