@@ -352,6 +352,32 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
                 gateway: s.gateway.map(|g| g.to_string()),
             })
             .collect();
+            // Per-VPN snapshot. Same pattern as wans above —
+            // read-only clone of the shared state. Empty on a
+            // non-VPN router (no vpn_client declared).
+            let active_vpn: Option<String> = state
+                .active_vpn
+                .lock()
+                .ok()
+                .and_then(|g| (*g).clone());
+            let vpns: Vec<crate::rpc::VpnEntry> =
+                crate::vpn_failover::snapshot_all(
+                    &state.config_snapshot(),
+                    &state.vpn_bringup,
+                    &state.vpn_health,
+                    &state.active_vpn,
+                )
+                .into_iter()
+                .map(|s| crate::rpc::VpnEntry {
+                    name: s.name,
+                    iface: s.iface,
+                    priority: s.priority,
+                    healthy: s.healthy,
+                    active: s.active,
+                    endpoint: s.endpoint,
+                    probe_target: s.probe_target.to_string(),
+                })
+                .collect();
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
@@ -361,6 +387,8 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
                 firewall_rules,
                 aps,
                 wg,
+                active_vpn,
+                vpns,
             }]
         }
         Request::Logs { service, follow } => handle_logs(state, &service, follow),

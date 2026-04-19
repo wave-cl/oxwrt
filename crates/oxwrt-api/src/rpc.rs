@@ -210,6 +210,17 @@ pub enum Response {
         /// direction.
         #[serde(default)]
         wg: Vec<WgIfaceStatus>,
+        /// Currently-active outbound VPN profile name, or None if
+        /// no profile is healthy (→ killswitch engaged). Only
+        /// meaningful when `[[vpn_client]]` is declared; absent
+        /// otherwise. Read from ControlState.active_vpn.
+        #[serde(default)]
+        active_vpn: Option<String>,
+        /// Per-vpn_client breakdown. One entry per declared
+        /// profile; fields mirror WanEntry. Empty on a non-VPN
+        /// router.
+        #[serde(default)]
+        vpns: Vec<VpnEntry>,
     },
     LogLine {
         line: String,
@@ -274,6 +285,28 @@ pub struct WanEntry {
     /// Gateway on this WAN's lease, if any.
     #[serde(default)]
     pub gateway: Option<String>,
+}
+
+/// Per-VpnClient-profile entry in the Status RPC's `vpns` field.
+/// Surfaced for every declared `[[vpn_client]]` so operators see
+/// at a glance which profile is active, which are ready-to-
+/// failover, and which are down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpnEntry {
+    pub name: String,
+    pub iface: String,
+    pub priority: u32,
+    /// bring-up succeeded AND (probe passing OR no probe).
+    pub healthy: bool,
+    /// True for the one profile currently routing for via_vpn
+    /// zones.
+    pub active: bool,
+    /// Upstream peer endpoint (host:port), for operator
+    /// diagnostics. Not resolved to an IP here — that happens
+    /// inside the coordinator.
+    pub endpoint: String,
+    /// Health-probe target pinged through the wg iface.
+    pub probe_target: String,
 }
 
 /// One AP (BSS) declared in `[[wifi]]`, with its backing kernel iface

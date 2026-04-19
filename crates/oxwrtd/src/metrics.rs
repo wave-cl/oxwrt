@@ -320,6 +320,45 @@ fn render(state: &ControlState) -> String {
         }
     }
 
+    // VPN client ────────────────────────────────────────────────────
+    //
+    // One line per declared profile. `active` is a gauge: exactly
+    // one profile has active=1 while the killswitch is disengaged,
+    // zero when it's engaged. `healthy` reflects bring-up AND
+    // probe state — it can be 1 on a non-active profile (the
+    // standby), which is the useful signal for alerting on "we
+    // have a backup ready."
+    let vpn_snapshots = crate::vpn_failover::snapshot_all(
+        &cfg,
+        &state.vpn_bringup,
+        &state.vpn_health,
+        &state.active_vpn,
+    );
+    if !vpn_snapshots.is_empty() {
+        let _ = writeln!(
+            out,
+            "# HELP oxwrt_vpn_active 1 if this vpn_client profile is currently the exit, 0 otherwise.\n\
+             # TYPE oxwrt_vpn_active gauge\n\
+             # HELP oxwrt_vpn_healthy 1 if the profile is both brought-up and probe-passing.\n\
+             # TYPE oxwrt_vpn_healthy gauge"
+        );
+        for s in &vpn_snapshots {
+            let labels = format!("profile=\"{}\",iface=\"{}\"", esc(&s.name), esc(&s.iface));
+            let _ = writeln!(
+                out,
+                "oxwrt_vpn_active{{{}}} {}",
+                labels,
+                if s.active { 1 } else { 0 }
+            );
+            let _ = writeln!(
+                out,
+                "oxwrt_vpn_healthy{{{}}} {}",
+                labels,
+                if s.healthy { 1 } else { 0 }
+            );
+        }
+    }
+
     // ── In-process counters (metrics_state) ─────────────────────────
     // Reload, DHCP acquire, blocklist-fetch counters. One cheap
     // snapshot() clone out of the global Mutex keeps the critical

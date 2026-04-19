@@ -354,6 +354,8 @@ pub fn format_response(resp: &Response) -> String {
             firewall_rules,
             aps,
             wg,
+            active_vpn,
+            vpns,
         } => {
             let mut out = String::new();
             out.push_str(&format!(
@@ -397,6 +399,29 @@ pub fn format_response(resp: &Response) -> String {
                     out.push_str(&format!(
                         "  {:<14} prio={:<4} {:<7} iface={:<8} addr={} via {}\n",
                         w.name, w.priority, tag, w.iface, addr, gw
+                    ));
+                }
+            }
+            // Per-VPN breakdown. Only emit when any profile is
+            // declared; no point cluttering a vanilla-router
+            // status output with an empty section.
+            if !vpns.is_empty() {
+                let tag = active_vpn
+                    .as_deref()
+                    .map(|n| format!(" [active={n}]"))
+                    .unwrap_or_else(|| " [active=none (killswitch)]".to_string());
+                out.push_str(&format!("vpn_client:{tag}\n"));
+                for v in vpns {
+                    let state_tag = if v.active {
+                        "ACTIVE"
+                    } else if v.healthy {
+                        "ready"
+                    } else {
+                        "down"
+                    };
+                    out.push_str(&format!(
+                        "  {:<14} prio={:<4} {:<7} iface={:<8} probe={} ep={}\n",
+                        v.name, v.priority, state_tag, v.iface, v.probe_target, v.endpoint
                     ));
                 }
             }
