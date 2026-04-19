@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 use dhcproto::Decodable as _;
 use dhcproto::Encodable as _;
-use dhcproto::v6::{DhcpOption, DhcpOptions, IAPD, Message, MessageType, ORO, OptionCode};
+use dhcproto::v6::{
+    DhcpOption, DhcpOptions, IAAddr, IANA, IAPD, Message, MessageType, ORO, OptionCode,
+};
 
 use oxwrt_api::config::{Config, Network};
 
@@ -56,6 +58,14 @@ pub struct DhcpV6Lease {
     pub server_id: Vec<u8>,
     pub client_duid: Vec<u8>,
     pub acquired_at: Instant,
+    /// Optional WAN-side /128 address from the IA_NA option. Many
+    /// ISPs only grant IA_PD and expect the router to use SLAAC
+    /// for its own WAN v6 address; others hand out both. None = no
+    /// IA_NA in the Reply (or the Reply's IA_NA was empty).
+    pub wan_address: Option<Ipv6Addr>,
+    /// Lifetimes for `wan_address`. Ignored when None.
+    pub wan_preferred_lifetime: u32,
+    pub wan_valid_lifetime: u32,
 }
 
 /// Shared across the renewal loop + diag + apply. Same Arc<RwLock<Option<_>>>
@@ -79,38 +89,52 @@ pub async fn acquire(iface: &str, timeout: Duration) -> Result<DhcpV6Lease, Erro
     // identity survives reboots + sysupgrades.
     let (duid, iaid) = load_or_create_duid_iaid(mac)?;
 
-    let (server_id, advertised_prefix, advertised_len, advertised_iapd) =
+    let (server_id, advertised_iapd, advertised_iana) =
         solicit_phase(&sock, ifindex, &duid, iaid, timeout).await?;
 
-    let (lease_prefix, lease_len, preferred, valid, t1, t2) = request_phase(
+    let parsed = request_phase(
         &sock,
         ifindex,
         &duid,
         iaid,
         &server_id,
-        advertised_prefix,
-        advertised_len,
-        advertised_iapd,
+        &advertised_iapd,
+        advertised_iana.as_ref(),
         timeout,
     )
     .await?;
 
-    // Zero out the host bits below the delegated prefix length so
-    // downstream consumers always see a canonical network form.
-    let masked = mask_v6_prefix(lease_prefix, lease_len);
-
     Ok(DhcpV6Lease {
-        prefix: masked,
-        prefix_len: lease_len,
-        preferred_lifetime: preferred,
-        valid_lifetime: valid,
-        t1,
-        t2,
+        prefix: mask_v6_prefix(parsed.prefix, parsed.prefix_len),
+        prefix_len: parsed.prefix_len,
+        preferred_lifetime: parsed.preferred_lifetime,
+        valid_lifetime: parsed.valid_lifetime,
+        t1: parsed.t1,
+        t2: parsed.t2,
         iaid,
         server_id,
         client_duid: duid,
         acquired_at: Instant::now(),
+        wan_address: parsed.wan_address,
+        wan_preferred_lifetime: parsed.wan_preferred_lifetime,
+        wan_valid_lifetime: parsed.wan_valid_lifetime,
     })
+}
+
+// Everything extracted from a Reply: the PD half (prefix + lifetimes
+// + T1/T2) always required, the NA half (wan address + lifetimes)
+// optional. Callers map from this into a DhcpV6Lease.
+#[derive(Debug, Clone)]
+struct ReplyContents {
+    prefix: Ipv6Addr,
+    prefix_len: u8,
+    preferred_lifetime: u32,
+    valid_lifetime: u32,
+    t1: u32,
+    t2: u32,
+    wan_address: Option<Ipv6Addr>,
+    wan_preferred_lifetime: u32,
+    wan_valid_lifetime: u32,
 }
 
 /// Return a `Config` where each Lan/Simple with `ipv6_subnet_id`
@@ -160,6 +184,38 @@ pub async fn apply_delegation(
     lease: &DhcpV6Lease,
 ) -> Result<(), Error> {
     use std::net::IpAddr;
+
+    // WAN-side IA_NA address, if the server granted one. /128 on the
+    // WAN iface — the ISP handles the link subnet; we just need a
+    // routable address for outbound v6 connectivity.
+    if let Some(wan_addr) = lease.wan_address {
+        if let Some(Network::Wan { iface, .. }) = cfg.primary_wan() {
+            match link_index(handle, iface).await {
+                Ok(idx) => {
+                    let res = handle
+                        .address()
+                        .add(idx, IpAddr::V6(wan_addr), 128)
+                        .execute()
+                        .await;
+                    match res {
+                        Ok(()) => {
+                            tracing::info!(iface, %wan_addr, "v6 apply: WAN address assigned (from IA_NA)");
+                        }
+                        Err(e) if format!("{e}").contains("File exists") => {
+                            tracing::debug!(iface, %wan_addr, "v6 apply: WAN address already present");
+                        }
+                        Err(e) => {
+                            tracing::warn!(iface, error = %e, "v6 apply: WAN address add failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(iface, error = %e, "v6 apply: WAN link lookup failed");
+                }
+            }
+        }
+    }
+
     for net in &cfg.networks {
         let Some(subnet_id) = net.ipv6_subnet_id() else {
             continue;
@@ -261,7 +317,7 @@ async fn solicit_phase(
     duid: &[u8],
     iaid: u32,
     timeout: Duration,
-) -> Result<(Vec<u8>, Ipv6Addr, u8, IAPD), Error> {
+) -> Result<(Vec<u8>, IAPD, Option<IANA>), Error> {
     let solicit = build_message(MessageType::Solicit, duid, iaid);
     let mut buf = Vec::new();
     solicit
@@ -289,14 +345,18 @@ async fn solicit_phase(
         if msg.msg_type() != MessageType::Advertise {
             continue;
         }
-        // Extract ServerId + IA_PD + IAPrefix.
         let server_id = option_raw(msg.opts(), OptionCode::ServerId)
             .ok_or_else(|| Error::BadReply("Advertise missing ServerId".into()))?;
         let iapd = find_iapd(msg.opts())
             .ok_or_else(|| Error::BadReply("Advertise missing IA_PD".into()))?;
-        let iaprefix = find_iaprefix(&iapd.opts)
-            .ok_or_else(|| Error::BadReply("IA_PD missing IAPrefix".into()))?;
-        return Ok((server_id, iaprefix.prefix_ip, iaprefix.prefix_len, iapd));
+        if find_iaprefix(&iapd.opts).is_none() {
+            return Err(Error::BadReply("IA_PD missing IAPrefix".into()));
+        }
+        // IA_NA is optional — some ISPs deliver it alongside IA_PD,
+        // many don't. Preserve whatever the server sent (or None)
+        // and echo it back in the Request so we stay in-sync.
+        let iana = find_iana(msg.opts());
+        return Ok((server_id, iapd, iana));
     }
 }
 
@@ -309,19 +369,11 @@ async fn request_phase(
     duid: &[u8],
     iaid: u32,
     server_id: &[u8],
-    advertised_prefix: Ipv6Addr,
-    advertised_len: u8,
-    advertised_iapd: IAPD,
+    advertised_iapd: &IAPD,
+    advertised_iana: Option<&IANA>,
     timeout: Duration,
-) -> Result<(Ipv6Addr, u8, u32, u32, u32, u32), Error> {
-    let request = build_request(
-        duid,
-        iaid,
-        server_id,
-        advertised_prefix,
-        advertised_len,
-        &advertised_iapd,
-    );
+) -> Result<ReplyContents, Error> {
+    let request = build_request(duid, iaid, server_id, advertised_iapd, advertised_iana);
     let mut buf = Vec::new();
     request
         .encode(&mut dhcproto::Encoder::new(&mut buf))
@@ -334,33 +386,7 @@ async fn request_phase(
     );
     sock.send_to(&buf, dst).await?;
 
-    let deadline = Instant::now() + timeout;
-    let mut rx = [0u8; 2048];
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(Error::Timeout("Reply"))?;
-        let (n, _from) = tokio::time::timeout(remaining, sock.recv_from(&mut rx))
-            .await
-            .map_err(|_| Error::Timeout("Reply"))??;
-        let msg = Message::decode(&mut dhcproto::Decoder::new(&rx[..n]))
-            .map_err(|e| Error::Decode(e.to_string()))?;
-        if msg.msg_type() != MessageType::Reply {
-            continue;
-        }
-        let iapd =
-            find_iapd(msg.opts()).ok_or_else(|| Error::BadReply("Reply missing IA_PD".into()))?;
-        let iaprefix = find_iaprefix(&iapd.opts)
-            .ok_or_else(|| Error::BadReply("IA_PD missing IAPrefix".into()))?;
-        return Ok((
-            iaprefix.prefix_ip,
-            iaprefix.prefix_len,
-            iaprefix.preferred_lifetime,
-            iaprefix.valid_lifetime,
-            iapd.t1,
-            iapd.t2,
-        ));
-    }
+    recv_reply(sock, timeout).await
 }
 
 // ── Phase 3: Renew / Rebind ────────────────────────────────────────
@@ -378,10 +404,10 @@ async fn request_phase(
 // Both share the Reply-parsing logic from request_phase, refactored
 // into `recv_reply_ia_pd` below.
 
-async fn recv_reply_ia_pd(
+async fn recv_reply(
     sock: &tokio::net::UdpSocket,
     timeout: Duration,
-) -> Result<(Ipv6Addr, u8, u32, u32, u32, u32), Error> {
+) -> Result<ReplyContents, Error> {
     let deadline = Instant::now() + timeout;
     let mut rx = [0u8; 2048];
     loop {
@@ -400,14 +426,24 @@ async fn recv_reply_ia_pd(
             find_iapd(msg.opts()).ok_or_else(|| Error::BadReply("Reply missing IA_PD".into()))?;
         let iaprefix = find_iaprefix(&iapd.opts)
             .ok_or_else(|| Error::BadReply("IA_PD missing IAPrefix".into()))?;
-        return Ok((
-            iaprefix.prefix_ip,
-            iaprefix.prefix_len,
-            iaprefix.preferred_lifetime,
-            iaprefix.valid_lifetime,
-            iapd.t1,
-            iapd.t2,
-        ));
+        // IA_NA is optional. If present, its IAAddr provides the
+        // WAN-side /128. If the server's IANA is empty (no IAAddr),
+        // treat as "no v6 WAN address" — not an error.
+        let (wan_address, wan_preferred_lifetime, wan_valid_lifetime) = find_iana(msg.opts())
+            .and_then(|iana| find_iaaddr(&iana.opts))
+            .map(|addr| (Some(addr.addr), addr.preferred_life, addr.valid_life))
+            .unwrap_or((None, 0, 0));
+        return Ok(ReplyContents {
+            prefix: iaprefix.prefix_ip,
+            prefix_len: iaprefix.prefix_len,
+            preferred_lifetime: iaprefix.preferred_lifetime,
+            valid_lifetime: iaprefix.valid_lifetime,
+            t1: iapd.t1,
+            t2: iapd.t2,
+            wan_address,
+            wan_preferred_lifetime,
+            wan_valid_lifetime,
+        });
     }
 }
 
@@ -418,30 +454,7 @@ pub async fn renew(
     prev: &DhcpV6Lease,
     timeout: Duration,
 ) -> Result<DhcpV6Lease, Error> {
-    let ifindex = read_iface_index(iface)?;
-    let sock = build_socket(ifindex)?;
-    let msg = build_renew_or_rebind(
-        MessageType::Renew,
-        &prev.client_duid,
-        prev.iaid,
-        Some(&prev.server_id),
-        prev.prefix,
-        prev.prefix_len,
-    );
-    send_multicast(&sock, ifindex, &msg).await?;
-    let (prefix, plen, preferred, valid, t1, t2) = recv_reply_ia_pd(&sock, timeout).await?;
-    Ok(DhcpV6Lease {
-        prefix: mask_v6_prefix(prefix, plen),
-        prefix_len: plen,
-        preferred_lifetime: preferred,
-        valid_lifetime: valid,
-        t1,
-        t2,
-        iaid: prev.iaid,
-        server_id: prev.server_id.clone(),
-        client_duid: prev.client_duid.clone(),
-        acquired_at: Instant::now(),
-    })
+    renew_or_rebind(iface, prev, timeout, MessageType::Renew).await
 }
 
 /// Send a Rebind (multicast, no ServerId) and await a Reply from
@@ -451,31 +464,46 @@ pub async fn rebind(
     prev: &DhcpV6Lease,
     timeout: Duration,
 ) -> Result<DhcpV6Lease, Error> {
+    renew_or_rebind(iface, prev, timeout, MessageType::Rebind).await
+}
+
+async fn renew_or_rebind(
+    iface: &str,
+    prev: &DhcpV6Lease,
+    timeout: Duration,
+    mt: MessageType,
+) -> Result<DhcpV6Lease, Error> {
     let ifindex = read_iface_index(iface)?;
     let sock = build_socket(ifindex)?;
+    let server_id = match mt {
+        MessageType::Renew => Some(prev.server_id.as_slice()),
+        _ => None, // Rebind includes no ServerId per RFC 8415 § 18.2.5
+    };
     let msg = build_renew_or_rebind(
-        MessageType::Rebind,
+        mt,
         &prev.client_duid,
         prev.iaid,
-        None, // no ServerId in Rebind
+        server_id,
         prev.prefix,
         prev.prefix_len,
+        prev.wan_address,
     );
     send_multicast(&sock, ifindex, &msg).await?;
-    let (prefix, plen, preferred, valid, t1, t2) = recv_reply_ia_pd(&sock, timeout).await?;
+    let parsed = recv_reply(&sock, timeout).await?;
     Ok(DhcpV6Lease {
-        prefix: mask_v6_prefix(prefix, plen),
-        prefix_len: plen,
-        preferred_lifetime: preferred,
-        valid_lifetime: valid,
-        t1,
-        t2,
+        prefix: mask_v6_prefix(parsed.prefix, parsed.prefix_len),
+        prefix_len: parsed.prefix_len,
+        preferred_lifetime: parsed.preferred_lifetime,
+        valid_lifetime: parsed.valid_lifetime,
+        t1: parsed.t1,
+        t2: parsed.t2,
         iaid: prev.iaid,
-        // Rebind may be answered by a different server; update
-        // server_id for the next Renew.
         server_id: prev.server_id.clone(),
         client_duid: prev.client_duid.clone(),
         acquired_at: Instant::now(),
+        wan_address: parsed.wan_address,
+        wan_preferred_lifetime: parsed.wan_preferred_lifetime,
+        wan_valid_lifetime: parsed.wan_valid_lifetime,
     })
 }
 
@@ -625,6 +653,7 @@ fn build_renew_or_rebind(
     server_id: Option<&[u8]>,
     prefix: Ipv6Addr,
     prefix_len: u8,
+    wan_address: Option<Ipv6Addr>,
 ) -> Message {
     use dhcproto::v6::IAPrefix;
     let mut msg = Message::new(mt);
@@ -633,8 +662,7 @@ fn build_renew_or_rebind(
         msg.opts_mut().insert(DhcpOption::ServerId(sid.to_vec()));
     }
     msg.opts_mut().insert(DhcpOption::ElapsedTime(0));
-    // Include the current IA_PD + IAPrefix so the server knows we're
-    // asking to refresh the specific prefix we already hold.
+    // IA_PD carrying the prefix we already hold.
     let iaprefix = IAPrefix {
         preferred_lifetime: 0,
         valid_lifetime: 0,
@@ -651,6 +679,25 @@ fn build_renew_or_rebind(
         opts: iapd_opts,
     };
     msg.opts_mut().insert(DhcpOption::IAPD(iapd));
+    // If we already have an IA_NA address, ask to refresh it; else
+    // empty IA_NA gives the server a chance to grant on Renew even
+    // if we never had one before.
+    let mut iana_opts = DhcpOptions::new();
+    if let Some(addr) = wan_address {
+        iana_opts.insert(DhcpOption::IAAddr(IAAddr {
+            addr,
+            preferred_life: 0,
+            valid_life: 0,
+            opts: DhcpOptions::new(),
+        }));
+    }
+    let iana = IANA {
+        id: iaid,
+        t1: 0,
+        t2: 0,
+        opts: iana_opts,
+    };
+    msg.opts_mut().insert(DhcpOption::IANA(iana));
     msg
 }
 
@@ -667,9 +714,19 @@ fn build_message(mt: MessageType, duid: &[u8], iaid: u32) -> Message {
         opts: DhcpOptions::new(),
     };
     msg.opts_mut().insert(DhcpOption::IAPD(iapd));
-    // Option Request: DNS + search list, in case the server sends
-    // them (we don't do anything with them yet, but asking is
-    // cheap and logs them useful for diag).
+    // Also solicit IA_NA — an ISP-granted v6 address on the WAN
+    // iface. Reuses the same IAID as IA_PD for simplicity; RFC 8415
+    // allows separate IAIDs but nobody cares in practice. If the
+    // server doesn't support NA allocation it won't echo IA_NA in
+    // the Reply; we just proceed without a WAN address.
+    let iana = IANA {
+        id: iaid,
+        t1: 0,
+        t2: 0,
+        opts: DhcpOptions::new(),
+    };
+    msg.opts_mut().insert(DhcpOption::IANA(iana));
+    // Option Request: DNS + search list.
     msg.opts_mut().insert(DhcpOption::ORO(ORO {
         opts: vec![OptionCode::DomainNameServers, OptionCode::DomainSearchList],
     }));
@@ -680,17 +737,15 @@ fn build_request(
     duid: &[u8],
     iaid: u32,
     server_id: &[u8],
-    _advertised_prefix: Ipv6Addr,
-    _advertised_len: u8,
     advertised_iapd: &IAPD,
+    advertised_iana: Option<&IANA>,
 ) -> Message {
     let mut msg = Message::new(MessageType::Request);
     msg.opts_mut().insert(DhcpOption::ClientId(duid.to_vec()));
     msg.opts_mut()
         .insert(DhcpOption::ServerId(server_id.to_vec()));
     msg.opts_mut().insert(DhcpOption::ElapsedTime(0));
-    // Re-present the advertised IA_PD verbatim (including the inner
-    // IAPrefix) so the server confirms the same allocation.
+    // Re-present the advertised IA_PD verbatim.
     let iapd = IAPD {
         id: iaid,
         t1: advertised_iapd.t1,
@@ -698,7 +753,45 @@ fn build_request(
         opts: advertised_iapd.opts.clone(),
     };
     msg.opts_mut().insert(DhcpOption::IAPD(iapd));
+    // Echo the advertised IA_NA if present — confirms the same
+    // WAN address allocation. If the server didn't advertise one,
+    // include an empty IA_NA so it has a chance to grant on Request
+    // even if it didn't on Advertise.
+    let iana = if let Some(a) = advertised_iana {
+        IANA {
+            id: iaid,
+            t1: a.t1,
+            t2: a.t2,
+            opts: a.opts.clone(),
+        }
+    } else {
+        IANA {
+            id: iaid,
+            t1: 0,
+            t2: 0,
+            opts: DhcpOptions::new(),
+        }
+    };
+    msg.opts_mut().insert(DhcpOption::IANA(iana));
     msg
+}
+
+fn find_iana(opts: &DhcpOptions) -> Option<IANA> {
+    for o in opts.iter() {
+        if let DhcpOption::IANA(iana) = o {
+            return Some(iana.clone());
+        }
+    }
+    None
+}
+
+fn find_iaaddr(opts: &DhcpOptions) -> Option<IAAddr> {
+    for o in opts.iter() {
+        if let DhcpOption::IAAddr(a) = o {
+            return Some(a.clone());
+        }
+    }
+    None
 }
 
 // ── DUID + helpers ─────────────────────────────────────────────────
