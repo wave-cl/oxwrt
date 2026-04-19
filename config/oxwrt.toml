@@ -1,13 +1,31 @@
 # oxwrt example configuration.
 #
-# This file is parsed by `config::Config` (oxwrtd/src/config.rs). Every
-# knob the firmware supports today appears somewhere below — use it as a
-# cookbook. Fields with defaults can be omitted; the commented-out lines
-# show the default value where relevant.
+# This file is parsed by `config::Config` (crates/oxwrt-api/src/config.rs)
+# and ships at /etc/oxwrt/oxwrt.toml. Every knob the firmware supports
+# today appears somewhere below — use it as a cookbook. Fields with
+# defaults can be omitted; commented-out lines show the default value
+# where relevant.
 #
 # A matching parse test (`config::tests::example_config_parses`) loads
 # this file at `cargo test` time, so any schema change that breaks the
-# example also breaks the build — which forces both to stay in sync.
+# example also breaks the build — forces both to stay in sync.
+#
+# Section index:
+#   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
+#                  failover via priority/probe_target
+#   firewall       zones + explicit rules (no magic booleans)
+#   ddns           DuckDNS + Cloudflare
+#   port_forwards  external WAN port → internal host:port
+#   routes         static IPv4 routes
+#   routes6        static IPv6 routes
+#   blocklists     banip-style periodic CIDR drop sets
+#   wireguard      roadwarrior + site-to-site tunnels
+#   radios         per-phy wifi config
+#   wifi           per-SSID wifi config (multi-BSS capable)
+#   services       containerized services (dns, dhcp, hostapd, …)
+#   upnp           miniupnpd schema (binary cross-build TBD)
+#   metrics        Prometheus /metrics endpoint
+#   control        sQUIC control-plane listen addrs + authorized keys
 
 hostname = "flint2"
 timezone = "Europe/Berlin"
@@ -27,6 +45,21 @@ name = "wan"
 type = "wan"
 iface = "eth1"
 mode = "dhcp"
+# Failover priority for multi-WAN deployments. Lower = higher
+# preference (iproute2 convention). The failover coordinator
+# picks the lowest-priority healthy WAN as the active egress
+# and mirrors its lease into the default route + DDNS. Single-
+# WAN setups can leave this at the default 100.
+# priority = 100
+#
+# Optional active health-check target: when set, oxwrtd pings
+# this address through the WAN's iface every 5s. Three fails
+# in a row flip the WAN to unhealthy, triggering failover even
+# if the DHCP lease is still "valid." Covers the "carrier +
+# lease fine but ISP upstream is dead" case that pure lease-
+# state health misses. Omit to use lease-state alone.
+# probe_target = "1.1.1.1"
+#
 # Request a DHCPv6 prefix delegation (IA_PD) from the ISP in
 # parallel with the IPv4 lease. The delegated prefix is sliced
 # into per-subnet /64s via each network's `ipv6_subnet_id`. Set
@@ -45,6 +78,23 @@ mode = "dhcp"
 # fair-queueing across LAN flows.
 #
 # sqm = { bandwidth_up_kbps = 18000, bandwidth_down_kbps = 180000, extra_args = "ethernet nat" }
+
+# --- Multi-WAN failover example (commented) ---
+#
+# Declare a second WAN with a higher `priority` number (lower
+# preference). oxwrtd spawns a DHCP client per WAN in parallel;
+# the failover coordinator picks the lowest-priority healthy
+# one every 2 seconds and swaps the default route + SNAT
+# accordingly. Add both WAN names to the `wan` firewall zone's
+# networks array so rules apply regardless of which is active.
+#
+# [[networks]]
+# name = "wan-backup"
+# type = "wan"
+# iface = "eth2"              # e.g. LTE modem, second ISP port
+# mode = "dhcp"
+# priority = 200              # higher number = lower preference
+# probe_target = "8.8.8.8"    # independent probe target
 
 # [[networks]]                         # alternative: static IPv4 on eth1
 # name = "wan"
@@ -146,6 +196,10 @@ default_forward = "drop"
 
 [[firewall.zones]]
 name = "wan"
+# For multi-WAN deployments, list every WAN network's `name` here
+# so rules apply regardless of which link is active right now —
+# e.g. `networks = ["wan", "wan-backup"]`. Masquerade then
+# installs on each iface in turn.
 networks = ["wan"]
 default_input = "drop"
 default_forward = "drop"
@@ -320,11 +374,11 @@ action = "accept"
 
 # ---------------- Static routes ----------------
 #
-# Extra IPv4 routes on top of what the kernel installs automatically
-# (on-link routes from addresses, default route from WAN DHCP). Each
-# entry is `{ dest, prefix, gateway?, iface, metric }`. Reconciled on
-# every reload: routes that disappear from config get removed from
-# the kernel. No IPv6 yet — duplicate pattern coming when needed.
+# Extra IPv4 / IPv6 routes on top of what the kernel installs
+# automatically (on-link routes from addresses, default route from
+# WAN DHCP or RA). Reconciled on every reload: routes that
+# disappear from config get removed from the kernel. Each entry
+# is `{ dest, prefix, gateway?, iface, metric }`.
 #
 # Example (commented):
 #
@@ -335,9 +389,8 @@ action = "accept"
 # iface = "wg0"
 # metric = 200                      # default 1024
 
-# IPv6 variant with the same shape. Reconciled on every reload
-# alongside [[routes]]. Empty = kernel's on-link v6 routes + any
-# RA-installed default are the only ones present.
+# IPv6 variant. Same shape, different address type — `dest` +
+# `gateway` are Ipv6Addr strings; prefix is 0..=128.
 #
 # [[routes6]]
 # dest = "2001:db8::"
@@ -924,8 +977,20 @@ landlock = false
 #
 # Optional Prometheus-format /metrics endpoint. Plain HTTP, no auth —
 # bind to the LAN IP and rely on firewall zone rules to keep it off
-# WAN. Exports service state, AP operstate, WAN lease, WG handshakes,
-# firewall rule count. Comment out to disable.
+# WAN. Comment out to disable. idempotent across reload: toggling
+# this on/off or changing the listen addr takes effect on the next
+# `oxctl reload` without a reboot.
+#
+# Metrics exported today:
+#   oxwrt_supervisor_uptime_seconds
+#   oxwrt_service_{state,restarts_total,uptime_seconds}
+#   oxwrt_ap_up{ssid,iface,phy,band}
+#   oxwrt_wan_lease_seconds, oxwrt_wan_dhcp_acquires_total,
+#     oxwrt_wan_dhcp_last_acquire_seconds
+#   oxwrt_reloads_total, oxwrt_reload_last_duration_seconds
+#   oxwrt_firewall_rules
+#   oxwrt_blocklist_{entries,fetches_total,last_fetch_timestamp}
+#   oxwrt_wg_peer_{last_handshake_seconds,rx_bytes_total,tx_bytes_total}
 #
 [metrics]
 listen = "192.168.50.1:9100"
