@@ -19,7 +19,9 @@
 #   routes         static IPv4 routes
 #   routes6        static IPv6 routes
 #   blocklists     banip-style periodic CIDR drop sets
-#   wireguard      roadwarrior + site-to-site tunnels
+#   wireguard      roadwarrior + site-to-site tunnels (server side)
+#   vpn_client     outbound WG tunnels to commercial VPN providers
+#                  (client side, full-tunnel + killswitch + failover)
 #   radios         per-phy wifi config
 #   wifi           per-SSID wifi config (multi-BSS capable)
 #   services       containerized services (dns, dhcp, hostapd, …)
@@ -475,6 +477,66 @@ action = "accept"
 # allowed_ips = "10.8.0.3/32,192.168.100.0/24"
 # endpoint = "site-b.example.com:51820"
 # persistent_keepalive = 25
+
+# ---------------- VPN client (outbound WireGuard) ----------------
+#
+# Each [[vpn_client]] entry is one outbound tunnel to a commercial
+# VPN provider (Mullvad, Proton, etc.). Distinct from [[wireguard]]
+# above — that's the server side (peers connect IN). Here, the
+# router is the client dialing out. AllowedIPs is hardcoded to
+# 0.0.0.0/0; any zone with `via_vpn = true` routes through it.
+#
+# Multi-profile: declare several with different `priority` values;
+# the coordinator picks the lowest-priority HEALTHY profile as
+# the active exit. Probes (ICMP via the wg iface) every 5s with
+# 3-fail hysteresis. Kill-switch engages when none are healthy —
+# flagged zones lose internet rather than leak out the WAN.
+#
+# ── Required ──
+#   name           String   — CRUD key, unique.
+#   iface          String   — kernel netdev, e.g. "wgvpn0".
+#   address        String   — tunnel-interior CIDR, e.g. "10.64.0.2/32".
+#   probe_target   Ipv4Addr — pinged via the wg iface for health.
+#   endpoint       String   — "host:port" of the provider server.
+#   public_key     String   — server pubkey (provider-supplied).
+#
+# ── Optional ──
+#   priority                u32   — default 100. Lower = preferred.
+#   key_path                String — default /etc/oxwrt/vpn-client.key.
+#   dns                     Vec<Ipv4Addr> — provider DNS, reached via tunnel.
+#   mtu                     u32   — default 1420.
+#   preshared_key_path      String — base64 PSK file.
+#   persistent_keepalive    u16   — default 25s.
+#
+# Example (commented, Mullvad-shaped):
+#
+# [[vpn_client]]
+# name = "mullvad-se"
+# iface = "wgvpn0"
+# priority = 100
+# key_path = "/etc/oxwrt/vpn/mullvad-se.key"
+# address = "10.64.0.2/32"
+# dns = ["10.64.0.1"]
+# mtu = 1420
+# probe_target = "10.64.0.1"
+# endpoint = "193.32.127.66:51820"
+# public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+# persistent_keepalive = 25
+#
+# [[vpn_client]]
+# name = "mullvad-de"
+# iface = "wgvpn1"
+# priority = 200                     # backup
+# key_path = "/etc/oxwrt/vpn/mullvad-de.key"
+# address = "10.65.0.2/32"
+# dns = ["10.64.0.1"]
+# probe_target = "10.64.0.1"
+# endpoint = "193.32.127.80:51820"
+# public_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+#
+# Then flag a zone to route through the active profile — add to
+# [[firewall.zones]] where applicable:
+#   via_vpn = true     # default false; keeps that zone on WAN.
 
 # ---------------- Radios ----------------
 #

@@ -122,6 +122,23 @@ pub struct Config {
     /// task adds the services-upnpd cross-build to the Makefile.
     #[serde(default)]
     pub upnp: Option<UpnpConfig>,
+    /// Outbound WireGuard tunnels to commercial VPN providers
+    /// (Mullvad, Proton, etc.). Each entry is one upstream peer;
+    /// oxwrtd creates the wg iface, runs probes, and — when the
+    /// tunnel is healthy — routes traffic from any firewall zone
+    /// with `via_vpn = true` through the tunnel instead of WAN.
+    ///
+    /// Multi-profile deployments get failover for free: lowest
+    /// priority number among healthy profiles wins, coordinator
+    /// swaps the policy-route table entry atomically. All zones
+    /// with `via_vpn = true` follow the single active profile at
+    /// any moment.
+    ///
+    /// Kill-switch: when no profile is healthy, per-zone forward
+    /// rules drop everything leaving the via_vpn zones — they
+    /// lose internet rather than leak out the WAN.
+    #[serde(default)]
+    pub vpn_client: Vec<VpnClient>,
     pub control: Control,
 }
 
@@ -167,6 +184,115 @@ fn default_upnp_natpmp() -> bool {
 
 fn default_wan_priority() -> u32 {
     100
+}
+
+/// Outbound WireGuard client — one tunnel to a commercial VPN
+/// provider. Separate from `[[wireguard]]` (which is the server
+/// side: peers connect IN). The coordinator in `vpn_failover.rs`
+/// runs a probe per profile and installs the winning one's iface
+/// into the policy-routing table used by `via_vpn` zones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpnClient {
+    /// CRUD key + human label. Unique across `[[vpn_client]]`.
+    pub name: String,
+    /// Kernel netdev name, e.g. "wgvpn0". Distinct from
+    /// server-side `[[wireguard]].iface` names — these aren't
+    /// user-managed networks and don't appear in `[[networks]]`.
+    pub iface: String,
+    /// Failover priority. Lower = preferred, matching the
+    /// `[[network]]` WAN priority convention. All healthy
+    /// profiles compete; the lowest priority wins.
+    #[serde(default = "default_vpn_priority")]
+    pub priority: u32,
+    /// Path to the client's private key file. Auto-generated on
+    /// first boot via `wg genkey` if missing. 0600 perms, lives
+    /// under /etc/oxwrt/ by convention so sysupgrade preserves it.
+    #[serde(default = "default_vpn_key_path")]
+    pub key_path: String,
+    /// Tunnel-interior address in CIDR form. Mullvad hands you
+    /// one like "10.64.0.2/32"; Proton uses 10.2.0.2/32. Single
+    /// IP — no LAN side on a client tunnel.
+    pub address: String,
+    /// Provider-supplied DNS server(s). Reachable only through
+    /// the tunnel. The LAN resolver binds to the wg iface when
+    /// querying these so replies can't leak to WAN DNS.
+    #[serde(default)]
+    pub dns: Vec<Ipv4Addr>,
+    /// Tunnel MTU. 1420 is the WireGuard default on IPv4;
+    /// 1380 covers some PPPoE + WG encapsulations.
+    #[serde(default = "default_vpn_mtu")]
+    pub mtu: u32,
+    /// Health-probe target pinged THROUGH `iface` every 5s.
+    /// Typically the VPN provider's internal gateway (e.g.
+    /// 10.64.0.1 on Mullvad) or a well-known anycast that only
+    /// answers when the tunnel is carrying traffic.
+    pub probe_target: Ipv4Addr,
+    /// Upstream peer endpoint, host:port. Resolved to an IP at
+    /// bring-up time and installed as a /32 exemption in the main
+    /// routing table so the handshake itself doesn't try to
+    /// recurse through the tunnel. Reinstalled on WAN failover.
+    pub endpoint: String,
+    /// Upstream server's Curve25519 public key (base64, 44 chars).
+    pub public_key: String,
+    /// Optional preshared key file. Same format as the wg setconf
+    /// input: base64-encoded 32 bytes.
+    #[serde(default)]
+    pub preshared_key_path: Option<String>,
+    /// Keepalive in seconds. 25 is the upstream-recommended
+    /// default for NAT traversal; 0 disables (not useful on a
+    /// client — WG peer gets forgotten by stateful ISP NATs
+    /// within ~60s idle).
+    #[serde(default = "default_vpn_keepalive")]
+    pub persistent_keepalive: u16,
+}
+
+fn default_vpn_priority() -> u32 {
+    100
+}
+fn default_vpn_key_path() -> String {
+    "/etc/oxwrt/vpn-client.key".to_string()
+}
+fn default_vpn_mtu() -> u32 {
+    1420
+}
+fn default_vpn_keepalive() -> u16 {
+    25
+}
+
+impl VpnClient {
+    /// Render the single-peer wg-quick-style config that
+    /// `wg setconf` consumes. AllowedIPs is hardcoded to
+    /// 0.0.0.0/0 — this is a full-tunnel client; anything
+    /// narrower wouldn't produce a usable default route for the
+    /// via_vpn zones.
+    pub fn render_config(&self, private_key_b64: &str) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        writeln!(s, "[Interface]").unwrap();
+        writeln!(s, "PrivateKey = {}", private_key_b64).unwrap();
+        writeln!(s).unwrap();
+        writeln!(s, "[Peer]").unwrap();
+        writeln!(s, "# {}", self.name).unwrap();
+        writeln!(s, "PublicKey = {}", self.public_key).unwrap();
+        writeln!(s, "AllowedIPs = 0.0.0.0/0").unwrap();
+        writeln!(s, "Endpoint = {}", self.endpoint).unwrap();
+        if let Some(psk_path) = &self.preshared_key_path {
+            // `wg setconf` accepts PresharedKey inline as base64,
+            // not a path — read the file at bring-up time and
+            // inline it. Renderer stays pure; this field stays
+            // optional; bring-up does the disk read.
+            writeln!(s, "# PresharedKey from {}", psk_path).unwrap();
+        }
+        if self.persistent_keepalive > 0 {
+            writeln!(
+                s,
+                "PersistentKeepalive = {}",
+                self.persistent_keepalive
+            )
+            .unwrap();
+        }
+        s
+    }
 }
 
 /// A single IP blocklist entry. `name` doubles as the nftables set
@@ -483,6 +609,14 @@ pub struct Zone {
     pub default_forward: ChainPolicy,
     #[serde(default)]
     pub masquerade: bool,
+    /// When true, traffic forwarded FROM this zone routes through
+    /// the active `[[vpn_client]]` tunnel instead of the WAN
+    /// default. If no VPN profile is healthy, the per-zone kill-
+    /// switch in net::install_firewall drops the traffic. LAN
+    /// zones without this flag keep using the WAN default
+    /// regardless of tunnel state — no split-tunnel required.
+    #[serde(default)]
+    pub via_vpn: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

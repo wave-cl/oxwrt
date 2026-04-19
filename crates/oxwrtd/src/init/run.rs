@@ -499,11 +499,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     let cfg_corerad = cfg.clone();
     let cfg_upnp = cfg.clone();
     let cfg_sqm = cfg.clone();
-    let (wg_res, corerad_res, upnp_res, sqm_res) = tokio::join!(
+    let cfg_vpn = cfg.clone();
+    let (wg_res, corerad_res, upnp_res, sqm_res, vpn_res) = tokio::join!(
         tokio::task::spawn_blocking(move || crate::wireguard::setup_wireguard(&cfg_wg)),
         tokio::task::spawn_blocking(move || crate::corerad::write_config(&cfg_corerad)),
         tokio::task::spawn_blocking(move || crate::miniupnpd::write_config(&cfg_upnp)),
         tokio::task::spawn_blocking(move || crate::sqm::setup_sqm(&cfg_sqm)),
+        tokio::task::spawn_blocking(move || crate::vpn_client::setup_all(&cfg_vpn)),
     );
     if let Ok(Err(e)) = wg_res {
         tracing::error!(error = %e, "wireguard setup failed; tunnels disabled");
@@ -516,6 +518,9 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     }
     if let Ok(Err(e)) = sqm_res {
         tracing::error!(error = %e, "sqm setup failed");
+    }
+    if let Ok(Err(e)) = vpn_res {
+        tracing::error!(error = %e, "vpn_client setup failed; tunnels disabled");
     }
 
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));

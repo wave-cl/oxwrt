@@ -361,6 +361,7 @@ mod tests {
                         default_input: ChainPolicy::Accept,
                         default_forward: ChainPolicy::Drop,
                         masquerade: false,
+                        via_vpn: false,
                     },
                     Zone {
                         name: "wan".to_string(),
@@ -368,6 +369,7 @@ mod tests {
                         default_input: ChainPolicy::Drop,
                         default_forward: ChainPolicy::Drop,
                         masquerade: true,
+                        via_vpn: false,
                     },
                 ],
                 rules: vec![Rule {
@@ -433,6 +435,7 @@ mod tests {
             routes6: vec![],
             blocklists: vec![],
             upnp: None,
+            vpn_client: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
@@ -451,6 +454,7 @@ mod tests {
             default_input: ChainPolicy::Drop,
             default_forward: ChainPolicy::Drop,
             masquerade: false,
+            via_vpn: false,
         };
         assert!(check_zone_network_refs(&zone, &cfg).is_ok());
     }
@@ -464,6 +468,7 @@ mod tests {
             default_input: ChainPolicy::Drop,
             default_forward: ChainPolicy::Drop,
             masquerade: false,
+            via_vpn: false,
         };
         let err = check_zone_network_refs(&zone, &cfg).unwrap_err();
         assert!(err.contains("dmz"), "error should name the zone: {err}");
@@ -483,6 +488,7 @@ mod tests {
             default_input: ChainPolicy::Drop,
             default_forward: ChainPolicy::Drop,
             masquerade: false,
+            via_vpn: false,
         };
         assert!(check_zone_network_refs(&zone, &cfg).is_err());
     }

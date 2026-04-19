@@ -7,7 +7,7 @@ pub use oxwrt_api::{config, rpc};
 #[cfg(target_os = "linux")]
 pub use oxwrt_linux::{
     blocklists, container, corerad, logd, metrics_state, miniupnpd, net, sqm, static_routes,
-    sysupgrade, urandom_seed, wan_dhcp, wan_dhcp6, wan_failover, wifi, wireguard,
+    sysupgrade, urandom_seed, vpn_client, wan_dhcp, wan_dhcp6, wan_failover, wifi, wireguard,
 };
 mod control;
 

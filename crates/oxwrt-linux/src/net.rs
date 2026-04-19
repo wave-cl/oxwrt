@@ -1304,6 +1304,7 @@ mod tests {
                     default_input: oxwrt_api::config::ChainPolicy::Accept,
                     default_forward: oxwrt_api::config::ChainPolicy::Drop,
                     masquerade: false,
+                    via_vpn: false,
                 }],
                 rules: vec![],
             },
@@ -1318,6 +1319,7 @@ mod tests {
             routes6: vec![],
             blocklists: vec![],
             upnp: None,
+            vpn_client: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),

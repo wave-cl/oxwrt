@@ -470,6 +470,7 @@ mod tests {
             routes6: vec![],
             blocklists: vec![],
             upnp: None,
+            vpn_client: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),

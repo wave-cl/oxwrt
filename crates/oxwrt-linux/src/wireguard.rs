@@ -109,17 +109,32 @@ fn bring_up_one(wg: &Wireguard) -> Result<(), Error> {
         tracing::info!(iface, "wireguard link created");
     }
 
-    // 3. Render full wg config (Interface + Peers) to /var/run/wireguard/
-    //    and apply via `wg setconf`. /var/run is tmpfs on OpenWrt, which
-    //    is what we want — the file is derived from oxwrt.toml on every
-    //    install and shouldn't persist stale state across boots.
+    // 3. Render full wg config (Interface + Peers) and apply.
     let conf_text = wg.render_config(&private_key);
+    apply_wg_config(iface, &conf_text)?;
+    tracing::info!(iface, peers = wg.peers.len(), "wireguard config applied");
+
+    // 4. Bring the link up. Address assignment happens via the
+    //    matching [[networks]] type="simple" entry elsewhere.
+    link_up(iface)?;
+    Ok(())
+}
+
+/// Write the rendered wg-quick INI to /var/run/wireguard/<iface>.conf
+/// and push it into the kernel via `wg setconf`. Shared between
+/// the server-side `[[wireguard]]` setup and the client-side
+/// `[[vpn_client]]` setup — both produce an INI with an [Interface]
+/// + one-or-more [Peer] blocks.
+///
+/// The file goes through write-to-tmp + atomic rename + 0600 so a
+/// concurrent `wg show` can't see a half-written file and the
+/// private key on disk doesn't widen its readership between the
+/// write and the chmod.
+pub(crate) fn apply_wg_config(iface: &str, conf_text: &str) -> Result<(), Error> {
     let conf_dir = Path::new("/var/run/wireguard");
     std::fs::create_dir_all(conf_dir)
         .map_err(|e| Error::Firewall(format!("mkdir {conf_dir:?}: {e}")))?;
     let conf_path = conf_dir.join(format!("{iface}.conf"));
-    // Use write-through-tmp to avoid exposing a half-written file to a
-    // concurrent `wg setconf` — unlikely in practice but cheap insurance.
     let tmp_path = conf_dir.join(format!("{iface}.conf.tmp"));
     {
         let mut f = std::fs::OpenOptions::new()
@@ -138,7 +153,6 @@ fn bring_up_one(wg: &Wireguard) -> Result<(), Error> {
     }
     std::fs::rename(&tmp_path, &conf_path)
         .map_err(|e| Error::Firewall(format!("rename {tmp_path:?} → {conf_path:?}: {e}")))?;
-
     let st = Command::new("wg")
         .args(["setconf", iface])
         .arg(&conf_path)
@@ -147,10 +161,13 @@ fn bring_up_one(wg: &Wireguard) -> Result<(), Error> {
     if !st.success() {
         return Err(Error::Firewall(format!("wg setconf {iface}: exit {st:?}")));
     }
-    tracing::info!(iface, peers = wg.peers.len(), "wireguard config applied");
+    Ok(())
+}
 
-    // 4. Bring the link up. Address assignment happens via the
-    //    matching [[networks]] type="simple" entry elsewhere.
+/// `ip link set <iface> up` — thin helper so the client-side
+/// bring-up can do the same final step without duplicating the
+/// command-builder pattern.
+pub(crate) fn link_up(iface: &str) -> Result<(), Error> {
     let st = Command::new("ip")
         .args(["link", "set", iface, "up"])
         .status()

@@ -214,6 +214,15 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         // config doesn't knock the router offline.
     }
 
+    // Phase 3a.1: reapply outbound VPN client tunnels. Same
+    // rationale as wireguard above — CRUD-level profile edits
+    // must propagate to the kernel iface without a reboot. The
+    // bring-up is idempotent (existing iface skipped at link-add,
+    // config always re-rendered + re-pushed).
+    if let Err(e) = crate::vpn_client::setup_all(&new_cfg) {
+        tracing::error!(error = %e, "reload: vpn_client reapply failed");
+    }
+
     // Regenerate corerad config from new_cfg.networks' ipv6_*
     // fields. The corerad service picks it up on its next restart;
     // supervisor::from_config below replays the service list so this
