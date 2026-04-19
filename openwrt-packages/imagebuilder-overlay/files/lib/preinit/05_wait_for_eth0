@@ -21,10 +21,18 @@
 # OpenWrt's "best-effort boot continues" contract.
 
 wait_for_eth0() {
+    # BusyBox sleep doesn't accept fractional seconds ("invalid
+    # number '0.1'"). Use usleep (takes microseconds) for a tight
+    # 100ms poll; falls back to plain `sleep 1` on the off chance
+    # usleep is missing.
     local i=0
     while [ $i -lt 50 ]; do
         [ -e /sys/class/net/eth0 ] && return 0
-        sleep 0.1
+        if command -v usleep >/dev/null 2>&1; then
+            usleep 100000
+        else
+            sleep 1
+        fi
         i=$((i + 1))
     done
     return 1
