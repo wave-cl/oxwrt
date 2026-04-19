@@ -101,15 +101,24 @@ fn run_print_server_key(args: Vec<String>) -> ExitCode {
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt::time::Uptime;
     // Read RUST_LOG; default to info for our own crate and warn elsewhere
     // so e.g. rtnetlink's internal debug chatter doesn't drown the real
     // output. Written to stderr so stdout stays clean for subcommands
     // like --version that pipe values.
+    //
+    // Timer: Uptime (seconds since process start) instead of chrono
+    // wall clock. Wall clock reads 1970-01-01 until NTP syncs,
+    // which pollutes every boot log line oxwrtd emits before the
+    // `ntp` service runs. Uptime is always meaningful, matches the
+    // `[  X.YYY]` format dmesg uses so operators can correlate
+    // oxwrtd and kernel events on the same timeline.
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_timer(Uptime::default())
         .with_writer(std::io::stderr)
         .try_init();
 }

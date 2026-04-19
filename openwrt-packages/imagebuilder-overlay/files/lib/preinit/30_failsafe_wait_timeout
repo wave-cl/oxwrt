@@ -1,0 +1,18 @@
+#!/bin/sh
+# Override the stock OpenWrt /lib/preinit/30_failsafe_wait_timeout
+# with a no-op.
+#
+# The stock script printed two console prompts on every boot:
+#   Press the [f] key and hit [enter] to enter failsafe mode
+#   Press the [1], [2], [3] or [4] key and hit [enter] to select the debug level
+#
+# Our deployment is appliance-style — no one is watching serial
+# during a reboot to press keys, so the prompt is pure noise.
+# Failsafe mode itself (triggered by holding the physical reset
+# button at boot) is unaffected; the OpenWrt button hotplug script
+# path is separate from the keypress-during-preinit prompt.
+#
+# Empty file intentionally — overlaying /files/ copies this over
+# the stock version with the same name in the final image.
+
+:

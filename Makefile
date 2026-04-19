@@ -499,12 +499,20 @@ define imagebuilder_stage_bare
 	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
 	# Preinit hooks: wait for the ethernet driver to probe eth0
-	# before the rest of preinit runs. Without this, failsafe's
-	# netmsg broadcast hits "Network unreachable" x3 and fw_check
-	# logs "Cannot find device eth0" on the MT7986 bootup.
+	# before the rest of preinit runs (05_wait_for_eth0); override
+	# the stock failsafe-prompt hook with a no-op
+	# (30_failsafe_wait_timeout). Without these the boot log
+	# carries "Cannot find device eth0" + "Network unreachable"
+	# noise and two unhelpful keypress prompts on every boot.
 	cp openwrt-packages/imagebuilder-overlay/files/lib/preinit/*  \
 	   $(IMAGEBUILDER_DIR)/files/lib/preinit/
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/lib/preinit/*
+	# uci stub: silent exit-0 binary that satisfies OpenWrt's
+	# preinit/hotplug scripts which still call `uci -q get …`
+	# even though oxwrtd replaces UCI with /etc/oxwrt.toml.
+	cp openwrt-packages/imagebuilder-overlay/files/usr/bin/uci \
+	   $(IMAGEBUILDER_DIR)/files/usr/bin/uci
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/uci
 	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
 		cp "$$HOME/.ssh/id_ed25519.pub" $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
 		chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
