@@ -110,6 +110,22 @@ address = "10.20.0.1"
 prefix = 24
 ipv6_subnet_id = 3
 
+# ── VLAN-tagged Simple network example (commented) ──
+# 802.1Q sub-iface on top of eth0. oxwrtd creates eth0.10 at boot
+# via rtnetlink (InfoKind::Vlan), then assigns 10.10.0.1/24 on it.
+# Both `vlan` and `vlan_parent` are required together — validate.rs
+# rejects one without the other so a typo doesn't silently produce
+# an untagged iface. Pair with a firewall zone to gate traffic.
+#
+# [[networks]]
+# name = "voip"
+# type = "simple"
+# iface = "eth0.10"
+# vlan = 10
+# vlan_parent = "eth0"
+# address = "10.10.0.1"
+# prefix = 24
+
 # ---------------- Firewall ----------------
 #
 # All firewall policy in one place. Zones declare default chain policies;

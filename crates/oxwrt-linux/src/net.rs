@@ -19,7 +19,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use futures_util::stream::TryStreamExt;
-use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, new_connection};
+use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, LinkVlan, new_connection};
 
 use oxwrt_api::config::{Action, Config, Network, PortSpec, Proto, Service, WanConfig};
 
@@ -61,7 +61,59 @@ impl Net {
             match net {
                 Network::Lan { .. } => self.setup_lan(net).await?,
                 Network::Wan { .. } => self.setup_wan(net).await?,
-                Network::Simple { iface, .. } => {
+                Network::Simple {
+                    iface,
+                    address,
+                    prefix,
+                    vlan,
+                    vlan_parent,
+                    ..
+                } => {
+                    // VLAN sub-iface: create `<iface>` on top of
+                    // `vlan_parent` with tag `vlan` before addressing.
+                    // Both fields required together — validate.rs
+                    // enforces that. Idempotent: if the iface already
+                    // exists we assume a previous boot created it
+                    // with the same parent+tag and move on.
+                    if let (Some(vlan_id), Some(parent)) = (vlan, vlan_parent) {
+                        if matches!(self.link_index(iface).await, Err(Error::LinkNotFound(_))) {
+                            let parent_idx = self.link_index(parent).await?;
+                            self.handle
+                                .link()
+                                .add(LinkVlan::new(iface, parent_idx, *vlan_id).build())
+                                .execute()
+                                .await?;
+                            tracing::info!(
+                                %iface, parent = %parent, vlan = vlan_id,
+                                "simple: created VLAN sub-iface"
+                            );
+                        }
+                        let idx = self.link_index(iface).await?;
+                        self.handle
+                            .link()
+                            .set(LinkUnspec::new_with_index(idx).up().build())
+                            .execute()
+                            .await?;
+                        // Assign the IPv4 address on the VLAN iface.
+                        // For non-VLAN Simple networks this is
+                        // expected to happen out-of-band (bridge
+                        // declared by LAN membership or platform
+                        // hot-plug), but for a VLAN sub-iface we're
+                        // the only thing that knows it exists.
+                        match self
+                            .handle
+                            .address()
+                            .add(idx, IpAddr::V4(*address), *prefix)
+                            .execute()
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(e) if is_exists(&e) => {
+                                tracing::debug!(%iface, %address, "vlan v4 already present");
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
                     // Simple network bridges are created out-of-band
                     // (typically via platform hot-plug or a LAN
                     // [[networks]] declaration referencing the same

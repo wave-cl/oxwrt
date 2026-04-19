@@ -26,7 +26,47 @@
 //! coherent firewall intent) is left to `reload` when it actually
 //! tries to install the new state.
 
-use crate::config::{Config, Rule, Wifi, Zone};
+use crate::config::{Config, Network, Rule, Wifi, Zone};
+
+/// Validate VLAN consistency across all networks. A Simple network
+/// with `vlan` set must also set `vlan_parent` — we refuse to infer
+/// the parent from the iface name (too magical, and the dot
+/// convention isn't universal). A `vlan_parent` without `vlan` is
+/// also rejected so a typo doesn't silently degrade to "untagged
+/// iface named x.10".
+pub fn check_vlan_consistency(cfg: &Config) -> Result<(), String> {
+    for net in &cfg.networks {
+        if let Network::Simple {
+            name,
+            vlan,
+            vlan_parent,
+            ..
+        } = net
+        {
+            match (vlan, vlan_parent) {
+                (Some(id), _) if *id == 0 || *id > 4094 => {
+                    return Err(format!(
+                        "network {name}: vlan id {id} out of range (must be 1..=4094)"
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(format!(
+                        "network {name}: `vlan` set without `vlan_parent`; \
+                         specify the parent iface explicitly"
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(format!(
+                        "network {name}: `vlan_parent` set without `vlan`; \
+                         remove the parent or add a vlan id"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn check_zone_network_refs(zone: &Zone, cfg: &Config) -> Result<(), String> {
     for net in &zone.networks {
@@ -307,6 +347,8 @@ mod tests {
                     ipv6_address: None,
                     ipv6_prefix: None,
                     ipv6_subnet_id: None,
+                    vlan: None,
+                    vlan_parent: None,
                 },
             ],
             firewall: Firewall {
@@ -730,5 +772,64 @@ mod tests {
         let mut base = json!([1, 2, 3]);
         json_merge(&mut base, &json!({"x": 1}));
         assert_eq!(base, json!([1, 2, 3]));
+    }
+
+    // ── check_vlan_consistency ─────────────────────────────────────
+
+    fn simple_vlan(name: &str, iface: &str, vlan: Option<u16>, parent: Option<&str>) -> Network {
+        Network::Simple {
+            name: name.to_string(),
+            iface: iface.to_string(),
+            address: Ipv4Addr::new(10, 99, 0, 1),
+            prefix: 24,
+            ipv6_address: None,
+            ipv6_prefix: None,
+            ipv6_subnet_id: None,
+            vlan,
+            vlan_parent: parent.map(str::to_string),
+        }
+    }
+
+    fn cfg_with_networks(networks: Vec<Network>) -> Config {
+        let mut cfg = make_test_config();
+        cfg.networks = networks;
+        cfg
+    }
+
+    #[test]
+    fn vlan_with_parent_ok() {
+        let cfg = cfg_with_networks(vec![simple_vlan("v10", "eth0.10", Some(10), Some("eth0"))]);
+        assert!(check_vlan_consistency(&cfg).is_ok());
+    }
+
+    #[test]
+    fn vlan_without_parent_rejected() {
+        let cfg = cfg_with_networks(vec![simple_vlan("v10", "eth0.10", Some(10), None)]);
+        let err = check_vlan_consistency(&cfg).unwrap_err();
+        assert!(err.contains("vlan_parent"), "expected parent-required err: {err}");
+    }
+
+    #[test]
+    fn parent_without_vlan_rejected() {
+        let cfg = cfg_with_networks(vec![simple_vlan("x", "eth0.99", None, Some("eth0"))]);
+        let err = check_vlan_consistency(&cfg).unwrap_err();
+        assert!(err.contains("vlan_parent` set without"), "{err}");
+    }
+
+    #[test]
+    fn vlan_id_out_of_range_rejected() {
+        let cfg =
+            cfg_with_networks(vec![simple_vlan("bad", "x", Some(4095), Some("eth0"))]);
+        assert!(check_vlan_consistency(&cfg).unwrap_err().contains("out of range"));
+        let cfg0 = cfg_with_networks(vec![simple_vlan("bad", "x", Some(0), Some("eth0"))]);
+        assert!(check_vlan_consistency(&cfg0).unwrap_err().contains("out of range"));
+    }
+
+    #[test]
+    fn vlan_none_on_non_vlan_simple_ok() {
+        // The existing make_test_config's guest Simple has no vlan
+        // fields set — this should pass unchanged.
+        let cfg = make_test_config();
+        assert!(check_vlan_consistency(&cfg).is_ok());
     }
 }

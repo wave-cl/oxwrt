@@ -187,6 +187,22 @@ pub enum Network {
         ipv6_prefix: Option<u8>,
         #[serde(default)]
         ipv6_subnet_id: Option<u16>,
+        /// 802.1Q VLAN id (1..=4094). When set together with
+        /// `vlan_parent`, oxwrtd creates `<vlan_parent>.<vlan>` as a
+        /// VLAN sub-iface at boot and assigns `address`/`prefix` on
+        /// the resulting iface (instead of on `iface` directly). The
+        /// `iface` field in this case should name the VLAN sub-iface
+        /// (e.g. "eth0.10") — validate.rs enforces the convention.
+        /// None = untagged (classic behavior).
+        #[serde(default)]
+        vlan: Option<u16>,
+        /// Parent iface for the VLAN. Required when `vlan` is set;
+        /// rejected at validate-time when `vlan` is None. Splitting
+        /// this field from `iface` (rather than inferring the parent
+        /// from the dot notation) lets operators name VLAN sub-ifaces
+        /// anything they want.
+        #[serde(default)]
+        vlan_parent: Option<String>,
     },
 }
 

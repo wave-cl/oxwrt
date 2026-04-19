@@ -19,6 +19,16 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         }
     };
 
+    // Phase 1a: cross-section validation. These checks span multiple
+    // sections (vlan fields on Simple, etc.) so they don't fit the
+    // per-item check_*_refs pattern. Reject early before touching
+    // live state.
+    if let Err(e) = crate::control::validate::check_vlan_consistency(&new_cfg) {
+        return Response::Err {
+            message: format!("reload: {e}"),
+        };
+    }
+
     // Control-only mode short-circuit: re-parse + swap the in-memory
     // config but skip every reconcile phase (netlink, sethostname,
     // firewall, supervisor). This preserves the ability to hand-edit
