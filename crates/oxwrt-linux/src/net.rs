@@ -16,7 +16,9 @@
 //! - WAN DHCP client, route programming, PPPoE
 //! - IPv6 (ICMPv6 RA, ND)
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Mutex;
 
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, LinkVlan, new_connection};
@@ -41,6 +43,19 @@ pub struct Net {
     handle: Handle,
     worker: tokio::task::JoinHandle<()>,
 }
+
+/// VLAN sub-ifaces we've created (by name). Written on successful
+/// create in `setup_simple`, read + diffed in `bring_up`'s cleanup
+/// pass so ifaces whose backing Simple network disappeared from
+/// config get `ip link delete`'d on the next reload.
+///
+/// Static because `Net` is reconstructed on every reload, but the
+/// kernel state persists across reload invocations — a per-instance
+/// field would forget what we created last boot. The tradeoff is
+/// test isolation (shared state across tests), accepted because
+/// the only direct callers are in the linux-gated test suite and
+/// they don't exercise the cleanup path.
+static CREATED_VLAN_IFACES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 impl Net {
     pub fn new() -> Result<Self, Error> {
@@ -87,6 +102,15 @@ impl Net {
                                 %iface, parent = %parent, vlan = vlan_id,
                                 "simple: created VLAN sub-iface"
                             );
+                        }
+                        // Track this iface by name so the cleanup
+                        // pass at the end of bring_up can delete it
+                        // if a future reload drops the config entry.
+                        {
+                            let mut tracked = CREATED_VLAN_IFACES.lock().unwrap();
+                            if !tracked.iter().any(|n| n == iface) {
+                                tracked.push(iface.clone());
+                            }
                         }
                         let idx = self.link_index(iface).await?;
                         self.handle
@@ -141,6 +165,60 @@ impl Net {
                 }
             }
         }
+
+        // Cleanup pass: delete any VLAN sub-iface we previously
+        // created whose backing Simple network has disappeared
+        // from the new config. Iterates the in-memory tracker,
+        // not the kernel, to avoid deleting VLAN ifaces the
+        // operator created manually via debug-ssh.
+        let expected: HashSet<String> = cfg
+            .networks
+            .iter()
+            .filter_map(|n| match n {
+                Network::Simple {
+                    iface,
+                    vlan: Some(_),
+                    vlan_parent: Some(_),
+                    ..
+                } => Some(iface.clone()),
+                _ => None,
+            })
+            .collect();
+        let stale: Vec<String> = {
+            let tracked = CREATED_VLAN_IFACES.lock().unwrap();
+            tracked
+                .iter()
+                .filter(|name| !expected.contains(*name))
+                .cloned()
+                .collect()
+        };
+        for name in &stale {
+            match self.link_index(name).await {
+                Ok(idx) => {
+                    if let Err(e) = self.handle.link().del(idx).execute().await {
+                        tracing::warn!(iface = %name, error = %e, "vlan: cleanup delete failed");
+                    } else {
+                        tracing::info!(iface = %name, "vlan: deleted stale sub-iface");
+                    }
+                }
+                Err(Error::LinkNotFound(_)) => {
+                    // Already gone — operator deleted it out of band;
+                    // our tracker just hadn't caught up. Fine.
+                }
+                Err(e) => {
+                    tracing::warn!(iface = %name, error = %e, "vlan: cleanup lookup failed");
+                }
+            }
+        }
+        // Drop stale entries from the tracker regardless of the
+        // kernel-side result — the next reload shouldn't keep
+        // retrying a delete that already happened (or that the
+        // kernel refuses permanently).
+        CREATED_VLAN_IFACES
+            .lock()
+            .unwrap()
+            .retain(|name| !stale.iter().any(|s| s == name));
+
         Ok(())
     }
 

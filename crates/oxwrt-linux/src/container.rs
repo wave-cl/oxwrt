@@ -1084,6 +1084,138 @@ impl Supervisor {
             remove_cgroup(&sup.spec);
         }
     }
+
+    /// Reconcile the running supervisor against a new service spec
+    /// list. In contrast to `shutdown() + from_config()`, unchanged
+    /// specs keep their running child: hostapd doesn't blip clients,
+    /// dns doesn't drop the cache, coredhcp doesn't lose leases on
+    /// every reload that touches only firewall rules or routes.
+    ///
+    /// Contract:
+    ///   - specs present in `new_services` but not in self      → add
+    ///     (as Stopped; the next `tick` spawns it once deps ready)
+    ///   - specs in self but not in `new_services`              → stop
+    ///     + remove cgroup + drop from `self.services`
+    ///   - specs whose name matches but whose body changed      → stop
+    ///     the running child, replace the entry in place with the new
+    ///     spec as Stopped (next `tick` respawns under the new spec)
+    ///   - specs whose name AND body match self                 → no-op
+    ///
+    /// Topological ordering of the final list mirrors the from_config
+    /// pass: deps first, then dependents. Preserved by rebuilding the
+    /// ordered list from new_services and then restoring the running
+    /// Supervised from the old list where the spec matches.
+    pub fn reconcile(&mut self, new_services: &[Service]) {
+        // Topo-sort the new services exactly like from_config does —
+        // keeps behavior identical for first-reload and later-reload
+        // spawns.
+        let mut ordered: Vec<Service> = Vec::with_capacity(new_services.len());
+        let mut remaining: Vec<&Service> = new_services.iter().collect();
+        let mut progressed = true;
+        while progressed && !remaining.is_empty() {
+            progressed = false;
+            let mut next = Vec::with_capacity(remaining.len());
+            for svc in remaining.drain(..) {
+                let deps_ready = svc
+                    .depends_on
+                    .iter()
+                    .all(|dep| ordered.iter().any(|o| &o.name == dep));
+                if deps_ready {
+                    ordered.push(svc.clone());
+                    progressed = true;
+                } else {
+                    next.push(svc);
+                }
+            }
+            remaining = next;
+        }
+        if !remaining.is_empty() {
+            tracing::warn!(
+                unresolved = ?remaining.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                "reconcile: service dependency cycle; appending in insertion order"
+            );
+            ordered.extend(remaining.into_iter().cloned());
+        }
+        let new_names: std::collections::HashSet<String> =
+            ordered.iter().map(|s| s.name.clone()).collect();
+
+        // Stop + remove services that disappeared from the new spec.
+        // Done first so the depends_on chain stays consistent: a
+        // depender whose dep just got removed must be torn down too
+        // (or at least stopped). We're only stopping the dropped
+        // ones here; a depender with a now-missing dep will either
+        // be updated to point elsewhere, or the operator will hit a
+        // runtime crash on next tick — same failure mode as boot.
+        let drop_names: Vec<String> = self
+            .services
+            .iter()
+            .map(|s| s.spec.name.clone())
+            .filter(|n| !new_names.contains(n))
+            .collect();
+        for name in &drop_names {
+            if let Some(pos) = self.services.iter().position(|s| &s.spec.name == name) {
+                let sup = &mut self.services[pos];
+                if sup.child.is_some() {
+                    let _ = stop(sup);
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while sup.child.is_some() && Instant::now() < deadline {
+                        if let Ok(Some(_)) = reap(sup) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                remove_cgroup(&sup.spec);
+                self.services.remove(pos);
+                tracing::info!(service = %name, "reconcile: removed");
+            }
+        }
+
+        // Rebuild self.services in the new topological order,
+        // carrying forward unchanged Supervised entries and
+        // starting fresh for added/changed ones.
+        let old = std::mem::take(&mut self.services);
+        let mut old_by_name: std::collections::HashMap<String, Supervised> =
+            old.into_iter().map(|s| (s.spec.name.clone(), s)).collect();
+
+        for new_spec in &ordered {
+            match old_by_name.remove(&new_spec.name) {
+                Some(existing) if existing.spec == *new_spec => {
+                    // Unchanged — keep running.
+                    self.services.push(existing);
+                    tracing::debug!(service = %new_spec.name, "reconcile: unchanged, keeping");
+                }
+                Some(mut existing) => {
+                    // Spec changed — stop the old child, swap spec,
+                    // let next tick respawn. Cgroup is reused because
+                    // the name is the same; keeps /sys/fs/cgroup
+                    // layout stable across a spec bump.
+                    if existing.child.is_some() {
+                        let _ = stop(&mut existing);
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        while existing.child.is_some() && Instant::now() < deadline {
+                            if let Ok(Some(_)) = reap(&mut existing) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    existing.spec = new_spec.clone();
+                    existing.state = ServiceState::Stopped;
+                    existing.backoff = BACKOFF_INITIAL;
+                    existing.next_restart = None;
+                    self.services.push(existing);
+                    tracing::info!(service = %new_spec.name, "reconcile: spec changed, restarting");
+                }
+                None => {
+                    // Newly added — Supervised::new starts Stopped,
+                    // next tick spawns.
+                    self.services.push(Supervised::new(new_spec.clone()));
+                    tracing::info!(service = %new_spec.name, "reconcile: added");
+                }
+            }
+        }
+    }
 }
 
 /// Kill the running child (SIGTERM) and mark the state as `Stopped`. The
@@ -1820,5 +1952,94 @@ mod tests {
         });
         let err = PreparedContainer::prepare(&spec).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    // ── Supervisor::reconcile — no real children spawned in tests ──
+    //
+    // These exercise the list-level logic (what gets added, kept,
+    // replaced, removed) without actually spawning processes. Each
+    // Supervised starts with `child = None` so the stop+reap paths
+    // short-circuit, keeping the tests host-side cheap.
+
+    fn svc_named(name: &str) -> Service {
+        let mut s = tmp_service(PathBuf::from("/tmp/r"));
+        s.name = name.into();
+        s
+    }
+
+    #[test]
+    fn reconcile_adds_new_service() {
+        let mut sup = Supervisor::from_config(&[]);
+        sup.reconcile(&[svc_named("dns")]);
+        assert_eq!(sup.services.len(), 1);
+        assert_eq!(sup.services[0].spec.name, "dns");
+        assert!(matches!(sup.services[0].state, ServiceState::Stopped));
+    }
+
+    #[test]
+    fn reconcile_keeps_unchanged_service_pointer_stable() {
+        let original = vec![svc_named("dns"), svc_named("dhcp")];
+        let mut sup = Supervisor::from_config(&original);
+        // Fake a running state to catch a regression where reconcile
+        // resets the Supervised on no-change.
+        sup.services[0].state = ServiceState::Running;
+        sup.services[0].restarts = 7;
+        sup.reconcile(&original);
+        assert_eq!(sup.services.len(), 2);
+        assert!(matches!(sup.services[0].state, ServiceState::Running));
+        assert_eq!(
+            sup.services[0].restarts, 7,
+            "reconcile of identical spec must not reset running state"
+        );
+    }
+
+    #[test]
+    fn reconcile_removes_dropped_service() {
+        let mut sup = Supervisor::from_config(&[svc_named("dns"), svc_named("dhcp")]);
+        sup.reconcile(&[svc_named("dns")]);
+        assert_eq!(sup.services.len(), 1);
+        assert_eq!(sup.services[0].spec.name, "dns");
+    }
+
+    #[test]
+    fn reconcile_replaces_changed_spec() {
+        let mut dns = svc_named("dns");
+        dns.memory_max = Some(64 * 1024 * 1024);
+        let mut sup = Supervisor::from_config(&[dns.clone()]);
+        sup.services[0].state = ServiceState::Running;
+        sup.services[0].restarts = 3;
+
+        // Same name, different body → must be treated as a spec change.
+        dns.memory_max = Some(128 * 1024 * 1024);
+        sup.reconcile(&[dns]);
+
+        assert_eq!(sup.services.len(), 1);
+        assert_eq!(sup.services[0].spec.memory_max, Some(128 * 1024 * 1024));
+        assert!(
+            matches!(sup.services[0].state, ServiceState::Stopped),
+            "spec change must reset state to Stopped so tick respawns"
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_topological_order() {
+        // ntp depends on dns — reconcile must keep that ordering even
+        // when the new list reverses the insertion order of the input.
+        let dns = svc_named("dns");
+        let mut ntp = svc_named("ntp");
+        ntp.depends_on = vec!["dns".into()];
+        let mut sup = Supervisor::from_config(&[dns.clone(), ntp.clone()]);
+        assert_eq!(sup.services[0].spec.name, "dns");
+        // Reverse input order; dns must still come first.
+        sup.reconcile(&[ntp, dns]);
+        assert_eq!(sup.services[0].spec.name, "dns");
+        assert_eq!(sup.services[1].spec.name, "ntp");
+    }
+
+    #[test]
+    fn reconcile_noop_on_empty_to_empty() {
+        let mut sup = Supervisor::from_config(&[]);
+        sup.reconcile(&[]);
+        assert!(sup.services.is_empty());
     }
 }

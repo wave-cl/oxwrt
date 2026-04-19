@@ -730,7 +730,7 @@ fn default_wifi_security() -> WifiSecurity {
     WifiSecurity::Wpa3Sae
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Service {
     pub name: String,
     pub rootfs: PathBuf,
@@ -769,7 +769,7 @@ pub struct Service {
 /// the four-cap retain list, `no_new_privs = true`, `seccomp = true`. A
 /// derived `Default` would silently produce an empty caps list (drop
 /// everything) which is a footgun.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityProfile {
     /// Linux capabilities to **retain**. Anything not in this list is
     /// dropped from the bounding, effective, permitted, and inheritable
@@ -877,7 +877,7 @@ impl Default for SecurityProfile {
 /// creates `veth-<svc>` in the host netns with `host_ip/prefix`, creates the
 /// peer `veth-<svc>-p` in the child's netns with `peer_ip/prefix`, and
 /// expects the service to bind on `peer_ip` (or `0.0.0.0` / `::`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VethConfig {
     pub host_ip: Ipv4Addr,
     pub peer_ip: Ipv4Addr,
@@ -906,7 +906,7 @@ pub enum NetMode {
     Host,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BindMount {
     pub source: PathBuf,
     pub target: PathBuf,

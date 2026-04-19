@@ -5,7 +5,6 @@ use super::*;
 
 pub async fn handle_reload_async(state: &ControlState) -> Response {
     use crate::config::Config;
-    use crate::container::Supervisor;
     use std::path::Path;
 
     // Phase 1: parse.
@@ -214,15 +213,19 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         tracing::error!(error = %e, "reload: wifi::write_all failed");
     }
 
-    // Phase 4: rebuild supervisor.
+    // Phase 4: reconcile supervisor. Unlike the previous
+    // shutdown()+from_config() pattern this leaves unchanged
+    // services running — hostapd doesn't blip wifi clients on a
+    // reload that only touched a route or a firewall rule. Spec
+    // changes still trigger a stop+respawn, so `oxctl wifi update`
+    // + reload still takes effect.
     {
         let Ok(mut sup) = state.supervisor.lock() else {
             return Response::Err {
                 message: "reload: supervisor mutex poisoned".to_string(),
             };
         };
-        sup.shutdown();
-        *sup = Supervisor::from_config(&new_cfg.services);
+        sup.reconcile(&new_cfg.services);
     }
 
     // Phase 5: publish new state.
