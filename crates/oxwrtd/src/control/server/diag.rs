@@ -121,6 +121,43 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                 },
             }
         }
+        "nft-summary" => {
+            // Condensed snapshot of the nftables ruleset: one line per
+            // table with chain + rule + set counts, one line per chain
+            // with hook/prio/policy, and for any set with elements a
+            // count + up-to-5 sample elements. Built from `nft -j list
+            // ruleset` (shipped with nftables; same binary as above).
+            // Easier to grep than the full ruleset when operators are
+            // just asking "are my blocklist sets populated" or "did
+            // the forward chain's default really land as drop?"
+            use std::process::Command;
+            // The shipped nftables package on OpenWrt 25.x is built
+            // without JSON support (-j), so we parse the plain-text
+            // `nft list ruleset` instead. Brittle in principle but
+            // the libnftables formatter is effectively an ABI —
+            // distros depend on stable output.
+            let out = Command::new("/usr/sbin/nft")
+                .args(["list", "ruleset"])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => match summarize_nft_text(&String::from_utf8_lossy(&o.stdout)) {
+                    Ok(text) => Response::Value { value: text },
+                    Err(e) => Response::Err {
+                        message: format!("diag nft-summary: parse: {e}"),
+                    },
+                },
+                Ok(o) => Response::Err {
+                    message: format!(
+                        "diag nft-summary: exit {:?}: {}",
+                        o.status.code(),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                },
+                Err(e) => Response::Err {
+                    message: format!("diag nft-summary: spawn: {e}"),
+                },
+            }
+        }
         "sysctl" => {
             // Tiny networking-sysctl snapshot for troubleshooting. Reads
             // a fixed set of flags the router relies on — forwarding,
@@ -299,7 +336,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig, stall)"
+                 modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig, stall)"
             ),
         },
     }
@@ -773,4 +810,324 @@ async fn diag_routes() -> Result<String, String> {
     }
     conn_task.abort();
     Ok(out)
+}
+
+/// Turn `nft list ruleset` plain-text output into a compact
+/// summary: one line per table with chain/rule/set counts, one
+/// indented line per chain with hook/prio/policy, one per set
+/// with type/element-count + sample. Line-based state machine —
+/// the nft formatter is stable across versions and distros.
+fn summarize_nft_text(text: &str) -> Result<String, String> {
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct TableAgg {
+        family: String,
+        name: String,
+        chain_count: usize,
+        rule_count: usize,
+        set_count: usize,
+        chains: Vec<String>,
+        sets: Vec<String>,
+    }
+    let mut tables: BTreeMap<String, TableAgg> = BTreeMap::new();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Where {
+        Top,
+        Chain,
+        Set,
+    }
+    let mut cur_table: Option<(String, String)> = None; // (family, name)
+    let mut cur_chain_name: Option<String> = None;
+    let mut cur_chain_buf: Option<String> = None; // "  chain NAME ..." being built
+    let mut cur_set_name: Option<String> = None;
+    let mut cur_set_type: Option<String> = None;
+    let mut cur_set_elements: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut state = Where::Top;
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Closing braces: decrement and transition.
+        if line == "}" {
+            depth -= 1;
+            match state {
+                Where::Chain => {
+                    if let (Some((fam, tab)), Some(buf)) =
+                        (cur_table.as_ref(), cur_chain_buf.take())
+                    {
+                        tables
+                            .entry(format!("{fam}:{tab}"))
+                            .or_insert_with(|| TableAgg {
+                                family: fam.clone(),
+                                name: tab.clone(),
+                                ..Default::default()
+                            })
+                            .chains
+                            .push(buf);
+                    }
+                    cur_chain_name = None;
+                    state = Where::Top;
+                }
+                Where::Set => {
+                    if let (Some((fam, tab)), Some(name)) =
+                        (cur_table.as_ref(), cur_set_name.take())
+                    {
+                        let typ = cur_set_type.take().unwrap_or_default();
+                        let entry = tables
+                            .entry(format!("{fam}:{tab}"))
+                            .or_insert_with(|| TableAgg {
+                                family: fam.clone(),
+                                name: tab.clone(),
+                                ..Default::default()
+                            });
+                        let mut line =
+                            format!("  set {} type={} elements={}", name, typ, cur_set_elements.len());
+                        if !cur_set_elements.is_empty() {
+                            let sample: Vec<&str> = cur_set_elements
+                                .iter()
+                                .take(5)
+                                .map(|s| s.as_str())
+                                .collect();
+                            line.push_str(&format!(" sample=[{}]", sample.join(", ")));
+                            if cur_set_elements.len() > 5 {
+                                line.push_str(&format!(
+                                    " +{} more",
+                                    cur_set_elements.len() - 5
+                                ));
+                            }
+                        }
+                        entry.sets.push(line);
+                    }
+                    cur_set_elements.clear();
+                    state = Where::Top;
+                }
+                Where::Top => {
+                    cur_table = None;
+                }
+            }
+            continue;
+        }
+        // Opening containers.
+        if state == Where::Top {
+            if let Some(rest) = line.strip_prefix("table ") {
+                // "table ip oxwrt {"
+                let rest = rest.trim_end_matches('{').trim();
+                let mut parts = rest.split_whitespace();
+                let fam = parts.next().unwrap_or("?").to_string();
+                let name = parts.next().unwrap_or("?").to_string();
+                tables
+                    .entry(format!("{fam}:{name}"))
+                    .or_insert_with(|| TableAgg {
+                        family: fam.clone(),
+                        name: name.clone(),
+                        ..Default::default()
+                    });
+                cur_table = Some((fam, name));
+                depth += 1;
+                continue;
+            }
+            if line.starts_with("chain ") && line.ends_with('{') {
+                let body = line.trim_start_matches("chain ").trim_end_matches('{').trim();
+                let name = body.split_whitespace().next().unwrap_or("?").to_string();
+                if let Some((fam, tab)) = cur_table.as_ref() {
+                    let entry = tables
+                        .entry(format!("{fam}:{tab}"))
+                        .or_insert_with(|| TableAgg {
+                            family: fam.clone(),
+                            name: tab.clone(),
+                            ..Default::default()
+                        });
+                    entry.chain_count += 1;
+                }
+                cur_chain_name = Some(name.clone());
+                cur_chain_buf = Some(format!("  chain {name}"));
+                state = Where::Chain;
+                depth += 1;
+                continue;
+            }
+            if line.starts_with("set ") && line.ends_with('{') {
+                let body = line.trim_start_matches("set ").trim_end_matches('{').trim();
+                let name = body.split_whitespace().next().unwrap_or("?").to_string();
+                if let Some((fam, tab)) = cur_table.as_ref() {
+                    let entry = tables
+                        .entry(format!("{fam}:{tab}"))
+                        .or_insert_with(|| TableAgg {
+                            family: fam.clone(),
+                            name: tab.clone(),
+                            ..Default::default()
+                        });
+                    entry.set_count += 1;
+                }
+                cur_set_name = Some(name);
+                state = Where::Set;
+                depth += 1;
+                continue;
+            }
+        }
+        // Inside a chain: pull hook/prio/policy, count rules.
+        if state == Where::Chain {
+            // Chain base spec: "type filter hook input priority 0; policy drop;"
+            if let Some(idx) = line.find("hook ") {
+                let rest = &line[idx..];
+                let mut hook = None;
+                let mut prio = None;
+                let mut policy = None;
+                // Tokenize coarsely.
+                let toks: Vec<&str> = rest.split(|c: char| c == ';' || c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+                let mut i = 0;
+                while i < toks.len() {
+                    match toks[i] {
+                        "hook" => {
+                            hook = toks.get(i + 1).map(|s| s.to_string());
+                            i += 2;
+                        }
+                        "priority" => {
+                            prio = toks.get(i + 1).map(|s| s.to_string());
+                            i += 2;
+                        }
+                        "policy" => {
+                            policy = toks.get(i + 1).map(|s| s.to_string());
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if let Some(buf) = cur_chain_buf.as_mut() {
+                    if let Some(h) = hook {
+                        buf.push_str(&format!(" hook={h}"));
+                    }
+                    if let Some(p) = prio {
+                        buf.push_str(&format!(" prio={p}"));
+                    }
+                    if let Some(pol) = policy {
+                        buf.push_str(&format!(" policy={pol}"));
+                    }
+                }
+                continue;
+            }
+            // A comment or policy-only line we haven't matched.
+            // Any other line inside a chain that isn't empty and
+            // doesn't start with "type " counts as a rule.
+            if !line.starts_with("type ") && !line.starts_with("#") {
+                if let Some((fam, tab)) = cur_table.as_ref() {
+                    tables
+                        .entry(format!("{fam}:{tab}"))
+                        .or_insert_with(|| TableAgg {
+                            family: fam.clone(),
+                            name: tab.clone(),
+                            ..Default::default()
+                        })
+                        .rule_count += 1;
+                }
+            }
+            continue;
+        }
+        // Inside a set.
+        if state == Where::Set {
+            if let Some(typ) = line.strip_prefix("type ") {
+                cur_set_type = Some(typ.trim_end_matches(';').to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("elements = {") {
+                // "elements = { 1.2.3.4, 5.6.7.8 }" on one line, or
+                // could span lines — collect what's on this line and
+                // keep reading subsequent lines (fall through by
+                // continuing) until we see a "}". Simpler: strip
+                // trailing "}" and parse CSV. nft tends to pretty-
+                // print so a one-line block is common.
+                let inner = rest.trim_end_matches('}').trim();
+                for tok in inner.split(',') {
+                    let t = tok.trim();
+                    if !t.is_empty() {
+                        cur_set_elements.push(t.to_string());
+                    }
+                }
+                continue;
+            }
+            // Continuation line of a multi-line elements block —
+            // just another comma-separated segment, maybe with a
+            // trailing "}" closing the set.
+            let inner = line.trim_end_matches('}').trim_end_matches('{').trim();
+            for tok in inner.split(',') {
+                let t = tok.trim();
+                if !t.is_empty()
+                    && !t.starts_with("type ")
+                    && !t.starts_with("flags ")
+                    && t != "elements"
+                    && t != "="
+                {
+                    cur_set_elements.push(t.to_string());
+                }
+            }
+            continue;
+        }
+    }
+    let _ = (depth, cur_chain_name); // quiet unused-assigned if we hit an error path
+
+    let mut out = String::new();
+    for agg in tables.values() {
+        out.push_str(&format!(
+            "table {} {} chains={} rules={} sets={}\n",
+            agg.family, agg.name, agg.chain_count, agg.rule_count, agg.set_count,
+        ));
+        for line in &agg.chains {
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in &agg.sets {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(no tables)\n");
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod nft_summary_tests {
+    use super::summarize_nft_text;
+
+    #[test]
+    fn empty_ruleset() {
+        let out = summarize_nft_text("").unwrap();
+        assert_eq!(out, "(no tables)\n");
+    }
+
+    #[test]
+    fn single_table_chain_rule() {
+        let text = r#"
+table ip oxwrt {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+    }
+}
+"#;
+        let out = summarize_nft_text(text).unwrap();
+        assert!(out.contains("table ip oxwrt chains=1 rules=2 sets=0"), "got: {out}");
+        assert!(out.contains("chain input hook=input prio=0 policy=drop"), "got: {out}");
+    }
+
+    #[test]
+    fn set_with_elements() {
+        let text = r#"
+table ip oxwrt-bl {
+    set blk {
+        type ipv4_addr
+        elements = { 10.0.0.1, 10.0.0.2 }
+    }
+}
+"#;
+        let out = summarize_nft_text(text).unwrap();
+        assert!(out.contains("table ip oxwrt-bl chains=0 rules=0 sets=1"), "got: {out}");
+        assert!(out.contains("set blk type=ipv4_addr elements=2"), "got: {out}");
+        assert!(out.contains("sample=[10.0.0.1, 10.0.0.2]"), "got: {out}");
+    }
 }
