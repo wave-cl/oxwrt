@@ -146,6 +146,25 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             }
             Response::Value { value: out }
         }
+        "resolv" => {
+            // Dump /etc/resolv.conf so operators can confirm the
+            // router's own libc resolver is pointing at the LAN IP
+            // (which DNATs to the hickory DoH forwarder). Missing
+            // file isn't an error — it just means write_self_resolv_conf
+            // ran with no LAN/Simple network declared and skipped.
+            match std::fs::read_to_string("/etc/resolv.conf") {
+                Ok(s) if s.is_empty() => Response::Value {
+                    value: "(empty /etc/resolv.conf)\n".to_string(),
+                },
+                Ok(s) => Response::Value { value: s },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Response::Value {
+                    value: "(no /etc/resolv.conf — router has no LAN/Simple network to point at, or write_self_resolv_conf failed at boot)\n".to_string(),
+                },
+                Err(e) => Response::Err {
+                    message: format!("diag resolv: {e}"),
+                },
+            }
+        }
         "conntrack" => {
             // Dump the kernel's conntrack table. Useful for tracing
             // "packet left the client but did it reach NAT?" — a LAN
@@ -183,7 +202,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, conntrack, sysctl, ping, traceroute, dig)"
+                 modules, dmesg, nft, conntrack, resolv, sysctl, ping, traceroute, dig)"
             ),
         },
     }
