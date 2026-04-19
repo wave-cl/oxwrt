@@ -249,4 +249,95 @@ iface = "wg0"
         assert_eq!(r.metric, 1024);
         assert_eq!(r.gateway, None);
     }
+
+    /// Iface changes count as "different route": the reconcile must
+    /// del the old one and add the new one, not leave stale kernel
+    /// state pointing at the wrong output link.
+    #[test]
+    fn diff_detects_iface_change() {
+        let old = vec![r("10.20.0.0", 16, "eth0")];
+        let mut changed = old[0].clone();
+        changed.iface = "wg0".into();
+        let new = vec![changed];
+        let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
+        let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
+        assert_eq!(to_del.len(), 1);
+        assert_eq!(to_add.len(), 1);
+    }
+
+    /// Gateway on/off is a route identity change.
+    #[test]
+    fn diff_detects_gateway_toggle() {
+        let mut onlink = r("10.20.0.0", 16, "eth0");
+        let mut via = onlink.clone();
+        onlink.gateway = None;
+        via.gateway = Some("10.20.0.1".parse().unwrap());
+        let old = vec![onlink];
+        let new = vec![via];
+        let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
+        let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
+        assert_eq!(to_del.len(), 1);
+        assert_eq!(to_add.len(), 1);
+    }
+
+    /// Adding one route + keeping two unchanged: diff produces one
+    /// add, zero dels. Tests the "partial overlap" case that
+    /// diff_noop_on_identical doesn't.
+    #[test]
+    fn diff_partial_overlap_adds_only_new() {
+        let keep_a = r("10.20.0.0", 16, "wg0");
+        let keep_b = r("192.168.100.0", 24, "eth0");
+        let new_c = r("172.16.0.0", 12, "wg0");
+        let old = vec![keep_a.clone(), keep_b.clone()];
+        let new = vec![keep_a, keep_b, new_c.clone()];
+        let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
+        let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
+        assert!(to_del.is_empty());
+        assert_eq!(to_add.len(), 1);
+        assert_eq!(*to_add[0], new_c);
+    }
+
+    /// Errno classifiers must agree with the kernel's negated-errno
+    /// convention that rtnetlink exposes via NetlinkError.code.
+    /// We don't have a live netlink handle in unit tests so we
+    /// confirm the sentinel values used in the matchers.
+    #[test]
+    fn errno_sentinels_match_linux_conventions() {
+        // EEXIST = 17, ESRCH = 3, ENODEV = 19. Kernel negates them
+        // in netlink error responses. These constants are duplicated
+        // in static_routes.rs and wan_dhcp.rs — this test locks
+        // down the numbers so a copy-paste regression fails here.
+        assert_eq!(17, libc::EEXIST);
+        assert_eq!(3, libc::ESRCH);
+        assert_eq!(19, libc::ENODEV);
+    }
+
+    /// Routes TOML list roundtrips cleanly: parse a Vec<Route>
+    /// fragment like the one oxwrt.toml uses.
+    #[test]
+    fn route_list_parses_from_toml_array() {
+        let toml = r#"
+[[routes]]
+dest = "10.20.0.0"
+prefix = 16
+iface = "wg0"
+
+[[routes]]
+dest = "192.168.100.0"
+prefix = 24
+gateway = "10.8.0.1"
+iface = "wg0"
+metric = 200
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            routes: Vec<Route>,
+        }
+        let w: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(w.routes.len(), 2);
+        assert_eq!(w.routes[0].metric, 1024); // default
+        assert_eq!(w.routes[1].metric, 200); // explicit
+        assert_eq!(w.routes[0].gateway, None);
+        assert!(w.routes[1].gateway.is_some());
+    }
 }

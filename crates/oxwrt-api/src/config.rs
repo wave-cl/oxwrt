@@ -1416,4 +1416,268 @@ dest = "dmz"
             "ntp.toml must declare at least one [[source]] pool/server"
         );
     }
+
+    // ── Schema roundtrip tests for the four new features ───────────
+    //
+    // Each test parses a minimal TOML fragment into the relevant
+    // struct, asserts required fields land where expected and that
+    // documented defaults kick in when optional fields are omitted.
+    // These are narrower than example_config_parses — catches
+    // serde-attribute regressions (wrong rename, dropped default,
+    // type mismatch) even when the example config happens to
+    // exercise the wrong path.
+
+    // --- Route ---
+
+    #[test]
+    fn route_minimal_fields_default_metric_and_no_gateway() {
+        let toml = r#"
+dest = "10.20.0.0"
+prefix = 16
+iface = "wg0"
+"#;
+        let r: Route = toml::from_str(toml).unwrap();
+        assert_eq!(r.dest, std::net::Ipv4Addr::new(10, 20, 0, 0));
+        assert_eq!(r.prefix, 16);
+        assert_eq!(r.iface, "wg0");
+        assert_eq!(r.gateway, None);
+        assert_eq!(r.metric, 1024, "default_route_metric");
+    }
+
+    #[test]
+    fn route_with_gateway_and_metric_roundtrips() {
+        let toml = r#"
+dest = "192.168.100.0"
+prefix = 24
+gateway = "10.8.0.1"
+iface = "wg0"
+metric = 200
+"#;
+        let r: Route = toml::from_str(toml).unwrap();
+        assert_eq!(r.gateway, Some(std::net::Ipv4Addr::new(10, 8, 0, 1)));
+        assert_eq!(r.metric, 200);
+    }
+
+    #[test]
+    fn route_rejects_missing_iface() {
+        let toml = r#"
+dest = "10.20.0.0"
+prefix = 16
+"#;
+        let err = toml::from_str::<Route>(toml).unwrap_err().to_string();
+        assert!(err.contains("iface"), "err should mention iface: {err}");
+    }
+
+    #[test]
+    fn route_eq_distinguishes_metric() {
+        // The reconcile diff relies on PartialEq taking metric into
+        // account — a metric change must be treated as a different
+        // route so reload del+adds instead of silently leaving the
+        // old kernel state.
+        let a = Route {
+            dest: "10.20.0.0".parse().unwrap(),
+            prefix: 16,
+            gateway: None,
+            iface: "wg0".into(),
+            metric: 100,
+        };
+        let mut b = a.clone();
+        b.metric = 200;
+        assert_ne!(a, b);
+    }
+
+    // --- Blocklist ---
+
+    #[test]
+    fn blocklist_minimal_defaults() {
+        let toml = r#"
+name = "firehol"
+url = "https://example.com/list.txt"
+"#;
+        let b: Blocklist = toml::from_str(toml).unwrap();
+        assert_eq!(b.name, "firehol");
+        assert_eq!(b.refresh_seconds, 86400, "default = 24h");
+        assert!(b.zones.is_empty(), "default = router-wide drop");
+    }
+
+    #[test]
+    fn blocklist_zones_list_roundtrips() {
+        let toml = r#"
+name = "fh"
+url = "http://x/"
+refresh_seconds = 3600
+zones = ["wan", "guest"]
+"#;
+        let b: Blocklist = toml::from_str(toml).unwrap();
+        assert_eq!(b.refresh_seconds, 3600);
+        assert_eq!(b.zones, vec!["wan".to_string(), "guest".to_string()]);
+    }
+
+    // --- UpnpConfig ---
+
+    #[test]
+    fn upnp_minimal_defaults() {
+        let toml = r#"
+wan = "eth1"
+lan = "br-lan"
+"#;
+        let u: UpnpConfig = toml::from_str(toml).unwrap();
+        assert_eq!(u.wan, "eth1");
+        assert_eq!(u.lan, "br-lan");
+        assert_eq!(u.min_port, 1024);
+        assert_eq!(u.max_port, 65535);
+        assert!(u.enable_natpmp);
+    }
+
+    #[test]
+    fn upnp_explicit_overrides_apply() {
+        let toml = r#"
+wan = "ppp0"
+lan = "br-lan"
+min_port = 2000
+max_port = 3000
+enable_natpmp = false
+"#;
+        let u: UpnpConfig = toml::from_str(toml).unwrap();
+        assert_eq!(u.min_port, 2000);
+        assert_eq!(u.max_port, 3000);
+        assert!(!u.enable_natpmp);
+    }
+
+    #[test]
+    fn upnp_rejects_missing_wan_lan() {
+        assert!(toml::from_str::<UpnpConfig>("").is_err(), "empty rejected");
+        assert!(
+            toml::from_str::<UpnpConfig>("wan = \"eth1\"\n").is_err(),
+            "lan required"
+        );
+    }
+
+    // --- Network::Simple VLAN fields ---
+
+    #[test]
+    fn simple_vlan_fields_roundtrip() {
+        let toml = r#"
+name = "voip"
+type = "simple"
+iface = "eth0.10"
+address = "10.10.0.1"
+prefix = 24
+vlan = 10
+vlan_parent = "eth0"
+"#;
+        let n: Network = toml::from_str(toml).unwrap();
+        match n {
+            Network::Simple {
+                vlan,
+                vlan_parent,
+                address,
+                ..
+            } => {
+                assert_eq!(vlan, Some(10));
+                assert_eq!(vlan_parent.as_deref(), Some("eth0"));
+                assert_eq!(address, std::net::Ipv4Addr::new(10, 10, 0, 1));
+            }
+            _ => panic!("expected Simple"),
+        }
+    }
+
+    #[test]
+    fn simple_without_vlan_defaults_to_none() {
+        let toml = r#"
+name = "guest"
+type = "simple"
+iface = "br-guest"
+address = "10.99.0.1"
+prefix = 24
+"#;
+        let n: Network = toml::from_str(toml).unwrap();
+        match n {
+            Network::Simple {
+                vlan, vlan_parent, ..
+            } => {
+                assert_eq!(vlan, None);
+                assert_eq!(vlan_parent, None);
+            }
+            _ => panic!("expected Simple"),
+        }
+    }
+
+    // --- Config-level integration: every new field at once ---
+
+    /// A single TOML document exercising routes + blocklists + upnp
+    /// + a VLAN Simple network + metrics + wireguard. Confirms the
+    /// four new top-level fields on Config don't interfere with
+    /// each other under serde's flatten/default machinery — a
+    /// regression here would mean a field collision (e.g. two
+    /// `#[serde(default)]` optionals both matching an unknown key).
+    #[test]
+    fn config_all_new_features_together() {
+        let toml = r#"
+hostname = "combo"
+timezone = "UTC"
+
+[[networks]]
+name = "wan"
+type = "wan"
+iface = "eth1"
+mode = "dhcp"
+
+[[networks]]
+name = "lan"
+type = "lan"
+bridge = "br-lan"
+address = "192.168.50.1"
+prefix = 24
+
+[[networks]]
+name = "voip"
+type = "simple"
+iface = "eth0.10"
+address = "10.10.0.1"
+prefix = 24
+vlan = 10
+vlan_parent = "eth0"
+
+[[routes]]
+dest = "10.20.0.0"
+prefix = 16
+iface = "wg0"
+
+[[blocklists]]
+name = "fh"
+url = "http://x/"
+
+[[wireguard]]
+name = "wg0"
+listen_port = 51820
+
+[upnp]
+wan = "eth1"
+lan = "br-lan"
+
+[metrics]
+listen = "192.168.50.1:9100"
+
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/etc/oxwrt/authorized_keys"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap_or_else(|e| panic!("parse: {e}"));
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.blocklists.len(), 1);
+        assert_eq!(cfg.wireguard.len(), 1);
+        assert!(cfg.upnp.is_some());
+        assert!(cfg.metrics.is_some());
+        // Confirm the VLAN Simple round-tripped through the full Config.
+        let vlan_net = cfg
+            .networks
+            .iter()
+            .find(|n| n.name() == "voip")
+            .expect("voip network");
+        match vlan_net {
+            Network::Simple { vlan, .. } => assert_eq!(*vlan, Some(10)),
+            _ => panic!("voip should be Simple"),
+        }
+    }
 }

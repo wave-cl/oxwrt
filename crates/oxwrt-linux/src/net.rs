@@ -1222,6 +1222,8 @@ mod tests {
                     ipv6_address: None,
                     ipv6_prefix: None,
                     ipv6_subnet_id: None,
+                    vlan: None,
+                    vlan_parent: None,
                 },
             ],
             firewall: Firewall {

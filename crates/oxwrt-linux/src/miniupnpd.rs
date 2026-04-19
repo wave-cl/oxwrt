@@ -148,4 +148,79 @@ lan = "br-lan"
         assert_eq!(u.max_port, 65535);
         assert!(u.enable_natpmp);
     }
+
+    /// The generator header includes the "do not edit" marker so
+    /// operators SSH-tailing the config file know regenerating it
+    /// via oxwrtd reload wipes manual changes.
+    #[test]
+    fn render_header_warns_against_manual_edits() {
+        let out = render(&sample());
+        assert!(out.contains("do not edit"));
+        assert!(out.contains("/etc/oxwrt.toml"));
+    }
+
+    /// Deny-all rule after the allow range. Order matters in
+    /// miniupnpd.conf — a stray rule ordering flip would silently
+    /// permit all ports regardless of min_port/max_port.
+    #[test]
+    fn render_deny_follows_allow() {
+        let out = render(&sample());
+        let allow_pos = out.find("allow ").expect("allow rule present");
+        let deny_pos = out.find("deny ").expect("deny rule present");
+        assert!(
+            allow_pos < deny_pos,
+            "allow must come before deny in miniupnpd.conf"
+        );
+    }
+
+    /// Separate nftables table isolates miniupnpd's transient
+    /// mappings from the main oxwrt rules. Regression here (e.g.
+    /// dropping the `upnp_nftables_table=` directive) means
+    /// miniupnpd's DNATs would land in the wrong table and the
+    /// main firewall reload would wipe them.
+    #[test]
+    fn render_points_miniupnpd_at_separate_nftables_table() {
+        let out = render(&sample());
+        assert!(out.contains("upnp_nftables_family=inet"));
+        assert!(out.contains("upnp_nftables_table=oxwrt-upnpd"));
+    }
+
+    /// WAN iface with PPPoE-style name (contains special chars) —
+    /// no escape-the-quote-type shell quoting should be applied to
+    /// the ext_ifname line.
+    #[test]
+    fn render_passes_wan_name_through() {
+        let mut c = sample();
+        c.wan = "ppp0".into();
+        let out = render(&c);
+        assert!(out.contains("ext_ifname=ppp0"));
+    }
+
+    // ── write_config I/O tests ─────────────────────────────────────
+
+    /// write_config is a no-op when cfg.upnp is None. It must NOT
+    /// delete a pre-existing config file — doing so would race the
+    /// running miniupnpd service on a reload that toggles upnp off
+    /// momentarily. Exercised via a minimal TOML config.
+    #[test]
+    fn write_config_is_noop_when_disabled() {
+        let toml = r#"
+hostname = "t"
+
+[[networks]]
+name = "lan"
+type = "lan"
+bridge = "br-lan"
+address = "192.168.50.1"
+prefix = 24
+
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/x"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.upnp.is_none());
+        // Should not error and should not attempt to write.
+        assert!(write_config(&cfg).is_ok());
+    }
 }

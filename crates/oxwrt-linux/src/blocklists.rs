@@ -220,6 +220,19 @@ fn apply_nft(
     blocklists: &[Blocklist],
     entries: &[(String, Vec<(Ipv4Addr, u8)>)],
 ) -> Result<(), Error> {
+    run_nft_script(&build_install_script(blocklists, entries))
+}
+
+/// Pure script builder — extracted from `apply_nft` so unit tests
+/// can pin the exact nft syntax without invoking the nft binary.
+/// A regression in the priority, hook, set flags, or rule ordering
+/// would break silently in production (drops not firing, main
+/// table clobbered). This function being pure means those changes
+/// are caught at `cargo test` time.
+pub(crate) fn build_install_script(
+    blocklists: &[Blocklist],
+    entries: &[(String, Vec<(Ipv4Addr, u8)>)],
+) -> String {
     let mut script = String::with_capacity(4096);
     script.push_str("table inet oxwrt-blocklist { }\n");
     script.push_str("delete table inet oxwrt-blocklist\n");
@@ -259,8 +272,7 @@ fn apply_nft(
     }
     script.push_str("  }\n");
     script.push_str("}\n");
-
-    run_nft_script(&script)
+    script
 }
 
 /// Narrow atomic update for a single set: flush then add elements.
@@ -268,6 +280,12 @@ fn apply_nft(
 /// a slow refresh on one list doesn't jitter rule evaluation on
 /// another.
 fn update_set(name: &str, cidrs: &[(Ipv4Addr, u8)]) -> Result<(), Error> {
+    run_nft_script(&build_update_script(name, cidrs))
+}
+
+/// Pure builder for the narrow per-set update. Same rationale as
+/// `build_install_script` — tested at the string level.
+pub(crate) fn build_update_script(name: &str, cidrs: &[(Ipv4Addr, u8)]) -> String {
     let mut script = String::with_capacity(256 + cidrs.len() * 20);
     script.push_str(&format!(
         "flush set inet oxwrt-blocklist {}\n",
@@ -288,7 +306,7 @@ fn update_set(name: &str, cidrs: &[(Ipv4Addr, u8)]) -> Result<(), Error> {
         }
         script.push_str(" }\n");
     }
-    run_nft_script(&script)
+    script
 }
 
 fn run_nft_script(script: &str) -> Result<(), Error> {
@@ -393,5 +411,180 @@ url = "http://example.com/list.txt"
         let bl: Blocklist = toml::from_str(toml).unwrap();
         assert_eq!(bl.refresh_seconds, 86400);
         assert!(bl.zones.is_empty());
+    }
+
+    // ── Pure script-builder tests: lock down the exact nft syntax ──
+
+    fn sample_bl(name: &str) -> Blocklist {
+        Blocklist {
+            name: name.into(),
+            url: "http://example.com/list.txt".into(),
+            refresh_seconds: 86400,
+            zones: vec![],
+        }
+    }
+
+    /// The install script MUST start with `delete table ; add table`
+    /// (the atomic-swap idiom). A change to emit `flush table` or
+    /// plain `add` would leave stale rules around across reloads.
+    #[test]
+    fn install_script_uses_delete_then_add() {
+        let bl = vec![sample_bl("fh")];
+        let entries = vec![(
+            "fh".to_string(),
+            vec![(Ipv4Addr::new(1, 2, 3, 0), 24)],
+        )];
+        let s = build_install_script(&bl, &entries);
+        assert!(s.contains("table inet oxwrt-blocklist { }\n"));
+        assert!(s.contains("delete table inet oxwrt-blocklist\n"));
+        assert!(
+            s.find("delete table").unwrap() < s.find("chain input").unwrap(),
+            "delete must precede the chain definition"
+        );
+    }
+
+    /// Priority -10 + hook input. If either drifts, matches no
+    /// longer short-circuit before the main oxwrt table — security
+    /// regression.
+    #[test]
+    fn install_script_hook_priority_is_minus_10() {
+        let bl = vec![sample_bl("fh")];
+        let entries = vec![("fh".to_string(), vec![])];
+        let s = build_install_script(&bl, &entries);
+        assert!(s.contains("type filter hook input priority -10; policy accept;"));
+    }
+
+    /// `flags interval` is required on the set because we insert
+    /// CIDRs (ranges) rather than individual IPs. Without it the
+    /// nft parser rejects the `elements = { 1.2.3.0/24 }` syntax.
+    #[test]
+    fn install_script_set_uses_interval_flags() {
+        let bl = vec![sample_bl("fh")];
+        let entries = vec![(
+            "fh".to_string(),
+            vec![(Ipv4Addr::new(1, 2, 3, 0), 24)],
+        )];
+        let s = build_install_script(&bl, &entries);
+        assert!(s.contains("flags interval"));
+        assert!(s.contains("1.2.3.0/24"));
+    }
+
+    /// One drop rule per blocklist, each saddr-matched to its own
+    /// named set via @ident. Tests that multiple blocklists don't
+    /// silently collapse to one rule (previous bug: emitted one rule
+    /// per iteration of the wrong loop).
+    #[test]
+    fn install_script_emits_one_drop_rule_per_list() {
+        let bls = vec![sample_bl("a"), sample_bl("b"), sample_bl("c")];
+        let entries = vec![
+            ("a".to_string(), vec![]),
+            ("b".to_string(), vec![]),
+            ("c".to_string(), vec![]),
+        ];
+        let s = build_install_script(&bls, &entries);
+        assert_eq!(
+            s.matches("ip saddr @").count(),
+            3,
+            "expected 3 drop rules, script:\n{s}"
+        );
+        assert!(s.contains("ip saddr @a drop"));
+        assert!(s.contains("ip saddr @b drop"));
+        assert!(s.contains("ip saddr @c drop"));
+    }
+
+    /// Empty set still produces a valid `set foo { type … flags … }`
+    /// block (no `elements = {}`, which nft rejects as empty).
+    #[test]
+    fn install_script_empty_set_omits_elements_clause() {
+        let bl = vec![sample_bl("fh")];
+        let entries = vec![("fh".to_string(), vec![])];
+        let s = build_install_script(&bl, &entries);
+        assert!(s.contains("set fh { type ipv4_addr; flags interval; }"));
+        assert!(!s.contains("elements = {"), "empty elements clause: {s}");
+    }
+
+    /// Zero blocklists: script still emits a valid empty table +
+    /// chain. We don't currently call the installer with empty
+    /// input (install() short-circuits), but defensive — the pure
+    /// function shouldn't panic or emit malformed nft.
+    #[test]
+    fn install_script_with_no_lists_is_valid() {
+        let s = build_install_script(&[], &[]);
+        assert!(s.contains("table inet oxwrt-blocklist {"));
+        assert!(s.contains("chain input"));
+        assert_eq!(s.matches("ip saddr @").count(), 0);
+    }
+
+    // --- update_set ---
+
+    #[test]
+    fn update_script_flushes_then_adds() {
+        let s = build_update_script("fh", &[(Ipv4Addr::new(1, 2, 3, 0), 24)]);
+        assert!(s.starts_with("flush set inet oxwrt-blocklist fh"));
+        assert!(s.contains("add element inet oxwrt-blocklist fh"));
+        assert!(s.contains("1.2.3.0/24"));
+    }
+
+    /// Empty cidr list — flush only, no add. Prevents the nft
+    /// parser error "no elements in set" on a refresh that yields
+    /// zero entries.
+    #[test]
+    fn update_script_empty_cidrs_is_flush_only() {
+        let s = build_update_script("fh", &[]);
+        assert!(s.contains("flush set"));
+        assert!(!s.contains("add element"), "{s}");
+    }
+
+    /// Sanitised ident flows through to both flush + add to prevent
+    /// nft syntax error on a name with punctuation in it. (The
+    /// schema doesn't strictly bar punctuation today — operators
+    /// may set `name = "foo-bar"` and the code must not break.)
+    #[test]
+    fn update_script_sanitises_ident() {
+        let s = build_update_script("foo-bar", &[(Ipv4Addr::new(1, 1, 1, 1), 32)]);
+        assert!(s.contains("foo_bar"));
+        assert!(!s.contains("foo-bar"));
+    }
+
+    // --- parser edge cases ---
+
+    /// A list mixing tabs + trailing whitespace + windows line
+    /// endings — real public lists often mix these. Parser must
+    /// survive and yield the expected CIDRs.
+    #[test]
+    fn parse_tolerates_mixed_whitespace_and_crlf() {
+        let body = "1.2.3.0/24\r\n\t5.6.7.8  \r\n   \r\n9.9.9.0/28\n";
+        let out = parse_cidr_list(body);
+        assert_eq!(
+            out,
+            vec![
+                (Ipv4Addr::new(1, 2, 3, 0), 24),
+                (Ipv4Addr::new(5, 6, 7, 8), 32),
+                (Ipv4Addr::new(9, 9, 9, 0), 28),
+            ]
+        );
+    }
+
+    /// Prefix 0 (the whole internet) is a legal CIDR even if
+    /// operators shouldn't use it — don't reject silently, don't
+    /// panic on the zero-shift.
+    #[test]
+    fn parse_prefix_zero_yields_zero_network() {
+        let out = parse_cidr_list("8.8.8.8/0\n");
+        assert_eq!(out, vec![(Ipv4Addr::new(0, 0, 0, 0), 0)]);
+    }
+
+    /// Dup detection is prefix-aware: 1.2.3.0/24 and 1.2.3.0/25 are
+    /// different networks and both must survive.
+    #[test]
+    fn parse_keeps_different_prefixes_with_same_network() {
+        let out = parse_cidr_list("1.2.3.0/24\n1.2.3.0/25\n");
+        assert_eq!(
+            out,
+            vec![
+                (Ipv4Addr::new(1, 2, 3, 0), 24),
+                (Ipv4Addr::new(1, 2, 3, 0), 25),
+            ]
+        );
     }
 }
