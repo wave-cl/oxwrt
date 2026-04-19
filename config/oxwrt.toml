@@ -23,7 +23,8 @@
 #   radios         per-phy wifi config
 #   wifi           per-SSID wifi config (multi-BSS capable)
 #   services       containerized services (dns, dhcp, hostapd, …)
-#   upnp           miniupnpd schema (binary cross-build TBD)
+#   upnp           miniupnpd renderer (iptables binary staged;
+#                  nftables source-build pending)
 #   metrics        Prometheus /metrics endpoint
 #   control        sQUIC control-plane listen addrs + authorized keys
 
