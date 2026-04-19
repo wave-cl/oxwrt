@@ -41,6 +41,14 @@ pub fn check_zone_network_refs(zone: &Zone, cfg: &Config) -> Result<(), String> 
 }
 
 pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
+    // Name: operators will scroll through the CRUD list by name,
+    // and it shows up verbatim in error messages. An empty name
+    // makes every follow-up message ambiguous.
+    if rule.name.trim().is_empty() {
+        return Err("rule: name must not be empty".to_string());
+    }
+
+    // Zone refs: src and dest must exist in firewall.zones when set.
     if let Some(src) = &rule.src {
         if !cfg.firewall.zones.iter().any(|z| z.name == *src) {
             return Err(format!(
@@ -57,6 +65,52 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
             ));
         }
     }
+
+    // Action + dnat_target consistency: DNAT requires a target;
+    // any other action with a target set is almost certainly a
+    // confused operator who means to use action=dnat. Reject with
+    // a specific message pointing at the fix.
+    use crate::config::{Action, Proto};
+    match rule.action {
+        Action::Dnat => {
+            let target = rule.dnat_target.as_deref().ok_or_else(|| {
+                format!(
+                    "rule {}: action=dnat requires dnat_target (e.g. \"10.0.0.5:8080\")",
+                    rule.name
+                )
+            })?;
+            let (ip, port) = target.rsplit_once(':').ok_or_else(|| {
+                format!(
+                    "rule {}: dnat_target {:?} is not ip:port",
+                    rule.name, target
+                )
+            })?;
+            let _: std::net::Ipv4Addr = ip
+                .parse()
+                .map_err(|_| format!("rule {}: dnat_target IP {:?} invalid", rule.name, ip))?;
+            let _: u16 = port
+                .parse()
+                .map_err(|_| format!("rule {}: dnat_target port {:?} invalid", rule.name, port))?;
+        }
+        _ => {
+            if rule.dnat_target.is_some() {
+                return Err(format!(
+                    "rule {}: dnat_target is only valid with action=dnat (got action={:?})",
+                    rule.name, rule.action
+                ));
+            }
+        }
+    }
+
+    // proto=icmp + dest_port is nonsensical (ICMP has no ports).
+    // Catches operators copying a TCP rule and flipping proto.
+    if rule.proto == Some(Proto::Icmp) && rule.dest_port.is_some() {
+        return Err(format!(
+            "rule {}: proto=icmp cannot have dest_port (ICMP has no port field)",
+            rule.name
+        ));
+    }
+
     Ok(())
 }
 
@@ -451,6 +505,96 @@ mod tests {
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
+    }
+
+    #[test]
+    fn rule_with_empty_name_rejected() {
+        let cfg = make_test_config();
+        let rule = Rule {
+            name: "   ".to_string(),
+            src: None,
+            dest: None,
+            proto: None,
+            dest_port: None,
+            ct_state: vec![],
+            action: Action::Accept,
+            dnat_target: None,
+        };
+        let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
+        assert!(err.contains("name"), "empty-name error: {err}");
+    }
+
+    #[test]
+    fn rule_dnat_without_target_rejected() {
+        let cfg = make_test_config();
+        let rule = Rule {
+            name: "r".to_string(),
+            src: None,
+            dest: None,
+            proto: Some(crate::config::Proto::Tcp),
+            dest_port: Some(crate::config::PortSpec::Single(80)),
+            ct_state: vec![],
+            action: Action::Dnat,
+            dnat_target: None,
+        };
+        let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
+        assert!(err.contains("dnat_target"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_dnat_with_malformed_target_rejected() {
+        let cfg = make_test_config();
+        let rule = Rule {
+            name: "r".to_string(),
+            src: None,
+            dest: None,
+            proto: Some(crate::config::Proto::Tcp),
+            dest_port: Some(crate::config::PortSpec::Single(80)),
+            ct_state: vec![],
+            action: Action::Dnat,
+            dnat_target: Some("not-an-ip-port".to_string()),
+        };
+        assert!(check_rule_zone_refs(&rule, &cfg).is_err());
+    }
+
+    #[test]
+    fn rule_non_dnat_with_target_rejected() {
+        let cfg = make_test_config();
+        let rule = Rule {
+            name: "r".to_string(),
+            src: None,
+            dest: None,
+            proto: None,
+            dest_port: None,
+            ct_state: vec![],
+            action: Action::Accept,
+            dnat_target: Some("10.0.0.1:80".to_string()),
+        };
+        let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
+        assert!(
+            err.contains("dnat_target") && err.contains("action=dnat"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rule_icmp_with_dest_port_rejected() {
+        let cfg = make_test_config();
+        let rule = Rule {
+            name: "r".to_string(),
+            src: None,
+            dest: None,
+            proto: Some(crate::config::Proto::Icmp),
+            dest_port: Some(crate::config::PortSpec::Single(53)),
+            ct_state: vec![],
+            action: Action::Accept,
+            dnat_target: None,
+        };
+        let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
+        assert!(
+            err.contains("icmp") && err.contains("dest_port"),
+            "got: {err}"
+        );
     }
 
     // ── check_wifi_refs ────────────────────────────────────────────

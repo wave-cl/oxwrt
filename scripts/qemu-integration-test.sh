@@ -292,6 +292,19 @@ R=$(run_cmd rule list); check "rule list (has t1)" "t1" "$R"
 R=$(run_cmd rule get t1); check "rule get" "t1" "$R"
 R=$(run_cmd rule remove t1); check_ok "rule remove" "$R"
 
+# Validator regressions — each must fail at CRUD add time, not wait
+# for install to silently do the wrong thing.
+R=$(run_cmd rule add '{"name":"","action":"accept"}')
+check_err "rule empty name" "name must not be empty" "$R"
+R=$(run_cmd rule add '{"name":"bad","action":"dnat"}')
+check_err "rule dnat without target" "requires dnat_target" "$R"
+R=$(run_cmd rule add '{"name":"bad","action":"dnat","dnat_target":"not-an-ip-port"}')
+check_err "rule dnat bad target" "dnat_target" "$R"
+R=$(run_cmd rule add '{"name":"bad","action":"accept","dnat_target":"10.0.0.1:80"}')
+check_err "rule non-dnat with target" "action=dnat" "$R"
+R=$(run_cmd rule add '{"name":"bad","proto":"icmp","dest_port":53,"action":"accept"}')
+check_err "rule icmp with port" "icmp" "$R"
+
 echo "-- zone CRUD --"
 R=$(run_cmd zone list); check "zone list (has wan)" "wan" "$R"
 R=$(run_cmd zone add '{"name":"z1","networks":["wan"],"default_input":"drop","default_forward":"drop"}')
