@@ -222,6 +222,71 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     if let Err(e) = crate::vpn_client::setup_all(&new_cfg) {
         tracing::error!(error = %e, "reload: vpn_client reapply failed");
     }
+    // Seed bringup state for any newly-declared profiles (removed
+    // ones linger in the map — harmless because pick_active iterates
+    // cfg.vpn_client, not the map).
+    oxwrt_linux::vpn_failover::mark_bringup(&state.vpn_bringup, &new_cfg, true);
+
+    // Phase 3a.3: respawn VPN coordinator + probes. Abort the old
+    // set first; the coordinator and probes all capture an
+    // Arc<Config> at spawn time, so a live probe_target or
+    // priority edit wouldn't otherwise take effect until reboot.
+    {
+        let mut probe_handles = state.vpn_probe_handles.lock().unwrap();
+        for h in probe_handles.drain(..) {
+            h.abort();
+        }
+        if let Some(coord) = state.vpn_coordinator_handle.lock().unwrap().take() {
+            coord.abort();
+        }
+        // Clear stale health so removed-profile entries don't
+        // linger with a stale `false` that would prevent a fresh
+        // probe from seeding healthy. wan_failover does the same.
+        if let Ok(mut h) = state.vpn_health.write() {
+            h.clear();
+        }
+        if !new_cfg.vpn_client.is_empty() {
+            // Same spawn_blocking-avoidance pattern as the boot
+            // path: probes + coordinator are async tasks, so we
+            // can spawn them directly from the async reload
+            // handler. Use a fresh rtnetlink connection so the
+            // coordinator's handle outlives this function.
+            let (connection, nl_handle, _messages) = match rtnetlink::new_connection() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "reload: vpn_failover rtnetlink failed");
+                    return Response::Err {
+                        message: format!("reload: vpn_failover rtnetlink: {e}"),
+                    };
+                }
+            };
+            // The worker needs to outlive this reload (it's a
+            // long-running coordinator). Detach by letting the
+            // tokio runtime own it — no .abort() on it; the
+            // old one's already aborted above. When the next
+            // reload fires, a fresh connection replaces this.
+            tokio::spawn(connection);
+            let new_probes = oxwrt_linux::vpn_failover::spawn_probes(
+                &new_cfg,
+                state.vpn_health.clone(),
+            );
+            probe_handles.extend(new_probes);
+            let coord = oxwrt_linux::vpn_failover::spawn(
+                std::sync::Arc::new(new_cfg.clone()),
+                state.vpn_bringup.clone(),
+                state.vpn_health.clone(),
+                state.active_vpn.clone(),
+                state.wan_leases.clone(),
+                state.active_wan.clone(),
+                nl_handle,
+            );
+            *state.vpn_coordinator_handle.lock().unwrap() = Some(coord);
+            tracing::info!(
+                profiles = new_cfg.vpn_client.len(),
+                "reload: vpn_failover respawned"
+            );
+        }
+    }
 
     // Phase 3a.2: policy-routing scaffolding for via_vpn zones.
     // Same idempotent add pattern as at boot — EEXIST tolerated.
@@ -256,6 +321,13 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
             tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
         }
         conn_task.abort();
+        // MSS clamp on WAN. Same gate as boot — no point if no
+        // vpn_client profile is declared.
+        if let Some(wan) = new_cfg.primary_wan() {
+            if let Err(e) = oxwrt_linux::vpn_routing::install_mss_clamp(wan.iface()) {
+                tracing::warn!(error = %e, "reload: MSS clamp install failed");
+            }
+        }
     }
 
     // Regenerate corerad config from new_cfg.networks' ipv6_*

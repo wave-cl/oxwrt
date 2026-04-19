@@ -40,6 +40,7 @@ pub mod static_routes;
 pub mod sysupgrade;
 pub mod urandom_seed;
 pub mod vpn_client;
+pub mod vpn_failover;
 pub mod vpn_routing;
 pub mod wan_dhcp;
 pub mod wan_dhcp6;

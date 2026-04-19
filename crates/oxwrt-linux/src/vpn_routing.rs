@@ -216,6 +216,68 @@ pub async fn install_endpoint_exemption(
     }
 }
 
+/// Install TCP MSS clamp on the WAN forward path so wg-over-UDP
+/// packets don't exceed the WAN MTU and get fragmented. OpenWrt's
+/// firewall4 does this by default; we need it explicitly because
+/// our rustables-managed `oxwrt` table doesn't have exthdr
+/// expression support for setting maxseg.
+///
+/// Shelled out to `nft -f -` against a dedicated `oxwrt-mss`
+/// table so the rustables batch in `install_firewall` doesn't
+/// clobber it. Idempotent via `delete table; add table`.
+///
+/// Clamps to `rt mtu` (PMTU) rather than a hardcoded 1380 — the
+/// kernel derives the right value per-flow from the outgoing
+/// iface's MTU. If an operator sets `mtu = 1380` on a VPN
+/// profile because their ISP uses PPPoE + some extra overhead,
+/// this clamp adjusts automatically.
+pub fn install_mss_clamp(wan_iface: &str) -> Result<(), Error> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let script = format!(
+        "table inet oxwrt-mss {{\n\
+             chain forward {{\n\
+                 type filter hook forward priority mangle; policy accept;\n\
+                 oifname \"{w}\" tcp flags syn tcp option maxseg size set rt mtu\n\
+                 iifname \"{w}\" tcp flags syn tcp option maxseg size set rt mtu\n\
+             }}\n\
+         }}\n",
+        w = wan_iface
+    );
+    // delete then add ensures idempotency; the delete swallows
+    // "No such file or directory" if the table doesn't exist yet.
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", "oxwrt-mss"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Firewall(format!("nft spawn: {e}")))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|e| Error::Firewall(format!("nft stdin: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| Error::Firewall(format!("nft wait: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::Firewall(format!(
+            "nft add oxwrt-mss: exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    tracing::info!(wan_iface, "vpn_routing: MSS clamp installed");
+    Ok(())
+}
+
 /// Remove a previously-installed endpoint exemption. Used when a
 /// profile is removed via reload — without cleanup, stale /32s
 /// accumulate in the main table across CRUD cycles.

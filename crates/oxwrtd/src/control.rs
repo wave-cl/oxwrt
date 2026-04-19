@@ -82,6 +82,21 @@ pub struct ControlState {
     /// operator edits probe_target on a live WAN). `Mutex<Vec>`
     /// because only reload touches this — no read path.
     pub probe_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Active VPN profile (name) for the via_vpn feature, or None
+    /// if the kill-switch is engaged. Updated by the vpn_failover
+    /// coordinator; read by Status RPC + metrics.
+    pub active_vpn: oxwrt_linux::vpn_failover::ActiveVpn,
+    /// Per-profile bring-up success flag — true = vpn_client::setup_all
+    /// returned Ok for that profile. Coordinator ANDs this with
+    /// probe state to pick the active profile.
+    pub vpn_bringup: oxwrt_linux::vpn_failover::VpnBringup,
+    /// Per-profile probe health. Mirror of wan_health but for the
+    /// vpn_client set.
+    pub vpn_health: oxwrt_linux::vpn_failover::VpnHealth,
+    /// Handles of the VPN probe + coordinator tasks. Reload aborts +
+    /// respawns the set when the vpn_client config changes.
+    pub vpn_probe_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    pub vpn_coordinator_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Tracking record for the current metrics HTTP listener.
@@ -116,6 +131,11 @@ impl ControlState {
             wan_leases,
             wan_health,
             probe_handles: Mutex::new(Vec::new()),
+            active_vpn: oxwrt_linux::vpn_failover::new_active_vpn(),
+            vpn_bringup: oxwrt_linux::vpn_failover::new_vpn_bringup(),
+            vpn_health: oxwrt_linux::vpn_failover::new_vpn_health(),
+            vpn_probe_handles: Mutex::new(Vec::new()),
+            vpn_coordinator_handle: Mutex::new(None),
         })
     }
 
@@ -142,6 +162,11 @@ impl ControlState {
             wan_leases: oxwrt_linux::wan_failover::new_wan_leases(),
             wan_health: oxwrt_linux::wan_failover::new_wan_health(),
             probe_handles: Mutex::new(Vec::new()),
+            active_vpn: oxwrt_linux::vpn_failover::new_active_vpn(),
+            vpn_bringup: oxwrt_linux::vpn_failover::new_vpn_bringup(),
+            vpn_health: oxwrt_linux::vpn_failover::new_vpn_health(),
+            vpn_probe_handles: Mutex::new(Vec::new()),
+            vpn_coordinator_handle: Mutex::new(None),
         })
     }
 

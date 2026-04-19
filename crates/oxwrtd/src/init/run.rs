@@ -549,6 +549,17 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             }
         }
     }
+    // MSS clamp on the WAN iface — separate nft table so rustables
+    // batch rebuilds don't wipe it. Gated on "there's at least one
+    // vpn_client declared" because the clamp is only useful for
+    // wg-over-WAN encapsulation headroom.
+    if !cfg.vpn_client.is_empty() {
+        if let Some(wan) = cfg.primary_wan() {
+            if let Err(e) = crate::vpn_routing::install_mss_clamp(wan.iface()) {
+                tracing::warn!(error = %e, "vpn_routing: MSS clamp install failed");
+            }
+        }
+    }
 
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
@@ -901,6 +912,44 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // can abort + respawn.
     if let Ok(mut h) = state.probe_handles.lock() {
         h.extend(initial_probe_handles);
+    }
+
+    // ── VPN coordinator + probes ───────────────────────────────────
+    //
+    // Seed bring-up state from the earlier `vpn_client::setup_all`
+    // result — in v1 that's all-or-nothing per profile (the function
+    // returns Ok() unconditionally and logs per-profile errors), so
+    // mark all declared profiles as brought-up. A future refinement
+    // would plumb per-profile results through and seed accordingly.
+    // Mark everything as `true` so the coordinator lets probes alone
+    // veto; effectively "if `wg setconf` didn't throw, trust the
+    // kernel."
+    crate::vpn_failover::mark_bringup(&state.vpn_bringup, &cfg, true);
+
+    if !cfg.vpn_client.is_empty() {
+        if let Some(net_handle) = &net {
+            let probes =
+                crate::vpn_failover::spawn_probes(&cfg, state.vpn_health.clone());
+            if let Ok(mut h) = state.vpn_probe_handles.lock() {
+                h.extend(probes);
+            }
+            let coord = crate::vpn_failover::spawn(
+                std::sync::Arc::new(cfg.clone()),
+                state.vpn_bringup.clone(),
+                state.vpn_health.clone(),
+                state.active_vpn.clone(),
+                wan_leases.clone(),
+                active_wan.clone(),
+                net_handle.handle().clone(),
+            );
+            if let Ok(mut h) = state.vpn_coordinator_handle.lock() {
+                *h = Some(coord);
+            }
+            tracing::info!(
+                profiles = cfg.vpn_client.len(),
+                "vpn_failover: coordinator + probes spawned"
+            );
+        }
     }
 
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);
