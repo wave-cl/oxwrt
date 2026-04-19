@@ -793,9 +793,7 @@ fn write_self_resolv_conf(cfg: &Config) {
         Network::Wan { .. } => None,
     });
     let Some(ip) = ip else {
-        tracing::info!(
-            "no LAN/Simple network configured; skipping /etc/resolv.conf generation"
-        );
+        tracing::info!("no LAN/Simple network configured; skipping /etc/resolv.conf generation");
         return;
     };
     let text = format!(
