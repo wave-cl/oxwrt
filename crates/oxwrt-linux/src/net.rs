@@ -61,9 +61,31 @@ impl Net {
             match net {
                 Network::Lan { .. } => self.setup_lan(net).await?,
                 Network::Wan { .. } => self.setup_wan(net).await?,
-                Network::Simple { .. } => {
-                    // Simple networks are bridges created by the platform;
-                    // no additional setup needed at boot.
+                Network::Simple { iface, .. } => {
+                    // Simple network bridges are created out-of-band
+                    // (typically via platform hot-plug or a LAN
+                    // [[networks]] declaration referencing the same
+                    // iface). No iface + address setup here.
+                    //
+                    // But if the operator declared a v6 address on a
+                    // Simple network, assign it — operators often
+                    // use Simple for guest/iot VLANs that do want v6.
+                    if let Some((v6, prefix)) = net.ipv6() {
+                        if let Ok(idx) = self.link_index(iface).await {
+                            let res = self
+                                .handle
+                                .address()
+                                .add(idx, IpAddr::V6(v6), prefix)
+                                .execute()
+                                .await;
+                            if let Err(e) = res {
+                                if !is_exists(&e) {
+                                    return Err(e.into());
+                                }
+                                tracing::debug!(%iface, %v6, "simple v6 already present");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -135,6 +157,25 @@ impl Net {
                 return Err(e.into());
             }
             tracing::debug!(%bridge, "lan address already present");
+        }
+
+        // Optional IPv6 on the same bridge. The rtnetlink .address()
+        // builder takes IpAddr directly so we reuse the same call path
+        // — no v6-specific plumbing. Typically the first host of a
+        // /64 (ULA today; delegated prefix when DHCPv6-PD lands).
+        if let Some((v6, v6_prefix)) = net.ipv6() {
+            let res = self
+                .handle
+                .address()
+                .add(bridge_idx, IpAddr::V6(v6), v6_prefix)
+                .execute()
+                .await;
+            if let Err(e) = res {
+                if !is_exists(&e) {
+                    return Err(e.into());
+                }
+                tracing::debug!(%bridge, %v6, "lan ipv6 address already present");
+            }
         }
 
         // Enslave LAN members to the bridge. Missing members are warned and
@@ -1117,12 +1158,16 @@ mod tests {
                     members: vec![],
                     address: Ipv4Addr::new(192, 168, 1, 1),
                     prefix: 24,
+                    ipv6_address: None,
+                    ipv6_prefix: None,
                 },
                 Network::Simple {
                     name: "guest".to_string(),
                     iface: "br-guest".to_string(),
                     address: Ipv4Addr::new(10, 99, 0, 1),
                     prefix: 24,
+                    ipv6_address: None,
+                    ipv6_prefix: None,
                 },
             ],
             firewall: Firewall {

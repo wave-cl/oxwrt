@@ -121,6 +121,14 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         // config doesn't knock the router offline.
     }
 
+    // Regenerate corerad config from new_cfg.networks' ipv6_*
+    // fields. The corerad service picks it up on its next restart;
+    // supervisor::from_config below replays the service list so this
+    // is where the reload actually takes effect.
+    if let Err(e) = crate::corerad::write_config(&new_cfg) {
+        tracing::error!(error = %e, "reload: corerad config write failed");
+    }
+
     // Phase 3b: regenerate per-phy hostapd.conf files at
     // /etc/oxwrt/hostapd/. Must run BEFORE phase 4 (supervisor rebuild)
     // so when the new hostapd-5g / hostapd-2g services come up they

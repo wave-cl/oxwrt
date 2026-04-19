@@ -423,6 +423,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "wireguard setup failed; tunnels disabled");
     }
 
+    // corerad config is derived from cfg.networks' ipv6_* fields;
+    // regenerate at boot so changes to [[networks]] take effect
+    // without a rebuild-and-flash cycle.
+    if let Err(e) = crate::corerad::write_config(&cfg) {
+        tracing::error!(error = %e, "corerad config generation failed");
+    }
+
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
     if let (

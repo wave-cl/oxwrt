@@ -29,6 +29,7 @@
 //!   `logs` RPC.
 
 pub mod container;
+pub mod corerad;
 pub mod logd;
 pub mod net;
 pub mod sysupgrade;

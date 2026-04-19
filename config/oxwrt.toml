@@ -55,6 +55,12 @@ bridge = "br-lan"
 members = ["lan1", "lan2", "lan3", "lan4", "lan5"]
 address = "192.168.50.1"
 prefix = 24
+# IPv6 ULA (fd00::/8, RFC 4193). Chosen deterministically rather
+# than random so flashes are reproducible — swap to a delegated
+# prefix once DHCPv6-PD lands. Paired with an auto-generated
+# corerad RA config (see oxwrt-linux/src/corerad.rs).
+ipv6_address = "fdbe:cafe::1"
+ipv6_prefix = 64
 
 # --- Guest ---
 
@@ -631,7 +637,13 @@ pids_max = 16
 depends_on = []
 
 [[services.binds]]
-source = "/usr/lib/oxwrt/services/corerad/corerad.toml"
+# Source is the oxwrtd-generated config (regenerated from
+# [[networks]] ipv6_* fields on every boot + reload). See
+# oxwrt-linux/src/corerad.rs::write_config. Bundled fallback at
+# /usr/lib/oxwrt/services/corerad/corerad.toml is ignored once the
+# generated file exists — first boot lands the generated file
+# before corerad starts, so no race.
+source = "/etc/oxwrt/corerad.toml"
 target = "/etc/corerad.toml"
 
 # corerad needs CAP_NET_RAW for the ICMPv6 raw socket (mandatory) and

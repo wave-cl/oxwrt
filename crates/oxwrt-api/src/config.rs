@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -84,12 +84,29 @@ pub enum Network {
         members: Vec<String>,
         address: Ipv4Addr,
         prefix: u8,
+        /// Optional IPv6 address to assign to the bridge. Typically
+        /// the first host address of a /64 the operator allocated
+        /// (from a ULA like `fd12:3456:789a:1::1`, or the first /64
+        /// of a WAN-delegated /56 — until DHCPv6-PD lands this is
+        /// operator-managed, see `[[networks]]` examples in
+        /// config/oxwrt.toml). Paired with `ipv6_prefix`.
+        #[serde(default)]
+        ipv6_address: Option<Ipv6Addr>,
+        /// IPv6 prefix length for `ipv6_address`. Defaults to 64
+        /// when `ipv6_address` is set and this is omitted —
+        /// matches the SLAAC convention used by RAs.
+        #[serde(default)]
+        ipv6_prefix: Option<u8>,
     },
     Simple {
         name: String,
         iface: String,
         address: Ipv4Addr,
         prefix: u8,
+        #[serde(default)]
+        ipv6_address: Option<Ipv6Addr>,
+        #[serde(default)]
+        ipv6_prefix: Option<u8>,
     },
 }
 
@@ -109,6 +126,27 @@ impl Network {
             Network::Wan { iface, .. } | Network::Simple { iface, .. } => iface,
             Network::Lan { bridge, .. } => bridge,
         }
+    }
+
+    /// IPv6 (address, prefix) if declared. Defaults the prefix to 64
+    /// when the operator omits it but supplies an address — the
+    /// SLAAC convention, and the only length the kernel accepts for
+    /// the RA-advertised prefix on a LAN.
+    pub fn ipv6(&self) -> Option<(Ipv6Addr, u8)> {
+        let (addr, prefix) = match self {
+            Network::Lan {
+                ipv6_address,
+                ipv6_prefix,
+                ..
+            }
+            | Network::Simple {
+                ipv6_address,
+                ipv6_prefix,
+                ..
+            } => (ipv6_address.as_ref()?, *ipv6_prefix),
+            Network::Wan { .. } => return None,
+        };
+        Some((*addr, prefix.unwrap_or(64)))
     }
 }
 

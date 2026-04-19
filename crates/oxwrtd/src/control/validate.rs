@@ -239,12 +239,16 @@ mod tests {
                     members: vec!["lan1".to_string()],
                     address: Ipv4Addr::new(192, 168, 1, 1),
                     prefix: 24,
+                    ipv6_address: None,
+                    ipv6_prefix: None,
                 },
                 Network::Simple {
                     name: "guest".to_string(),
                     iface: "br-guest".to_string(),
                     address: Ipv4Addr::new(10, 99, 0, 1),
                     prefix: 24,
+                    ipv6_address: None,
+                    ipv6_prefix: None,
                 },
             ],
             firewall: Firewall {
