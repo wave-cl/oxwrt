@@ -15,21 +15,35 @@ directory = "/var"
 zone = "."
 zone_type = "External"
 
-# Upstream resolvers over plain UDP/TCP. hickory 0.25 dropped the
-# ad-hoc `tls` protocol variant from the name_servers config. DNS-over-
-# TLS is back as a separate `tls` store type on newer releases; for
-# now use UDP to 1.1.1.1 / 9.9.9.9 and revisit when we pin a newer
-# hickory version. trust_negative_responses keeps NXDOMAIN cached
-# briefly so we don't hammer upstream on missing names.
+# Upstream resolvers via DNS-over-HTTPS (RFC 8484). Enabled by
+# building hickory-dns with `--features https-ring` (see Makefile).
+# Trust store comes from ca-bundle on-device at /etc/ssl/certs,
+# bind-mounted into the dns service container via oxwrt.toml's
+# [[services.binds]].
+#
+# hickory 0.26 reshaped the name_servers schema: `ip` replaced
+# `socket_addr`, and protocol config moved under a nested
+# `[[zones.stores.name_servers.connections]]` array. One
+# connections entry per protocol/port combination — this config
+# says "reach 1.1.1.1 on port 443 via HTTPS with SNI=cloudflare-
+# dns.com, fetching /dns-query". Multiple connections per server
+# would let hickory fall back between (e.g.) DoH and plain UDP —
+# we don't do that to avoid leaking queries over plain DNS.
 [[zones.stores]]
 type = "forward"
 
 [[zones.stores.name_servers]]
-socket_addr = "1.1.1.1:53"
-protocol = "udp"
+ip = "1.1.1.1"
 trust_negative_responses = false
 
+[[zones.stores.name_servers.connections]]
+port = 443
+protocol = { type = "https", server_name = "cloudflare-dns.com", path = "/dns-query" }
+
 [[zones.stores.name_servers]]
-socket_addr = "9.9.9.9:53"
-protocol = "udp"
+ip = "9.9.9.9"
 trust_negative_responses = false
+
+[[zones.stores.name_servers.connections]]
+port = 443
+protocol = { type = "https", server_name = "dns.quad9.net", path = "/dns-query" }

@@ -209,10 +209,17 @@ $(BUILD_SERVICES)/debug-ssh/sbin/dropbear:
 services-dns: $(BUILD_SERVICES)/dns/hickory-dns
 $(BUILD_SERVICES)/dns/hickory-dns:
 	mkdir -p $(BUILD_SERVICES)/dns
+	# --features https-ring enables DoH (DNS-over-HTTPS) upstream
+	# resolver support. Transitively pulls in tls-ring + __tls +
+	# __https. Relies on rustls-platform-verifier (hickory default)
+	# which reads /etc/ssl/certs — that ships via ca-bundle in the
+	# image AND is bind-mounted into the dns service container via
+	# config/oxwrt.toml.
 	AR_aarch64_unknown_linux_musl=$(AR_AARCH64) \
 	cargo-zigbuild install --locked \
 	  --target $(TARGET_ARCH) \
 	  --root /tmp/hickory-build \
+	  --features https-ring \
 	  hickory-dns
 	cp /tmp/hickory-build/bin/hickory-dns $@
 
@@ -271,6 +278,7 @@ IMAGEBUILDER_PACKAGES := \
 	kmod-nft-nat \
 	kmod-wireguard \
 	wireguard-tools \
+	ca-bundle \
 	nftables \
 	-netifd \
 	-uci \

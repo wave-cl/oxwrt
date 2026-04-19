@@ -503,6 +503,16 @@ source = "/usr/lib/oxwrt/services/dns/named.toml"
 target = "/etc/named.toml"
 # readonly = true  # default
 
+# TLS trust store for DoH upstreams. rustls-platform-verifier
+# (the default in hickory-dns-0.25 when `https-ring` is enabled)
+# reads from /etc/ssl/certs — which ships via ca-bundle on the
+# host rootfs. Bind-mounting it into the container rootfs read-only
+# keeps the container footprint tiny while giving rustls a real
+# trust store to validate upstream certificates against.
+[[services.binds]]
+source = "/etc/ssl/certs"
+target = "/etc/ssl/certs"
+
 # Hardening defaults are safe for hickory — the default retain list
 # (SETUID/SETGID/SETPCAP/NET_BIND_SERVICE) covers its bind(53) +
 # privilege drop to `nobody`. Uncomment to override:
