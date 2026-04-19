@@ -194,6 +194,18 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
         }
         "config-dump" => Ok(Request::ConfigDump),
         "backup" => Ok(Request::Backup),
+        "reboot" => {
+            // Require --confirm so a typo can't take down the router
+            // mid-session. Same safety gate as `reset` and `apply`.
+            let confirm = args.iter().any(|a| a == "--confirm");
+            if !confirm {
+                return Err(
+                    "reboot: refusing to reboot without --confirm (this restarts the device)"
+                        .to_string(),
+                );
+            }
+            Ok(Request::Reboot { confirm: true })
+        }
         "restore" => {
             let path = args.first().ok_or("restore: missing <backup-file>")?;
             let confirm = args.iter().any(|a| a == "--confirm");
@@ -496,6 +508,19 @@ mod tests {
         match req {
             Request::Reset { confirm } => assert!(confirm),
             _ => panic!("expected Reset, got {req:?}"),
+        }
+    }
+
+    /// Same `--confirm` gate on `reboot` — accidental reboot mid-
+    /// session would drop all WG tunnels + re-trigger WAN DHCP.
+    #[test]
+    fn reboot_requires_confirm_flag() {
+        let err = parse_request("reboot", &[]).unwrap_err();
+        assert!(err.contains("--confirm"), "unexpected error: {err}");
+        let req = parse_request("reboot", &["--confirm".to_string()]).unwrap();
+        match req {
+            Request::Reboot { confirm } => assert!(confirm),
+            _ => panic!("expected Reboot, got {req:?}"),
         }
     }
 

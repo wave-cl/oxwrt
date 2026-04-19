@@ -118,6 +118,18 @@ fn save_to(path: &Path) -> Result<(), Error> {
     }
     std::fs::rename(&tmp_path, path)?;
 
+    // fsync the parent directory so the rename's metadata entry
+    // is on-disk before we return. Without this, a crash/reboot
+    // between rename() and the next periodic fs checkpoint can
+    // leave the directory entry pointing at nothing — observed
+    // on Flint 2's f2fs+overlay where sync(2) from the reboot
+    // handler wasn't enough to commit the rename.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
     tracing::debug!(path = %path.display(), bytes = SEED_SIZE, "urandom seed saved");
     Ok(())
 }

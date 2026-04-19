@@ -206,6 +206,16 @@ impl Server {
                 continue;
             }
 
+            // Graceful reboot: save seed + shut down services + sync
+            // + reboot(2). The connection drops on successful reboot
+            // — client interprets that as "reboot in progress."
+            if let Request::Reboot { confirm } = &request {
+                let resp = handle_reboot(&self.state, *confirm).await;
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+
             // Backup: stream /etc/oxwrt/ + /etc/oxwrt.toml as a
             // base64-encoded tar.gz.
             if let Request::Backup = &request {
@@ -260,6 +270,7 @@ mod backup;
 mod crud;
 mod diag;
 mod logs;
+mod reboot;
 mod reload;
 mod reset;
 mod set;
@@ -285,6 +296,7 @@ use crud::{
 };
 use diag::handle_diag;
 use logs::{handle_logs, stream_follow_logs};
+use reboot::handle_reboot;
 use reset::handle_reset;
 use set::handle_set;
 use sysupgrade::{handle_fw_apply, handle_fw_update};
@@ -326,6 +338,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }
         Request::Logs { service, follow } => handle_logs(state, &service, follow),
         Request::Restart { service } => vec![handle_restart(state, &service)],
+        Request::Reboot { .. } => vec![Response::Err {
+            message: "BUG: Reboot should be handled async upstream".to_string(),
+        }],
         Request::Reset { .. } => vec![Response::Err {
             // Caught upstream in handle_incoming via the async detour;
             // reaching this arm is a routing bug.

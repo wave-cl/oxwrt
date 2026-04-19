@@ -110,6 +110,22 @@ pub enum Request {
         data_b64: String,
         confirm: bool,
     },
+    /// Graceful system reboot. Saves urandom seed, shuts down the
+    /// supervisor (stops services in reverse-dep order, reaps
+    /// children, removes cgroup leaves), syncs filesystems, then
+    /// calls `reboot(2)` with LINUX_REBOOT_CMD_RESTART.
+    ///
+    /// `confirm` MUST be true — same safety gate as Reset / FwApply.
+    /// The sQUIC connection drops on reboot; the client interprets
+    /// that as "reboot initiated" rather than an error.
+    ///
+    /// Distinct from FwApply which ALSO reboots but first swaps the
+    /// image. Use Reboot when you just want to restart — e.g. to
+    /// clear a stuck service, drain a memory leak, or re-read
+    /// hardware state after a hotplug.
+    Reboot {
+        confirm: bool,
+    },
     WgEnroll {
         /// Peer name (unique under `[[wireguard.peers]]`).
         name: String,
