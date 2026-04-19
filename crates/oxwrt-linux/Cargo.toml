@@ -62,6 +62,7 @@ seccompiler.workspace = true
 caps.workspace = true
 libc.workspace = true
 landlock.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

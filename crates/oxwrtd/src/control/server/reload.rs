@@ -145,6 +145,13 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         tracing::error!(error = %e, "reload: sqm reapply failed");
     }
 
+    // Blocklists reconcile: re-fetch + rewrite the oxwrt-blocklist
+    // table with the new list. Uses the same `install` path as boot
+    // — the `delete table ; add table` idiom makes it idempotent.
+    if let Err(e) = crate::blocklists::install(&new_cfg).await {
+        tracing::error!(error = %e, "reload: blocklists install failed");
+    }
+
     // Reconcile static routes: del routes that disappeared from
     // new_cfg, add the ones that appeared. Unchanged routes are left
     // alone so a config change that doesn't touch `[[routes]]`

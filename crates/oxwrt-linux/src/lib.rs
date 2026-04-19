@@ -28,6 +28,7 @@
 //! - [`logd`] — per-service ring buffer. Used by the control plane's
 //!   `logs` RPC.
 
+pub mod blocklists;
 pub mod container;
 pub mod corerad;
 pub mod logd;

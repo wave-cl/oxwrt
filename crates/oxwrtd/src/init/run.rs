@@ -576,6 +576,24 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         Vec::new()
     };
 
+    // Blocklists: fetch each configured list and install the
+    // oxwrt-blocklist nftables table with one set + one drop rule
+    // per list. Best-effort — fetch failures install an empty set
+    // and log warn, so a CDN outage at boot doesn't drop all
+    // traffic. Runs after install_firewall so the main table's
+    // INPUT is already in place (our table is priority -10 and
+    // short-circuits before it).
+    if let Err(e) = crate::blocklists::install(&cfg).await {
+        tracing::error!(error = %e, "blocklists install failed");
+    }
+    // Per-list refreshers — each sleeps its configured
+    // refresh_seconds and updates just its own set on wake. Pass
+    // an owned Arc<Config> snapshot; a later reload spawns fresh
+    // refreshers off the new cfg and the old tasks are abandoned
+    // (no explicit cancel — they live forever but do no meaningful
+    // work once the sets they wrote are flushed by the reload).
+    let _blocklist_tasks = crate::blocklists::spawn_refreshers(std::sync::Arc::new(cfg.clone()));
+
     // Static routes: install after WAN bring-up + firewall. If a route
     // targets a gateway reachable only via WAN, and WAN DHCP is still
     // in progress at this point, the add returns ENETUNREACH — we log

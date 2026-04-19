@@ -1310,6 +1310,7 @@ dependencies = [
  "netlink-packet-route 0.29.0",
  "oxwrt-api",
  "rand",
+ "reqwest",
  "rtnetlink",
  "rustables",
  "rustix",

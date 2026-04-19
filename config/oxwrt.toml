@@ -335,6 +335,29 @@ action = "accept"
 # iface = "wg0"
 # metric = 200                      # default 1024
 
+# ---------------- Blocklists ----------------
+#
+# IP blocklists: periodically-fetched CIDR lists that drop matching
+# source addresses at the INPUT chain. One line per CIDR in the URL
+# body (`#` comments + blank lines ok); bare IPs are treated as /32.
+# Each list becomes a named nftables set in a dedicated
+# `oxwrt-blocklist` table, hooked at priority -10 so matches
+# short-circuit before the main oxwrt filter table.
+#
+# Fetch failures (CDN outage, WAN down at boot) install an empty set
+# and log a warning — security posture is temporarily looser, but we
+# don't want a download failure to drop all traffic. Refresh cadence
+# is per-list; default 24h (86400) matches typical public-list
+# update frequency.
+#
+# Example (commented):
+#
+# [[blocklists]]
+# name = "firehol_level1"
+# url = "https://iplists.firehol.org/files/firehol_level1.netset"
+# refresh_seconds = 86400
+# zones = []                     # empty = router-wide drop
+
 # ---------------- WireGuard ----------------
 #
 # Each [[wireguard]] entry is one wg interface (e.g. wg0) with a list

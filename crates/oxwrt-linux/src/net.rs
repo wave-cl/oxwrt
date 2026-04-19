@@ -1242,6 +1242,7 @@ mod tests {
             ddns: vec![],
             metrics: None,
             routes: vec![],
+            blocklists: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),

@@ -79,7 +79,36 @@ pub struct Config {
     /// the kernel's on-link + DHCP-installed default.
     #[serde(default)]
     pub routes: Vec<Route>,
+    /// IP blocklists: periodically-fetched CIDR lists that drop
+    /// matching source addresses at the INPUT chain. One line per
+    /// CIDR in the URL body, `#` comments ok. Equivalent to
+    /// OpenWrt's `banip` package for the common case. Each list
+    /// becomes a named nftables set in the `oxwrt-blocklist`
+    /// table, refreshed at `refresh_seconds` cadence.
+    #[serde(default)]
+    pub blocklists: Vec<Blocklist>,
     pub control: Control,
+}
+
+/// A single IP blocklist entry. `name` doubles as the nftables set
+/// name — keep it `[A-Za-z0-9_-]` to match the kernel's allowed
+/// character set. Typical lists: firehol_level1 (~900 prefixes of
+/// known bad actors), spamhaus_drop (~1000), abuseipdb feeds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Blocklist {
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_blocklist_refresh")]
+    pub refresh_seconds: u64,
+    /// Zones whose INPUT chain should drop matches. Empty = every
+    /// zone (router-wide drop). Naming a zone that doesn't exist is
+    /// a validate-time error on reload.
+    #[serde(default)]
+    pub zones: Vec<String>,
+}
+
+fn default_blocklist_refresh() -> u64 {
+    86400 // 24h — typical public-list update cadence
 }
 
 /// Static IPv4 route declaration. Output iface is required (kernel
