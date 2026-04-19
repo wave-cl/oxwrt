@@ -77,6 +77,25 @@ pub fn run() -> Result<(), Error> {
         tracing::error!(error = %e, "mount_root_if_needed failed");
     }
 
+    // Mark the overlay as READY so libfstools's next-boot mount_overlay()
+    // doesn't fall through to overlay_delete() and wipe everything.
+    //
+    // OpenWrt's fstools treats /overlay/.fs_state as a three-state marker
+    // (symlink target "0"=UNKNOWN, "1"=PENDING, "2"=READY). On boot, if
+    // it reads PENDING (or UNKNOWN, which it auto-upgrades to PENDING),
+    // mount_overlay() calls overlay_delete(overlay_mp, true) BEFORE the
+    // pivot. That deletes every file on the overlay (libfstools/overlay.c
+    // line 452-453: "overlay filesystem has not been fully initialized
+    // yet" \u2192 overlay_delete).
+    //
+    // The READY transition is normally done by `mount_root done`,
+    // invoked by procd at end-of-init (mount_root.c:132). Since oxwrtd
+    // replaced procd as PID 1 and never calls `mount_root done`, the
+    // overlay stays at PENDING forever \u2014 which means every boot wipes
+    // the overlay, which is why pushed configs + urandom seed kept
+    // reverting.
+    mark_overlay_ready();
+
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));

@@ -63,6 +63,59 @@ fn populate_dev_from_sys() {
 /// already present, else engage the full libfstools-equivalent hot
 /// path (loop device, f2fs, overlayfs, pivot_root, config-backup
 /// restore). Stage 4+ (pid1-standalone) always takes the hot path.
+/// Mark the f2fs overlay as FS_STATE_READY so libfstools's next-boot
+/// mount_overlay() treats the upper layer as valid instead of wiping it.
+///
+/// Background: libfstools (OpenWrt's fstools, libfstools/overlay.c) reads
+/// `/overlay/.fs_state` as a symlink whose target name encodes one of
+/// {"0"=UNKNOWN, "1"=PENDING, "2"=READY}. If the state is UNKNOWN or
+/// PENDING at mount time, mount_overlay() calls
+/// `overlay_delete(overlay_mp, true)` which recursively unlinks every
+/// file in the overlay before the pivot_root. That's the "overlay
+/// filesystem has not been fully initialized yet" / "switching to f2fs
+/// overlay" log pair — it's not harmless, it wipes user data.
+///
+/// In stock OpenWrt, procd runs `/sbin/mount_root done` at end of init
+/// (mount_root.c:132), which sets the symlink to "2" (READY). With
+/// oxwrtd replacing procd as PID 1, nothing ever invoked that code
+/// path, so the overlay stayed at PENDING forever and got wiped every
+/// boot — destroying pushed configs, urandom seeds, any overlay write.
+///
+/// Call this once after the overlay is known to be mounted (after
+/// mount_root_if_needed() returns). Idempotent: fs_state_set short-
+/// circuits if state is already READY, and we mirror that by checking
+/// the symlink target before doing work.
+pub(super) fn mark_overlay_ready() {
+    use std::os::unix::fs::symlink;
+    let path = "/overlay/.fs_state";
+    // Skip if already READY. readlink → "2" means ready, anything else
+    // means we need to overwrite.
+    match std::fs::read_link(path) {
+        Ok(target) if target.to_str() == Some("2") => {
+            tracing::debug!("overlay fs_state already READY; no-op");
+            return;
+        }
+        _ => {}
+    }
+    // Remove stale symlink (it's likely "1"=PENDING from libfstools's
+    // prior boot). Ignore ENOENT.
+    let _ = std::fs::remove_file(path);
+    match symlink("2", path) {
+        Ok(()) => {
+            tracing::info!(
+                path = path,
+                "overlay fs_state set to READY (prevents next-boot overlay_delete)"
+            );
+        }
+        Err(e) => {
+            // Non-fatal: if /overlay isn't writable (e.g. because
+            // mount_root_if_needed failed upstream), this is expected.
+            // Log it so we can correlate with persistence bugs.
+            tracing::warn!(error = %e, path = path, "overlay fs_state symlink failed");
+        }
+    }
+}
+
 pub(super) fn mount_root_if_needed() -> Result<(), Error> {
     if overlay_is_attached()? {
         tracing::info!("mount_root: rootfs overlay already attached upstream; skipping");
