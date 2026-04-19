@@ -320,6 +320,17 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole(&handle).await {
             tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
         }
+        // v6 parallel — gated on any profile declaring address_v6.
+        if new_cfg.vpn_client.iter().any(|v| v.address_v6.is_some()) {
+            if let Err(e) =
+                oxwrt_linux::vpn_routing::install_policy_rules_v6(&handle, &via_vpn_ifaces).await
+            {
+                tracing::error!(error = %e, "reload: v6 iif rules failed");
+            }
+            if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole_v6(&handle).await {
+                tracing::error!(error = %e, "reload: v6 blackhole failed");
+            }
+        }
         let bypass: Vec<String> = new_cfg
             .vpn_client
             .iter()

@@ -297,10 +297,29 @@ pub fn spawn(
                         "vpn failover: set_table_51_default failed"
                     );
                 }
+                // v6 default only when the profile has a v6
+                // address — no point setting table 51 v6 default
+                // to an iface that won't accept v6 traffic (wg
+                // kernel module would drop it because AllowedIPs
+                // wouldn't include ::/0).
+                if profile.address_v6.is_some() {
+                    if let Err(e) =
+                        vpn_routing::set_table_51_default_v6(&handle, &profile.iface).await
+                    {
+                        tracing::warn!(
+                            profile = %profile.name, iface = %profile.iface,
+                            error = %e,
+                            "vpn failover: v6 set_table_51_default failed"
+                        );
+                    }
+                }
                 *active.lock().unwrap() = Some(profile_name.clone());
             } else {
                 if let Err(e) = vpn_routing::clear_table_51_default(&handle).await {
                     tracing::warn!(error = %e, "vpn failover: clear_table_51_default failed");
+                }
+                if let Err(e) = vpn_routing::clear_table_51_default_v6(&handle).await {
+                    tracing::debug!(error = %e, "vpn failover: clear v6 failed (maybe absent)");
                 }
                 // Kill-switch transition: no active profile means
                 // no endpoint is reachable-through-tunnel. Remove

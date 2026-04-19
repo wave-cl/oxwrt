@@ -39,7 +39,7 @@
 //!     reached via WAN, not via the thing we're trying to bring up.
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 
 use futures_util::stream::TryStreamExt;
@@ -82,6 +82,10 @@ static INSTALLED_IIF_RULES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Set of (dest_ip, prefix_len) bypass rules we've installed.
 /// Same diff-on-reload pattern as INSTALLED_IIF_RULES.
 static INSTALLED_BYPASS_RULES: Mutex<Option<HashSet<(Ipv4Addr, u8)>>> = Mutex::new(None);
+
+/// v6 counterpart to INSTALLED_IIF_RULES. Populated only when
+/// any vpn_client profile declares `address_v6` — no-op otherwise.
+static INSTALLED_IIF_RULES_V6: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// Install one `ip rule iif <zone_iface> lookup 51` per iface of
 /// a via_vpn firewall zone. Idempotent — duplicate adds are
@@ -479,4 +483,115 @@ fn is_noent(e: &RtError) -> bool {
 #[allow(dead_code)]
 fn _unused_route_attr_link() -> Option<RouteAttribute> {
     None
+}
+
+// ── IPv6 variants ────────────────────────────────────────────────
+//
+// Mirror the v4 functions for v6 — same semantics, different
+// address family. Kept in this module (not a separate file)
+// because the kernel objects they manipulate are twins; splitting
+// would force two parallel `use` trees and make cross-referencing
+// noisier.
+
+/// v6 counterpart to install_policy_rules. Rule shape is
+/// identical except `.v6()` and no fwmark (we still bind by iif).
+pub async fn install_policy_rules_v6(
+    handle: &Handle,
+    via_vpn_ifaces: &[String],
+) -> Result<(), Error> {
+    let new_set: HashSet<String> = via_vpn_ifaces.iter().cloned().collect();
+    let old_set = {
+        let guard = INSTALLED_IIF_RULES_V6.lock().unwrap();
+        guard.clone().unwrap_or_default()
+    };
+    for iface in old_set.difference(&new_set) {
+        let mut add_builder = handle
+            .rule()
+            .add()
+            .v6()
+            .input_interface(iface.clone())
+            .table_id(VPN_TABLE)
+            .priority(VPN_RULE_PRIORITY)
+            .action(RuleAction::ToTable);
+        let msg = add_builder.message_mut().clone();
+        match handle.rule().del(msg).execute().await {
+            Ok(()) => tracing::info!(iif = %iface, "vpn_routing: stale v6 iif rule removed"),
+            Err(e) if is_noent(&e) => {}
+            Err(e) => tracing::warn!(iif = %iface, error = %e, "vpn_routing: v6 iif rule del failed"),
+        }
+    }
+    for iface in via_vpn_ifaces {
+        let res = handle
+            .rule()
+            .add()
+            .v6()
+            .input_interface(iface.clone())
+            .table_id(VPN_TABLE)
+            .priority(VPN_RULE_PRIORITY)
+            .action(RuleAction::ToTable)
+            .execute()
+            .await;
+        match res {
+            Ok(()) => tracing::info!(iif = %iface, "vpn_routing: v6 iif policy rule installed"),
+            Err(e) if is_exists(&e) => {}
+            Err(e) => return Err(Error::Rtnetlink(e)),
+        }
+    }
+    *INSTALLED_IIF_RULES_V6.lock().unwrap() = Some(new_set);
+    Ok(())
+}
+
+/// v6 blackhole in table 51. Metric 9999 so the coordinator's
+/// real v6 default beats it when installed.
+pub async fn install_table_51_blackhole_v6(handle: &Handle) -> Result<(), Error> {
+    let route = RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(Ipv6Addr::UNSPECIFIED, 0)
+        .table_id(VPN_TABLE)
+        .priority(9999)
+        .kind(RouteType::BlackHole)
+        .build();
+    match handle.route().add(route).execute().await {
+        Ok(()) => {
+            tracing::info!(table = VPN_TABLE, "vpn_routing: v6 blackhole installed");
+            Ok(())
+        }
+        Err(e) if is_exists(&e) => Ok(()),
+        Err(e) => Err(Error::Rtnetlink(e)),
+    }
+}
+
+/// Set (or replace) table 51's v6 default to point at `iface`.
+/// Called by the coordinator when the active profile has a
+/// v6 tunnel address.
+pub async fn set_table_51_default_v6(handle: &Handle, iface: &str) -> Result<(), Error> {
+    let ifindex = ifindex(handle, iface).await?;
+    let route = RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(Ipv6Addr::UNSPECIFIED, 0)
+        .output_interface(ifindex)
+        .table_id(VPN_TABLE)
+        .priority(0)
+        .build();
+    match handle.route().add(route).replace().execute().await {
+        Ok(()) => {
+            tracing::info!(iface, table = VPN_TABLE, "vpn_routing: v6 default set");
+            Ok(())
+        }
+        Err(e) => Err(Error::Rtnetlink(e)),
+    }
+}
+
+/// Remove the non-blackhole v6 default from table 51. Killswitch
+/// transition: coordinator clears both v4 and v6 defaults so
+/// marked traffic is kill-switched for both families.
+pub async fn clear_table_51_default_v6(handle: &Handle) -> Result<(), Error> {
+    let route = RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(Ipv6Addr::UNSPECIFIED, 0)
+        .table_id(VPN_TABLE)
+        .priority(0)
+        .build();
+    match handle.route().del(route).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) if is_noent(&e) => Ok(()),
+        Err(e) => Err(Error::Rtnetlink(e)),
+    }
 }

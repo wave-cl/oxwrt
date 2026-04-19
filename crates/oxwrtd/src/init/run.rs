@@ -547,6 +547,21 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Err(e) = crate::vpn_routing::install_table_51_blackhole(&handle).await {
                 tracing::error!(error = %e, "vpn_routing: blackhole fallback install failed");
             }
+            // IPv6 parallel. Only installed when at least one
+            // vpn_client profile declares `address_v6` — otherwise
+            // we'd install v6 rules against an uninhabited table
+            // 51, killing v6 forwarding from via_vpn zones as a
+            // side effect.
+            if cfg.vpn_client.iter().any(|v| v.address_v6.is_some()) {
+                if let Err(e) =
+                    crate::vpn_routing::install_policy_rules_v6(&handle, &via_vpn_ifaces).await
+                {
+                    tracing::error!(error = %e, "vpn_routing: v6 policy rules install failed");
+                }
+                if let Err(e) = crate::vpn_routing::install_table_51_blackhole_v6(&handle).await {
+                    tracing::error!(error = %e, "vpn_routing: v6 blackhole install failed");
+                }
+            }
             // Bypass-destination rules: union CIDRs across all
             // declared vpn_client profiles. Active-profile-
             // agnostic by design (one stable set for operators

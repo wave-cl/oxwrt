@@ -213,6 +213,14 @@ pub struct VpnClient {
     /// one like "10.64.0.2/32"; Proton uses 10.2.0.2/32. Single
     /// IP — no LAN side on a client tunnel.
     pub address: String,
+    /// Optional IPv6 tunnel-interior address, e.g.
+    /// "fc00:bbbb:bbbb:bb01::3:185c/128". When set, oxwrtd
+    /// assigns it to the wg iface alongside `address` and installs
+    /// a parallel v6 `ip -6 rule` + `ip -6 route` pair so
+    /// forwarded v6 traffic from `via_vpn` zones egresses through
+    /// the tunnel. Leave empty for v4-only tunnels.
+    #[serde(default)]
+    pub address_v6: Option<String>,
     /// Provider-supplied DNS server(s). Reachable only through
     /// the tunnel. The LAN resolver binds to the wg iface when
     /// querying these so replies can't leak to WAN DNS.
@@ -290,7 +298,16 @@ impl VpnClient {
         writeln!(s, "[Peer]").unwrap();
         writeln!(s, "# {}", self.name).unwrap();
         writeln!(s, "PublicKey = {}", self.public_key).unwrap();
-        writeln!(s, "AllowedIPs = 0.0.0.0/0").unwrap();
+        // AllowedIPs: v4 default, plus ::/0 if the profile
+        // declares a v6 tunnel address. Sending v6 packets through
+        // the tunnel without a v6 AllowedIPs entry would have the
+        // kernel drop them at the wg-module level — AllowedIPs is
+        // both source-filter and dest-accept for the peer.
+        if self.address_v6.is_some() {
+            writeln!(s, "AllowedIPs = 0.0.0.0/0, ::/0").unwrap();
+        } else {
+            writeln!(s, "AllowedIPs = 0.0.0.0/0").unwrap();
+        }
         writeln!(s, "Endpoint = {}", self.endpoint).unwrap();
         if let Some(psk_path) = &self.preshared_key_path {
             // `wg setconf` accepts PresharedKey inline as base64,

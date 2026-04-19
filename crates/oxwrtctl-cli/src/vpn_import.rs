@@ -32,6 +32,7 @@ pub struct ParsedConf {
     pub private_key: String,
     pub public_key: String,
     pub address_v4: Option<String>,
+    pub address_v6: Option<String>,
     pub dns_v4: Vec<Ipv4Addr>,
     pub endpoint: String,
     pub preshared_key: Option<String>,
@@ -68,14 +69,17 @@ pub fn parse_conf(text: &str) -> Result<ParsedConf, String> {
             "Address" => {
                 // Mullvad emits both v4 and v6 comma-separated:
                 //   "10.66.24.93/32,fc00:bbbb:bbbb:bb01::/128"
-                // Pick the first entry that parses as v4 CIDR.
+                // Capture both; v4 is required for v1 to work,
+                // v6 enables the optional v6 full-tunnel path.
                 for part in val.split(',') {
                     let t = part.trim();
-                    if let Some((ip, _)) = t.split_once('/') {
-                        if ip.parse::<Ipv4Addr>().is_ok() {
-                            out.address_v4 = Some(t.to_string());
-                            break;
-                        }
+                    let Some((ip, _)) = t.split_once('/') else {
+                        continue;
+                    };
+                    if ip.parse::<Ipv4Addr>().is_ok() {
+                        out.address_v4 = Some(t.to_string());
+                    } else if ip.parse::<std::net::Ipv6Addr>().is_ok() {
+                        out.address_v6 = Some(t.to_string());
                     }
                 }
             }
@@ -130,6 +134,9 @@ pub fn render_block(
     writeln!(out, "key_path = {:?}", key_path).unwrap();
     writeln!(out, "address = {:?}", parsed.address_v4.as_deref().unwrap_or(""))
         .unwrap();
+    if let Some(a6) = &parsed.address_v6 {
+        writeln!(out, "address_v6 = {:?}", a6).unwrap();
+    }
     let dns_list: Vec<String> = parsed
         .dns_v4
         .iter()
@@ -257,6 +264,10 @@ Endpoint = 103.251.26.127:51820
         assert_eq!(p.private_key, "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=");
         assert_eq!(p.public_key, "ddv7vosBlf396nOa79nWn6qXQu2LzezGXfNUDO3hAXQ=");
         assert_eq!(p.address_v4.as_deref(), Some("10.66.24.93/32"));
+        assert_eq!(
+            p.address_v6.as_deref(),
+            Some("fc00:bbbb:bbbb:bb01::3:185c/128")
+        );
         assert_eq!(p.dns_v4, vec![Ipv4Addr::new(10, 64, 0, 1)]);
         assert_eq!(p.endpoint, "103.251.26.127:51820");
     }

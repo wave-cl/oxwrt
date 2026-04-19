@@ -126,7 +126,7 @@ fn bring_up_one(v: &VpnClient) -> Result<(), Error> {
         tracing::warn!(profile = %v.name, iface, mtu = v.mtu, "vpn_client MTU set failed (continuing)");
     }
 
-    // 4b. Assign tunnel-interior address. `ip addr replace` is
+    // 4b. Assign tunnel-interior addresses. `ip addr replace` is
     //     idempotent — no need to check presence first.
     let st = Command::new("ip")
         .args(["addr", "replace", &v.address, "dev", iface])
@@ -137,6 +137,17 @@ fn bring_up_one(v: &VpnClient) -> Result<(), Error> {
             "ip addr replace {} dev {iface}: exit {st:?}",
             v.address
         )));
+    }
+    if let Some(addr_v6) = &v.address_v6 {
+        let st = Command::new("ip")
+            .args(["-6", "addr", "replace", addr_v6, "dev", iface])
+            .status()
+            .map_err(|e| Error::Firewall(format!("ip -6 addr replace: {e}")))?;
+        if !st.success() {
+            tracing::warn!(
+                profile = %v.name, iface, addr_v6, "vpn_client: v6 addr assign failed (continuing v4-only)"
+            );
+        }
     }
 
     // 5. Link up.
