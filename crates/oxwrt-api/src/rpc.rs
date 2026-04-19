@@ -181,6 +181,12 @@ pub enum Response {
         /// without parsing the route table.
         #[serde(default)]
         active_wan: Option<String>,
+        /// Per-WAN breakdown: one entry per declared
+        /// `[[networks]] type = "wan"` with its current health,
+        /// address, and active-or-standby role. Populated on
+        /// every Status call; empty on a no-WAN router.
+        #[serde(default)]
+        wans: Vec<WanEntry>,
         /// Number of rules in the installed firewall ruleset (from
         /// the cached dump). Useful for a smoke-test "did the firewall
         /// install?" check without pulling the full dump.
@@ -247,6 +253,27 @@ pub struct WanSummary {
     pub prefix: u8,
     pub gateway: Option<String>,
     pub lease_seconds: u32,
+}
+
+/// Per-WAN entry in the Status RPC's `wans` field. Emitted for
+/// every `[[networks]] type = "wan"` regardless of whether it's
+/// active right now — lets operators see at a glance that their
+/// backup WAN is healthy and ready to take over, not silently
+/// broken waiting for a real failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WanEntry {
+    pub name: String,
+    pub iface: String,
+    pub priority: u32,
+    pub healthy: bool,
+    /// True for the one WAN currently serving the default route.
+    pub active: bool,
+    /// Current IPv4 address on this WAN's lease, if any.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Gateway on this WAN's lease, if any.
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 /// One AP (BSS) declared in `[[wifi]]`, with its backing kernel iface

@@ -69,6 +69,13 @@ pub struct ControlState {
     /// in single-WAN deployments (the sole WAN's lease appears in
     /// `wan` anyway).
     pub active_wan: Arc<Mutex<Option<String>>>,
+    /// Per-WAN lease slots — the failover coordinator's source
+    /// of truth for "which WAN has an active DHCP lease." Status
+    /// RPC reads this (via snapshot_all) to render per-WAN
+    /// health without touching the coordinator's internals.
+    pub wan_leases: oxwrt_linux::wan_failover::WanLeases,
+    /// Per-WAN probe health. Same rationale as above.
+    pub wan_health: oxwrt_linux::wan_failover::WanHealth,
 }
 
 /// Tracking record for the current metrics HTTP listener.
@@ -87,6 +94,8 @@ impl ControlState {
         firewall_dump: Vec<String>,
         wan_lease: SharedLease,
         active_wan: Arc<Mutex<Option<String>>>,
+        wan_leases: oxwrt_linux::wan_failover::WanLeases,
+        wan_health: oxwrt_linux::wan_failover::WanHealth,
     ) -> Arc<Self> {
         Arc::new(Self {
             config: RwLock::new(Arc::new(config)),
@@ -98,6 +107,8 @@ impl ControlState {
             control_only: false,
             metrics_task: Mutex::new(None),
             active_wan,
+            wan_leases,
+            wan_health,
         })
     }
 
@@ -121,6 +132,8 @@ impl ControlState {
             control_only: true,
             metrics_task: Mutex::new(None),
             active_wan: Arc::new(Mutex::new(None)),
+            wan_leases: oxwrt_linux::wan_failover::new_wan_leases(),
+            wan_health: oxwrt_linux::wan_failover::new_wan_health(),
         })
     }
 

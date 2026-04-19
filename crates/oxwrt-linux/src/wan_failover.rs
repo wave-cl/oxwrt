@@ -56,6 +56,90 @@ pub fn new_wan_leases() -> WanLeases {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+/// Per-WAN probe health. Keyed by WAN name; value = "last probe
+/// result" where `true` = the most recent ICMP ping succeeded
+/// within the probe window. WANs without a `probe_target`
+/// declared are absent from this map — the coordinator treats
+/// absence as "no probe override, trust the lease."
+///
+/// Using `bool` (not a success-count streak) keeps the coordinator
+/// simple: probes internally track hysteresis (N fails → unhealthy,
+/// M successes → healthy) and only flip the map entry on state
+/// change. That way a single missed ping on an otherwise-fine
+/// link doesn't cause spurious failover.
+pub type WanHealth = Arc<RwLock<HashMap<String, bool>>>;
+
+pub fn new_wan_health() -> WanHealth {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// Per-WAN live summary for Status RPC. One entry per declared
+/// Network::Wan, regardless of whether it's the active one.
+#[derive(Debug, Clone)]
+pub struct WanSnapshot {
+    pub name: String,
+    pub iface: String,
+    pub priority: u32,
+    /// Resolved health = lease-is-Some AND (no probe declared
+    /// OR probe is passing).
+    pub healthy: bool,
+    /// Current IPv4 address on the lease, if any.
+    pub address: Option<Ipv4Addr>,
+    /// Current default gateway on the lease, if any.
+    pub gateway: Option<Ipv4Addr>,
+    /// Is this WAN the one currently serving traffic?
+    pub active: bool,
+}
+
+/// Build a snapshot of all WANs' live state. Called by the
+/// Status RPC; takes cheap locks then releases them before the
+/// formatter runs.
+pub fn snapshot_all(
+    cfg: &Config,
+    wan_leases: &WanLeases,
+    wan_health: &WanHealth,
+    active_wan: &ActiveWan,
+) -> Vec<WanSnapshot> {
+    let leases = wan_leases
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let health = wan_health
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let active_name: Option<String> = active_wan.lock().ok().and_then(|g| (*g).clone());
+    cfg.networks
+        .iter()
+        .filter_map(|n| match n {
+            Network::Wan {
+                name,
+                iface,
+                priority,
+                ..
+            } => {
+                let lease = leases.get(name).cloned().unwrap_or(None);
+                let probe_healthy = health.get(name).copied();
+                let lease_healthy = lease.is_some();
+                // Healthy = lease is Some AND (probe is passing
+                // OR no probe declared). Probe absence = "trust
+                // the lease."
+                let healthy = lease_healthy && probe_healthy.unwrap_or(true);
+                Some(WanSnapshot {
+                    name: name.clone(),
+                    iface: iface.clone(),
+                    priority: *priority,
+                    healthy,
+                    address: lease.as_ref().map(|l| l.address),
+                    gateway: lease.as_ref().and_then(|l| l.gateway),
+                    active: active_name.as_deref() == Some(name.as_str()),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The currently-active WAN (by name). `None` = no healthy WAN.
 /// Updated by the failover coordinator; read by Status RPC.
 pub type ActiveWan = Arc<Mutex<Option<String>>>;
@@ -71,6 +155,7 @@ pub fn new_active_wan() -> ActiveWan {
 pub fn spawn(
     cfg: Arc<Config>,
     wan_leases: WanLeases,
+    wan_health: WanHealth,
     active_wan: ActiveWan,
     shared_lease: SharedLease,
     handle: Handle,
@@ -81,7 +166,7 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let desired = pick_active(&cfg, &wan_leases);
+            let desired = pick_active(&cfg, &wan_leases, &wan_health);
             // Only swap when the (name, gateway) tuple changes —
             // same WAN re-acquiring the same gateway is a no-op
             // for routing; re-installing the route in that case
@@ -150,12 +235,27 @@ pub fn spawn(
 /// (name, lease) of the best healthy WAN, or None. Highest
 /// priority (lowest number) among WANs with a Some lease wins.
 /// Extracted for unit testing.
-pub fn pick_active(cfg: &Config, wan_leases: &WanLeases) -> Option<(String, DhcpLease)> {
+pub fn pick_active(
+    cfg: &Config,
+    wan_leases: &WanLeases,
+    wan_health: &WanHealth,
+) -> Option<(String, DhcpLease)> {
     let leases = wan_leases.read().ok()?;
+    let health = wan_health.read().ok()?;
     let mut best: Option<(u32, String, DhcpLease)> = None;
     for net in &cfg.networks {
         if let Network::Wan { name, priority, .. } = net {
+            // Health rule:
+            //   lease = Some AND (no probe declared OR probe passing).
+            // Probe absence (no entry in wan_health) = "trust the
+            // lease alone." Probe entry of `false` vetoes even a
+            // valid lease — that's the whole point of active
+            // probing: catch upstream-dead-with-valid-renew.
             if let Some(Some(lease)) = leases.get(name) {
+                let probe_ok = health.get(name).copied().unwrap_or(true);
+                if !probe_ok {
+                    continue;
+                }
                 let take = match &best {
                     None => true,
                     Some((p, _, _)) => *priority < *p,
@@ -167,6 +267,105 @@ pub fn pick_active(cfg: &Config, wan_leases: &WanLeases) -> Option<(String, Dhcp
         }
     }
     best.map(|(_, name, lease)| (name, lease))
+}
+
+/// Spawn one ICMP probe task per WAN that declared a
+/// `probe_target`. Each task:
+///   - pings the target through the WAN's iface every 5s
+///   - maintains a hysteresis state: 3 consecutive fails →
+///     unhealthy; 2 consecutive successes → healthy
+///   - writes the state to `wan_health[name]` ONLY on transition
+///     (writes are rare, not once-per-probe, so the coordinator
+///     doesn't race)
+///
+/// Uses busybox `ping -I <iface> -c 1 -W 2 <target>` — a common
+/// binary in any OpenWrt image. Running as a subprocess is fine
+/// at 5s cadence; the fork overhead is a few ms.
+pub fn spawn_probes(cfg: &Config, wan_health: WanHealth) -> Vec<tokio::task::JoinHandle<()>> {
+    const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+    const FAIL_THRESHOLD: u32 = 3;
+    const OK_THRESHOLD: u32 = 2;
+    const PING_TIMEOUT_S: &str = "2";
+
+    let mut handles = Vec::new();
+    for net in &cfg.networks {
+        let Network::Wan {
+            name,
+            iface,
+            probe_target: Some(target),
+            ..
+        } = net
+        else {
+            continue;
+        };
+        let name = name.clone();
+        let iface = iface.clone();
+        let target = target.to_string();
+        let wan_health = wan_health.clone();
+        // Seed as healthy so a fresh boot doesn't fail over before
+        // the first probe has run.
+        wan_health.write().unwrap().insert(name.clone(), true);
+
+        handles.push(tokio::spawn(async move {
+            let mut consec_ok: u32 = 0;
+            let mut consec_fail: u32 = 0;
+            let mut last_published: bool = true;
+            let mut tick = tokio::time::interval(PROBE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let ok = probe_once(&iface, &target, PING_TIMEOUT_S).await;
+                if ok {
+                    consec_ok += 1;
+                    consec_fail = 0;
+                } else {
+                    consec_fail += 1;
+                    consec_ok = 0;
+                }
+
+                let desired_state = if consec_fail >= FAIL_THRESHOLD {
+                    Some(false)
+                } else if consec_ok >= OK_THRESHOLD {
+                    Some(true)
+                } else {
+                    None // hysteresis middle — don't publish
+                };
+                if let Some(s) = desired_state {
+                    if s != last_published {
+                        if s {
+                            tracing::info!(wan = %name, target = %target, "probe: WAN healthy");
+                        } else {
+                            tracing::warn!(wan = %name, target = %target, consec_fail, "probe: WAN unhealthy");
+                        }
+                        wan_health.write().unwrap().insert(name.clone(), s);
+                        last_published = s;
+                    }
+                }
+            }
+        }));
+    }
+    handles
+}
+
+async fn probe_once(iface: &str, target: &str, timeout_s: &str) -> bool {
+    // Single ICMP echo, 2s timeout, bound to the WAN iface so
+    // the probe goes out via the right gateway even without a
+    // default route pointing through this WAN. busybox ping
+    // accepts -I <iface> but some variants also want numeric
+    // -c / -W; pass both.
+    let res = tokio::process::Command::new("ping")
+        .args([
+            "-I", iface,
+            "-c", "1",
+            "-W", timeout_s,
+            "-q", // quiet, only emit summary
+            target,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    matches!(res, Ok(s) if s.success())
 }
 
 async fn add_default_route(handle: &Handle, iface: &str, gw: Ipv4Addr) {
@@ -294,7 +493,8 @@ mod tests {
             .unwrap()
             .insert("backup".into(), Some(mk_lease([5, 6, 7, 8], [5, 6, 7, 1])));
 
-        let (active, lease) = pick_active(&cfg, &leases).unwrap();
+        let health = new_wan_health();
+        let (active, lease) = pick_active(&cfg, &leases, &health).unwrap();
         assert_eq!(active, "primary");
         assert_eq!(lease.address, Ipv4Addr::new(1, 2, 3, 4));
     }
@@ -312,7 +512,8 @@ mod tests {
             .unwrap()
             .insert("backup".into(), Some(mk_lease([5, 6, 7, 8], [5, 6, 7, 1])));
 
-        let (active, _) = pick_active(&cfg, &leases).unwrap();
+        let health = new_wan_health();
+        let (active, _) = pick_active(&cfg, &leases, &health).unwrap();
         assert_eq!(active, "backup", "primary unhealthy → backup takes over");
     }
 
@@ -321,7 +522,8 @@ mod tests {
         let cfg = mk_cfg(vec![wan("primary", "eth1", 100)]);
         let leases = new_wan_leases();
         leases.write().unwrap().insert("primary".into(), None);
-        assert!(pick_active(&cfg, &leases).is_none());
+        let health = new_wan_health();
+        assert!(pick_active(&cfg, &leases, &health).is_none());
     }
 
     #[test]
@@ -332,7 +534,8 @@ mod tests {
             .write()
             .unwrap()
             .insert("wan".into(), Some(mk_lease([1, 2, 3, 4], [1, 2, 3, 1])));
-        let (name, _) = pick_active(&cfg, &leases).unwrap();
+        let health = new_wan_health();
+        let (name, _) = pick_active(&cfg, &leases, &health).unwrap();
         assert_eq!(name, "wan");
     }
 
@@ -351,7 +554,72 @@ mod tests {
             .write()
             .unwrap()
             .insert("b".into(), Some(mk_lease([2, 2, 2, 2], [2, 2, 2, 254])));
-        let (name, _) = pick_active(&cfg, &leases).unwrap();
+        let health = new_wan_health();
+        let (name, _) = pick_active(&cfg, &leases, &health).unwrap();
         assert_eq!(name, "a", "first-declared breaks priority ties");
+    }
+
+    /// Probe-veto: a lease-healthy WAN with an unhealthy probe
+    /// is skipped in favour of a lower-priority healthy one.
+    #[test]
+    fn unhealthy_probe_vetoes_lease() {
+        let cfg = mk_cfg(vec![
+            wan("primary", "eth1", 100),
+            wan("backup", "eth2", 200),
+        ]);
+        let leases = new_wan_leases();
+        leases
+            .write()
+            .unwrap()
+            .insert("primary".into(), Some(mk_lease([1, 2, 3, 4], [1, 2, 3, 1])));
+        leases
+            .write()
+            .unwrap()
+            .insert("backup".into(), Some(mk_lease([5, 6, 7, 8], [5, 6, 7, 1])));
+        let health = new_wan_health();
+        // Primary's lease is fine but probe says upstream is dead.
+        health.write().unwrap().insert("primary".into(), false);
+        // Backup has no probe entry → trust its lease.
+        let (active, _) = pick_active(&cfg, &leases, &health).unwrap();
+        assert_eq!(active, "backup", "probe veto must demote primary");
+    }
+
+    /// Probe-ok doesn't promote a leaseless WAN. Probes override
+    /// downward, not upward.
+    #[test]
+    fn probe_ok_without_lease_stays_unhealthy() {
+        let cfg = mk_cfg(vec![wan("wan", "eth1", 100)]);
+        let leases = new_wan_leases();
+        leases.write().unwrap().insert("wan".into(), None);
+        let health = new_wan_health();
+        health.write().unwrap().insert("wan".into(), true);
+        assert!(pick_active(&cfg, &leases, &health).is_none());
+    }
+
+    #[test]
+    fn snapshot_reports_all_wans() {
+        let cfg = mk_cfg(vec![
+            wan("primary", "eth1", 100),
+            wan("backup", "eth2", 200),
+        ]);
+        let leases = new_wan_leases();
+        leases
+            .write()
+            .unwrap()
+            .insert("primary".into(), Some(mk_lease([1, 2, 3, 4], [1, 2, 3, 1])));
+        leases.write().unwrap().insert("backup".into(), None);
+        let health = new_wan_health();
+        let active = new_active_wan();
+        *active.lock().unwrap() = Some("primary".into());
+        let snap = snapshot_all(&cfg, &leases, &health, &active);
+        assert_eq!(snap.len(), 2);
+        let p = snap.iter().find(|w| w.name == "primary").unwrap();
+        assert!(p.active);
+        assert!(p.healthy);
+        assert_eq!(p.address, Some(Ipv4Addr::new(1, 2, 3, 4)));
+        let b = snap.iter().find(|w| w.name == "backup").unwrap();
+        assert!(!b.active);
+        assert!(!b.healthy, "no lease → not healthy");
+        assert_eq!(b.address, None);
     }
 }

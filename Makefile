@@ -771,7 +771,13 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	# U-Boot HTTP recovery (raw full-flash wipes overlay unconditionally
 	# — nothing on the squashfs can preserve across that), but that's
 	# a recovery path anyway, not a normal update.
-	echo "/etc/oxwrt/" > $(IMAGEBUILDER_DIR)/files/etc/sysupgrade.conf
+	# Also preserve /etc/oxwrt.toml — the operator's live config.
+	# Without this line, every sysupgrade flash wipes the config
+	# back to the image default, losing anything pushed via
+	# `oxctl config-push` or set via CRUD RPCs. Caught during
+	# mwan3 live-verify: pushed configs kept disappearing after
+	# each `apply --confirm`, which silently replaces the file.
+	printf "/etc/oxwrt/\n/etc/oxwrt.toml\n" > $(IMAGEBUILDER_DIR)/files/etc/sysupgrade.conf
 	# Pre-provisioned ed25519 seed for the sQUIC server identity. If a
 	# seed exists at provisioning/key.ed25519 on the build host, bake
 	# it into the image so the pubkey is known out-of-band BEFORE the

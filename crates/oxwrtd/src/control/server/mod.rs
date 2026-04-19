@@ -332,12 +332,32 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
                 .lock()
                 .ok()
                 .and_then(|g| (*g).clone());
-            tracing::debug!(?active_wan, "status: active_wan snapshot");
+            // Per-WAN breakdown — one entry per declared WAN,
+            // regardless of active-ness. Cheap: reads 3 locks,
+            // clones the small HashMaps inside, releases.
+            let wans: Vec<crate::rpc::WanEntry> = crate::wan_failover::snapshot_all(
+                &state.config_snapshot(),
+                &state.wan_leases,
+                &state.wan_health,
+                &state.active_wan,
+            )
+            .into_iter()
+            .map(|s| crate::rpc::WanEntry {
+                name: s.name,
+                iface: s.iface,
+                priority: s.priority,
+                healthy: s.healthy,
+                active: s.active,
+                address: s.address.map(|a| a.to_string()),
+                gateway: s.gateway.map(|g| g.to_string()),
+            })
+            .collect();
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
                 wan,
                 active_wan,
+                wans,
                 firewall_rules,
                 aps,
                 wg,
@@ -800,21 +820,51 @@ use crate::control::validate::{
 /// to direct overwrite if rename returns EBUSY (bind-mounted files in
 /// Docker / containers can't be renamed over).
 fn atomic_write_config(text: &str) -> Result<(), String> {
+    use std::io::Write;
     let path = std::path::Path::new(crate::config::DEFAULT_PATH);
     let tmp_path = path.with_extension("toml.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, text) {
+    // fsync discipline: write-to-tmp → fsync tmp → rename → fsync
+    // parent dir. Without any of these, a reboot within seconds
+    // of the config-push can lose the write (observed on Flint 2
+    // f2fs+overlay: config-push → reboot → next-boot config has
+    // the OLD content). std::fs::write alone is just
+    // create+write+close with no sync call.
+    let write_and_fsync = |p: &std::path::Path, body: &str| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(p)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    };
+    let fsync_dir = |p: &std::path::Path| {
+        if let Some(parent) = p.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    };
+
+    if let Err(e) = write_and_fsync(&tmp_path, text) {
         // tmp write failed — try direct overwrite as last resort
-        return std::fs::write(path, text)
-            .map_err(|e2| format!("write config: tmp failed ({e}), direct failed ({e2})"));
+        return write_and_fsync(path, text).map(|_| fsync_dir(path)).map_err(
+            |e2| format!("write config: tmp failed ({e}), direct failed ({e2})"),
+        );
     }
     match std::fs::rename(&tmp_path, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            fsync_dir(path);
+            Ok(())
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
             // EBUSY on bind-mounted files — fall back to direct overwrite.
             // Less atomic but the only option on bind mounts.
             tracing::debug!(error = %e, "rename failed, falling back to direct write");
-            std::fs::write(path, text)
+            write_and_fsync(path, text)
+                .map(|_| fsync_dir(path))
                 .map_err(|e2| format!("write config: rename ({e}), direct ({e2})"))
         }
     }

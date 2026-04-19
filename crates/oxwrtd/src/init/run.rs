@@ -473,7 +473,14 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // healthy slot and mirrors it into `wan_lease` above (which
     // downstream code — DDNS, Status, metrics — reads).
     let wan_leases = crate::wan_failover::new_wan_leases();
+    let wan_health = crate::wan_failover::new_wan_health();
     let active_wan = crate::wan_failover::new_active_wan();
+
+    // ICMP probes: one task per WAN that declared a probe_target.
+    // Hysteresis inside the task debounces transient loss; the
+    // coordinator only sees stable state changes. Fire-and-
+    // forget — task runs for the process lifetime.
+    drop(crate::wan_failover::spawn_probes(&cfg, wan_health.clone()));
 
     if let Some(net_handle) = &net {
         // Pre-populate the slots so the coordinator sees entries
@@ -588,6 +595,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         drop(crate::wan_failover::spawn(
             cfg_for_failover,
             wan_leases.clone(),
+            wan_health.clone(),
             active_wan.clone(),
             wan_lease.clone(),
             net_handle.handle().clone(),
@@ -758,6 +766,8 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         firewall_dump,
         wan_lease.clone(),
         active_wan.clone(),
+        wan_leases.clone(),
+        wan_health.clone(),
     );
 
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);

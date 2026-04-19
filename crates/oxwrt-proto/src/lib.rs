@@ -350,6 +350,7 @@ pub fn format_response(resp: &Response) -> String {
             supervisor_uptime_secs,
             wan,
             active_wan,
+            wans,
             firewall_rules,
             aps,
             wg,
@@ -376,6 +377,27 @@ pub fn format_response(resp: &Response) -> String {
                 }
                 None => {
                     out.push_str("wan:               (no dhcp lease)\n");
+                }
+            }
+            // Per-WAN breakdown. Only emit when the router has
+            // more than one WAN declared — on a single-WAN box
+            // the `wan:` line above already carries everything.
+            if wans.len() > 1 {
+                out.push_str("wans:\n");
+                for w in wans {
+                    let addr = w.address.as_deref().unwrap_or("(none)");
+                    let gw = w.gateway.as_deref().unwrap_or("(none)");
+                    let tag = if w.active {
+                        "ACTIVE"
+                    } else if w.healthy {
+                        "ready"
+                    } else {
+                        "down"
+                    };
+                    out.push_str(&format!(
+                        "  {:<14} prio={:<4} {:<7} iface={:<8} addr={} via {}\n",
+                        w.name, w.priority, tag, w.iface, addr, gw
+                    ));
                 }
             }
             if !aps.is_empty() {
