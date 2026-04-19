@@ -1,0 +1,41 @@
+#!/bin/sh
+# Override the stock /lib/preinit/81_urandom_seed with a variant
+# that skips the `uci -q get system.@system[0].urandom_seed` call.
+#
+# oxwrtd replaces OpenWrt's UCI with a TOML config at
+# /etc/oxwrt.toml, so the `uci` binary is not shipped in our
+# image. The stock script's uci invocation produced a noisy
+# "uci: not found" or "uci: Permission denied" on every boot —
+# purely cosmetic because the script already falls back to
+# /etc/urandom.seed when uci returns empty.
+#
+# We keep the rest of the seeding logic verbatim: if
+# /etc/urandom.seed exists with the right perms and owner, cat
+# its content into /dev/urandom to warm the kernel pool early.
+# The second "alternate seed path" lookup that the stock script
+# did via uci is dropped entirely — we don't use it.
+#
+# Name must match the stock file (81_urandom_seed) so the FILES
+# overlay replaces it in the final squashfs.
+
+log_urandom_seed() {
+    echo "urandom-seed: $1" > /dev/kmsg
+}
+
+_do_urandom_seed() {
+    [ -f "$1" ] || { log_urandom_seed "Seed file not found ($1)"; return; }
+    [ -O "$1" -a -G "$1" -a ! -x "$1" ] || { log_urandom_seed "Wrong owner / permissions for $1"; return; }
+
+    log_urandom_seed "Seeding with $1"
+    cat "$1" > /dev/urandom
+}
+
+do_urandom_seed() {
+    [ -c /dev/urandom ] || { log_urandom_seed "Something is wrong with /dev/urandom"; return; }
+    _do_urandom_seed "/etc/urandom.seed"
+    # stock: SEED="$(uci -q get system.@system[0].urandom_seed)"
+    # stock: [ "${SEED:0:1}" = "/" -a "$SEED" != "/etc/urandom.seed" ] && _do_urandom_seed "$SEED"
+    # dropped — we don't run uci.
+}
+
+boot_hook_add preinit_main do_urandom_seed

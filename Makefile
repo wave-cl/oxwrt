@@ -498,21 +498,20 @@ define imagebuilder_stage_bare
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/authorized_keys
-	# Preinit hooks: wait for the ethernet driver to probe eth0
-	# before the rest of preinit runs (05_wait_for_eth0); override
-	# the stock failsafe-prompt hook with a no-op
-	# (30_failsafe_wait_timeout). Without these the boot log
-	# carries "Cannot find device eth0" + "Network unreachable"
-	# noise and two unhelpful keypress prompts on every boot.
+	# Preinit hook overlays. Three of them:
+	#   05_wait_for_eth0        — polls /sys/class/net/eth0 so
+	#     preinit doesn't run fw_check + failsafe-netmsg before
+	#     the mtk_soc_eth driver has probed the netdev.
+	#   30_failsafe_wait        — no-op replacement for the stock
+	#     hook that would otherwise print two "Press the [f]/[1]"
+	#     prompts on every boot.
+	#   81_urandom_seed         — drops the stock `uci -q get
+	#     system.@system[0].urandom_seed` call. oxwrtd replaces
+	#     UCI with /etc/oxwrt.toml, and without uci on $PATH the
+	#     stock script hit "uci: Permission denied" noise.
 	cp openwrt-packages/imagebuilder-overlay/files/lib/preinit/*  \
 	   $(IMAGEBUILDER_DIR)/files/lib/preinit/
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/lib/preinit/*
-	# uci stub: silent exit-0 binary that satisfies OpenWrt's
-	# preinit/hotplug scripts which still call `uci -q get …`
-	# even though oxwrtd replaces UCI with /etc/oxwrt.toml.
-	cp openwrt-packages/imagebuilder-overlay/files/usr/bin/uci \
-	   $(IMAGEBUILDER_DIR)/files/usr/bin/uci
-	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/uci
 	if [ -f "$$HOME/.ssh/id_ed25519.pub" ]; then \
 		cp "$$HOME/.ssh/id_ed25519.pub" $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \
 		chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/dropbear/authorized_keys; \

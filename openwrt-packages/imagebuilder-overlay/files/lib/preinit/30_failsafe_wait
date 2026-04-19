@@ -1,0 +1,23 @@
+#!/bin/sh
+# Override the stock OpenWrt /lib/preinit/30_failsafe_wait with a
+# no-op.
+#
+# The stock script prints two console prompts on every boot:
+#   Press the [f] key and hit [enter] to enter failsafe mode
+#   Press the [1], [2], [3] or [4] key and hit [enter] to select the debug level
+#
+# It then registers `failsafe_wait` as a preinit_main boot_hook
+# that blocks for up to 1 second waiting for a keypress on the
+# console. Our deployment is appliance-style — no one is watching
+# serial during a reboot to press keys — so the prompts are noise
+# and the 1-second block is a boot-time tax we don't want.
+#
+# Failsafe mode itself (triggered by holding the physical reset
+# button at boot, which the OpenWrt button hotplug handles
+# separately) is unaffected by this override.
+#
+# Must be named the same as the stock file so the FILES overlay
+# replaces it. Empty body means the stock fs_wait_for_key +
+# failsafe_wait definitions + boot_hook_add never run.
+
+:
