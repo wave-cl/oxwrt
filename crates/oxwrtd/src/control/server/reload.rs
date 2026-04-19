@@ -139,6 +139,28 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         }
     }
 
+    // Respawn ICMP probes against the new config. spawn_probes
+    // captures `probe_target` at spawn time, so an operator editing
+    // probe_target via CRUD + reload wouldn't otherwise take effect
+    // until next reboot. Abort the old handles, clear stale health
+    // entries, spawn new tasks. Cheap: probes don't hold meaningful
+    // state beyond the hysteresis counters, which are fine to reset.
+    {
+        let mut handles_guard = state.probe_handles.lock().unwrap();
+        for h in handles_guard.drain(..) {
+            h.abort();
+        }
+        // Clear stale health so removed-WAN entries don't linger
+        // (pick_active does unwrap_or(true) on missing entries,
+        // which is the right default for freshly-spawned probes
+        // before they've reported).
+        if let Ok(mut health) = state.wan_health.write() {
+            health.clear();
+        }
+        let new_handles = oxwrt_linux::wan_failover::spawn_probes(&new_cfg, state.wan_health.clone());
+        handles_guard.extend(new_handles);
+    }
+
     // Hostname change: apply via sethostname(2) so the live kernel
     // agrees with the new config. No-op if the hostname didn't change
     // (sethostname is idempotent and cheap). Failure is logged but not

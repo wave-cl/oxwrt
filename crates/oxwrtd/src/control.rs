@@ -76,6 +76,12 @@ pub struct ControlState {
     pub wan_leases: oxwrt_linux::wan_failover::WanLeases,
     /// Per-WAN probe health. Same rationale as above.
     pub wan_health: oxwrt_linux::wan_failover::WanHealth,
+    /// Handles of currently-running ICMP probe tasks, one per WAN
+    /// with a declared probe_target. Held here so `reload` can
+    /// abort them when the set of probe targets changes (e.g. an
+    /// operator edits probe_target on a live WAN). `Mutex<Vec>`
+    /// because only reload touches this — no read path.
+    pub probe_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 /// Tracking record for the current metrics HTTP listener.
@@ -109,6 +115,7 @@ impl ControlState {
             active_wan,
             wan_leases,
             wan_health,
+            probe_handles: Mutex::new(Vec::new()),
         })
     }
 
@@ -134,6 +141,7 @@ impl ControlState {
             active_wan: Arc::new(Mutex::new(None)),
             wan_leases: oxwrt_linux::wan_failover::new_wan_leases(),
             wan_health: oxwrt_linux::wan_failover::new_wan_health(),
+            probe_handles: Mutex::new(Vec::new()),
         })
     }
 

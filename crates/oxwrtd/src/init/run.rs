@@ -531,9 +531,10 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
 
     // ICMP probes: one task per WAN that declared a probe_target.
     // Hysteresis inside the task debounces transient loss; the
-    // coordinator only sees stable state changes. Fire-and-
-    // forget — task runs for the process lifetime.
-    drop(crate::wan_failover::spawn_probes(&cfg, wan_health.clone()));
+    // coordinator only sees stable state changes. Handles are
+    // stored on ControlState so `reload` can abort + respawn
+    // them when probe_target changes live.
+    let initial_probe_handles = crate::wan_failover::spawn_probes(&cfg, wan_health.clone());
 
     if let Some(net_handle) = &net {
         // Pre-populate the slots so the coordinator sees entries
@@ -864,6 +865,11 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         wan_leases.clone(),
         wan_health.clone(),
     );
+    // Move the initial probe handles into ControlState so reload
+    // can abort + respawn.
+    if let Ok(mut h) = state.probe_handles.lock() {
+        h.extend(initial_probe_handles);
+    }
 
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);
     let server = Arc::new(Server::load(
