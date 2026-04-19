@@ -209,17 +209,23 @@ $(BUILD_SERVICES)/debug-ssh/sbin/dropbear:
 services-dns: $(BUILD_SERVICES)/dns/hickory-dns
 $(BUILD_SERVICES)/dns/hickory-dns:
 	mkdir -p $(BUILD_SERVICES)/dns
-	# --features https-ring enables DoH (DNS-over-HTTPS) upstream
-	# resolver support. Transitively pulls in tls-ring + __tls +
-	# __https. Relies on rustls-platform-verifier (hickory default)
-	# which reads /etc/ssl/certs — that ships via ca-bundle in the
-	# image AND is bind-mounted into the dns service container via
-	# config/oxwrt.toml.
+	# --features "https-ring quic-ring" enables both DoH (RFC 8484,
+	# TCP+HTTP/2 on port 443) AND DoQ (RFC 9250, UDP+QUIC on port
+	# 853). Hickory rotates through configured upstream connections
+	# and picks whichever responds — config/services/dns/named.toml
+	# chooses DoH today because DoQ against Cloudflare + Quad9 hung
+	# with zero upstream traffic from hickory 0.26; follow-up
+	# investigation needed. Features are kept enabled so the
+	# binary can run DoQ configs without a rebuild once the
+	# issue is understood.
+	#
+	# Trust store ships via ca-bundle on-device at /etc/ssl/certs,
+	# bind-mounted into the dns service container.
 	AR_aarch64_unknown_linux_musl=$(AR_AARCH64) \
 	cargo-zigbuild install --locked \
 	  --target $(TARGET_ARCH) \
 	  --root /tmp/hickory-build \
-	  --features https-ring \
+	  --features "https-ring quic-ring" \
 	  hickory-dns
 	cp /tmp/hickory-build/bin/hickory-dns $@
 

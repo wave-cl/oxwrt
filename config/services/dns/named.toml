@@ -16,19 +16,23 @@ zone = "."
 zone_type = "External"
 
 # Upstream resolvers via DNS-over-HTTPS (RFC 8484). Enabled by
-# building hickory-dns with `--features https-ring` (see Makefile).
-# Trust store comes from ca-bundle on-device at /etc/ssl/certs,
-# bind-mounted into the dns service container via oxwrt.toml's
-# [[services.binds]].
+# building hickory-dns with `--features "https-ring quic-ring"`
+# (see Makefile — both protocols' feature flags are turned on so
+# operators can swap between DoH and DoQ by editing this file
+# alone). Trust store ships via ca-bundle at /etc/ssl/certs,
+# bind-mounted into the dns service container.
 #
-# hickory 0.26 reshaped the name_servers schema: `ip` replaced
-# `socket_addr`, and protocol config moved under a nested
-# `[[zones.stores.name_servers.connections]]` array. One
-# connections entry per protocol/port combination — this config
-# says "reach 1.1.1.1 on port 443 via HTTPS with SNI=cloudflare-
-# dns.com, fetching /dns-query". Multiple connections per server
-# would let hickory fall back between (e.g.) DoH and plain UDP —
-# we don't do that to avoid leaking queries over plain DNS.
+# DoH (https protocol) is the live default because DoQ (quic
+# protocol on port 853) hung on hickory 0.26 with zero upstream
+# traffic emitted — the Makefile keeps the feature enabled for
+# follow-up investigation. To try DoQ: swap the
+# `[[...connections]]` entries below to
+#   port = 853
+#   protocol = { type = "quic", server_name = "cloudflare-dns.com" }
+#
+# hickory 0.26 schema: `ip` + nested `[[...connections]]` array.
+# Two upstream servers so a single vendor outage doesn't take DNS
+# offline; hickory round-robins between them.
 [[zones.stores]]
 type = "forward"
 

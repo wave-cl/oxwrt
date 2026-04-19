@@ -492,7 +492,7 @@ rootfs = "/usr/lib/oxwrt/services/dns/rootfs"
 entrypoint = ["/hickory-dns", "-c", "/etc/named.toml"]
 net_mode = "isolated"
 veth = { host_ip = "10.53.0.1", peer_ip = "10.53.0.2", prefix = 30 }
-memory_max = 67108864        # 64 MiB
+memory_max = 134217728       # 128 MiB — quic-ring + rustls bumps hickory's working set above the 64 MiB we had for plain-UDP upstreams. OOM-kills at 64 under DoQ load.
 cpu_max = "50000 100000"     # 50% of one CPU
 pids_max = 32
 depends_on = []
