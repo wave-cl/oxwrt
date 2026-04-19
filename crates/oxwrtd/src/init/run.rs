@@ -547,6 +547,18 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Err(e) = crate::vpn_routing::install_table_51_blackhole(&handle).await {
                 tracing::error!(error = %e, "vpn_routing: blackhole fallback install failed");
             }
+            // Reap stale /32 endpoint exemptions left by a
+            // previous oxwrtd process (crash, power loss, reboot
+            // without a clean shutdown). Coordinator reinstalls
+            // fresh ones for the currently-active profile on its
+            // first tick. Runs BEFORE the coordinator spawns so
+            // there's no race where the coordinator's first
+            // install is immediately wiped by this cleanup.
+            if let Err(e) =
+                crate::vpn_routing::cleanup_stale_endpoint_exemptions(&handle).await
+            {
+                tracing::warn!(error = %e, "vpn_routing: exemption cleanup failed");
+            }
             // IPv6 parallel. Only installed when at least one
             // vpn_client profile declares `address_v6` — otherwise
             // we'd install v6 rules against an uninhabited table

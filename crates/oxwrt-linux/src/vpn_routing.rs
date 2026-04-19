@@ -44,7 +44,7 @@ use std::sync::Mutex;
 
 use futures_util::stream::TryStreamExt;
 use rtnetlink::packet_route::{
-    route::{RouteAttribute, RouteType},
+    route::{RouteAttribute, RouteProtocol, RouteType},
     rule::RuleAction,
 };
 use rtnetlink::{Error as RtError, Handle, RouteMessageBuilder};
@@ -70,6 +70,17 @@ pub const VPN_RULE_PRIORITY: u32 = 1000;
 /// `lookup main` here, finds the WAN default, egresses direct —
 /// never reaches the iif rule.
 pub const VPN_BYPASS_PRIORITY: u32 = 500;
+
+/// Custom `rtm_protocol` value stamped on every endpoint /32
+/// exemption this module installs. Picked from the unassigned
+/// range (> named protocols in rtnetlink's RouteProtocol enum,
+/// < 252 reserved range). Lets us identify our own stale routes
+/// across reboots — `cleanup_stale_endpoint_exemptions` walks
+/// the main table looking for this proto, deletes matches. See
+/// `iana.org/assignments/rtnetlink-routing-protocols` for why
+/// 155: nobody else claims it, and it's far enough from RTPROT_
+/// named ones that a future kernel addition won't collide.
+pub const VPN_ENDPOINT_PROTO: u8 = 155;
 
 /// Set of ifaces we've installed `ip rule iif <iface> lookup 51`
 /// for. Lets reload remove rules for zones that just toggled
@@ -352,10 +363,16 @@ pub async fn install_endpoint_exemption(
     wan_iface: &str,
 ) -> Result<(), Error> {
     let ifindex = ifindex(handle, wan_iface).await?;
+    // Stamp with VPN_ENDPOINT_PROTO so cleanup_stale_endpoint_exemptions
+    // can find + del these across reboots (coordinator state is
+    // per-process; without the marker, a crashed oxwrtd would
+    // leave /32s in the main table that the new oxwrtd has no
+    // record of).
     let route = RouteMessageBuilder::<Ipv4Addr>::new()
         .destination_prefix(endpoint_ip, 32)
         .gateway(wan_gw)
         .output_interface(ifindex)
+        .protocol(RouteProtocol::Other(VPN_ENDPOINT_PROTO))
         .build();
     match handle.route().add(route).replace().execute().await {
         Ok(()) => {
@@ -367,6 +384,60 @@ pub async fn install_endpoint_exemption(
         }
         Err(e) => Err(Error::Rtnetlink(e)),
     }
+}
+
+/// Walk the main table, delete any route whose rtm_protocol
+/// matches VPN_ENDPOINT_PROTO. Called once at boot before the
+/// coordinator spawns — on a clean boot it's a no-op, on a post-
+/// reboot boot it reaps /32s left by the previous oxwrtd process.
+///
+/// The walk uses handle.route().get() with an empty message,
+/// which rtnetlink 0.20 turns into NLM_F_DUMP (all routes).
+/// Errors on individual dels are logged + skipped — the whole
+/// cleanup is best-effort; a single stuck route shouldn't block
+/// the rest.
+pub async fn cleanup_stale_endpoint_exemptions(handle: &Handle) -> Result<(), Error> {
+    let msg = RouteMessageBuilder::<Ipv4Addr>::new().build();
+    let mut stream = handle.route().get(msg).execute();
+    let mut stale: Vec<rtnetlink::packet_route::route::RouteMessage> = Vec::new();
+    while let Some(r) = stream.try_next().await.map_err(Error::Rtnetlink)? {
+        // RouteProtocol::Other(v) → v; named variants → kernel
+        // numeric value. We match the raw u8 to dodge the enum
+        // conversion asymmetry (Other(155) vs some future named
+        // variant claiming 155).
+        let proto_raw: u8 = r.header.protocol.clone().into();
+        if proto_raw == VPN_ENDPOINT_PROTO {
+            stale.push(r);
+        }
+    }
+    let n = stale.len();
+    for r in stale {
+        // Extract the destination + prefix for the log; the
+        // RouteMessage itself is what we hand to del.
+        let dst: Option<String> = r.attributes.iter().find_map(|a| match a {
+            RouteAttribute::Destination(ra) => Some(format!("{ra:?}")),
+            _ => None,
+        });
+        match handle.route().del(r).execute().await {
+            Ok(()) => {
+                tracing::info!(
+                    dst = dst.as_deref().unwrap_or("?"),
+                    "vpn_routing: stale endpoint exemption removed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    dst = dst.as_deref().unwrap_or("?"),
+                    error = %e,
+                    "vpn_routing: stale exemption del failed"
+                );
+            }
+        }
+    }
+    if n > 0 {
+        tracing::info!(count = n, "vpn_routing: endpoint-exemption cleanup done");
+    }
+    Ok(())
 }
 
 /// Install TCP MSS clamp on the WAN forward path so wg-over-UDP
