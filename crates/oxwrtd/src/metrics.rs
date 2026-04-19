@@ -36,18 +36,58 @@ use tokio::net::TcpListener;
 
 use crate::control::ControlState;
 
-/// Spawn the metrics HTTP listener. If `cfg.metrics` is None the
-/// function returns immediately without spawning anything. On bind
-/// failure we log an error and keep going — a broken metrics
-/// endpoint should never block boot.
-pub fn spawn(state: Arc<ControlState>) {
+/// Reconcile the metrics HTTP listener against the current config.
+/// Idempotent: safe to call at boot + after every reload.
+///
+///   cfg.metrics == None,    task == None               → no-op
+///   cfg.metrics == None,    task == Some               → abort,
+///                                                        clear
+///   cfg.metrics == Some(a), task == None               → spawn
+///   cfg.metrics == Some(a), task == Some(same addr)    → no-op
+///   cfg.metrics == Some(a), task == Some(different)    → abort,
+///                                                        respawn
+///
+/// Before this was split out of `spawn`, enabling [metrics] via
+/// config-push + reload left the old pre-reload state in place
+/// (no listener if metrics was None at boot; wrong bind addr if
+/// it changed). Callers: init::run at boot, reload::handle on
+/// every reload.
+pub fn apply(state: &Arc<ControlState>) {
     let cfg = state.config_snapshot();
-    let Some(m) = cfg.metrics.as_ref() else {
-        tracing::info!("metrics: disabled (no [metrics] in config)");
-        return;
-    };
-    let listen = m.listen.clone();
-    tokio::spawn(async move {
+    let desired: Option<String> = cfg.metrics.as_ref().map(|m| m.listen.clone());
+    let mut slot = state.metrics_task.lock().unwrap();
+
+    let current_listen = slot.as_ref().map(|t| t.listen.clone());
+    match (desired.as_ref(), current_listen.as_ref()) {
+        (None, None) => {
+            tracing::debug!("metrics: disabled, no task running");
+        }
+        (None, Some(old)) => {
+            tracing::info!(was = %old, "metrics: disabling, stopping listener");
+            if let Some(t) = slot.take() {
+                t.handle.abort();
+            }
+        }
+        (Some(new), Some(old)) if new == old => {
+            tracing::debug!(listen = %new, "metrics: unchanged, leaving task alone");
+        }
+        (Some(new), Some(old)) => {
+            tracing::info!(was = %old, now = %new, "metrics: rebinding listener");
+            if let Some(t) = slot.take() {
+                t.handle.abort();
+            }
+            *slot = Some(spawn_listener(state.clone(), new.clone()));
+        }
+        (Some(new), None) => {
+            tracing::info!(listen = %new, "metrics: starting listener");
+            *slot = Some(spawn_listener(state.clone(), new.clone()));
+        }
+    }
+}
+
+fn spawn_listener(state: Arc<ControlState>, listen: String) -> crate::control::MetricsTask {
+    let listen_clone = listen.clone();
+    let handle = tokio::spawn(async move {
         let listener = match TcpListener::bind(&listen).await {
             Ok(l) => l,
             Err(e) => {
@@ -72,6 +112,10 @@ pub fn spawn(state: Arc<ControlState>) {
             });
         }
     });
+    crate::control::MetricsTask {
+        handle,
+        listen: listen_clone,
+    }
 }
 
 /// Minimal HTTP/1.1 handler. Reads until the end of headers (blank

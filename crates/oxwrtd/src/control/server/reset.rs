@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) async fn handle_reset(state: &ControlState, confirm: bool) -> Response {
+pub(super) async fn handle_reset(state: &std::sync::Arc<ControlState>, confirm: bool) -> Response {
     use crate::config;
 
     if !confirm {

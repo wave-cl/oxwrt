@@ -57,6 +57,19 @@ pub struct ControlState {
     /// testing on stock OpenWrt devices where touching live network
     /// state would kill SSH.
     pub control_only: bool,
+    /// Metrics HTTP listener handle + its current bind addr.
+    /// `metrics::apply` uses this to make spawn/respawn
+    /// idempotent: a reload that toggles [metrics] on/off or
+    /// changes listen addr stops the old task and starts a new
+    /// one. None = no listener running.
+    pub metrics_task: Mutex<Option<MetricsTask>>,
+}
+
+/// Tracking record for the current metrics HTTP listener.
+#[cfg(target_os = "linux")]
+pub struct MetricsTask {
+    pub handle: tokio::task::JoinHandle<()>,
+    pub listen: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -76,6 +89,7 @@ impl ControlState {
             wan_lease,
             boot_time: std::time::Instant::now(),
             control_only: false,
+            metrics_task: Mutex::new(None),
         })
     }
 
@@ -97,6 +111,7 @@ impl ControlState {
             wan_lease,
             boot_time: std::time::Instant::now(),
             control_only: true,
+            metrics_task: Mutex::new(None),
         })
     }
 

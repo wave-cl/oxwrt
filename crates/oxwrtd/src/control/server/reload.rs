@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub async fn handle_reload_async(state: &ControlState) -> Response {
+pub async fn handle_reload_async(state: &std::sync::Arc<ControlState>) -> Response {
     let start = std::time::Instant::now();
     let resp = handle_reload_inner(state).await;
     let duration = start.elapsed();
@@ -12,7 +12,7 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
     resp
 }
 
-async fn handle_reload_inner(state: &ControlState) -> Response {
+async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     use crate::config::Config;
     use std::path::Path;
 
@@ -254,6 +254,14 @@ async fn handle_reload_inner(state: &ControlState) -> Response {
         };
         *dump = new_firewall_dump;
     }
+
+    // Phase 6: reconcile the metrics HTTP listener. apply() is
+    // idempotent: starts a listener if [metrics] was just added,
+    // stops one if it was just removed, rebinds on addr change.
+    // Before this was wired into reload, toggling [metrics]
+    // required a full reboot for the listener to start — caught
+    // during the metrics live-verify.
+    crate::metrics::apply(state);
 
     tracing::info!("config reloaded, firewall reinstalled, supervisor rebuilt");
     Response::Ok

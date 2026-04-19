@@ -709,7 +709,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // Prometheus /metrics endpoint. No-op when cfg.metrics is None.
     // Same Arc<ControlState> the RPC server uses, so `oxctl status`
     // and `curl http://router:9100/metrics` return consistent data.
-    crate::metrics::spawn(state.clone());
+    crate::metrics::apply(&state);
 
     // Persistent urandom seed. Periodic writes to
     // /etc/urandom.seed so the next boot's preinit finds a warm
