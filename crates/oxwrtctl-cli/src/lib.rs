@@ -13,6 +13,7 @@
 //! Linux-glibc, Linux-musl — without cross toolchains.
 
 pub mod client;
+pub mod qr;
 
 pub use client::{Error, run};
 

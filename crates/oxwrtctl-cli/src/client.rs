@@ -25,7 +25,30 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
     let mut it = args.into_iter();
     let remote = it.next().ok_or(Error::Usage)?;
     let cmd = it.next().ok_or(Error::Usage)?;
-    let rest: Vec<String> = it.collect();
+    let rest_raw: Vec<String> = it.collect();
+
+    // Intercept client-only flags before parse_request sees them.
+    //   --qr on `wg-enroll`: after getting the wg-quick config
+    //   back from the server, render it as an ASCII QR and print
+    //   it for the user to scan with a phone camera. The flag
+    //   isn't forwarded on the wire (server doesn't need to know),
+    //   so we strip it here.
+    let mut qr_mode = false;
+    let rest: Vec<String> = rest_raw
+        .into_iter()
+        .filter(|a| {
+            if a == "--qr" {
+                qr_mode = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if qr_mode && cmd != "wg-enroll" {
+        eprintln!("oxctl: --qr ignored; only meaningful with `wg-enroll`");
+        qr_mode = false;
+    }
 
     let addr: SocketAddr = remote.parse().map_err(|_| Error::Address(remote.clone()))?;
 
@@ -134,6 +157,23 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
                 print!("{formatted}");
                 if !formatted.ends_with('\n') {
                     println!();
+                }
+                // If --qr was requested on wg-enroll, render the
+                // returned .conf as an ASCII QR after the normal
+                // print so the operator can scan it directly with
+                // a phone camera instead of copy-pasting text.
+                if qr_mode {
+                    if let oxwrt_api::rpc::Response::Value { value } = &resp {
+                        match crate::qr::render(value) {
+                            Ok(q) => {
+                                println!();
+                                print!("{q}");
+                            }
+                            Err(e) => {
+                                eprintln!("oxctl: QR render failed: {e}");
+                            }
+                        }
+                    }
                 }
                 if last {
                     break;

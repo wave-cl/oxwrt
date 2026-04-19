@@ -38,3 +38,6 @@ tracing-subscriber.workspace = true
 # Used to decode the Backup response's Value into raw bytes so
 # `oxctl .. backup > file.tar.gz` produces a valid archive.
 base64.workspace = true
+# Local QR rendering for `wg-enroll --qr`. No-std-friendly,
+# no transitive deps worth noting.
+qrcodegen = "1"
