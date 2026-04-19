@@ -366,20 +366,13 @@ impl Net {
                 }
                 tracing::debug!(%iface, %address, "static wan address already present");
             }
-            // Default route via the configured gateway.
-            let route = rtnetlink::RouteMessageBuilder::<std::net::Ipv4Addr>::new()
-                .destination_prefix(std::net::Ipv4Addr::UNSPECIFIED, 0)
-                .gateway(*gateway)
-                .build();
-            match self.handle.route().add(route).execute().await {
-                Ok(()) => {
-                    tracing::info!(%iface, %gateway, "static wan: default route installed");
-                }
-                Err(e) if is_exists(&e) => {
-                    tracing::debug!(%iface, %gateway, "default route already present");
-                }
-                Err(e) => return Err(e.into()),
-            }
+            // NOTE: default-route install is owned by the failover
+            // coordinator (wan_failover::spawn), not here. Static
+            // WANs are published into WanLeases by init::run so the
+            // coordinator sees them alongside DHCP WANs and picks
+            // exactly one default. Same reasoning as the DHCP path
+            // (wan_dhcp::apply_lease) — avoids the EEXIST race.
+            let _ = gateway; // suppress unused-binding lint
             tracing::info!(%iface, %address, prefix = %prefix, "static wan: address applied");
         }
         Ok(())

@@ -639,6 +639,48 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             }
         }
 
+        // Publish static WANs as synthesized leases. The coordinator
+        // treats wan_leases opaquely — a lease is a lease is a
+        // lease — so handing it a static entry makes failover work
+        // for mixed DHCP+static deployments. lease_seconds is set
+        // to u32::MAX (static never expires); server is 0.0.0.0
+        // (no DHCP server involved); DNS is filtered to v4 entries
+        // only since DhcpLease stores Vec<Ipv4Addr>.
+        {
+            let mut leases = wan_leases.write().unwrap();
+            for w in cfg.wans_by_priority() {
+                if let Network::Wan {
+                    name,
+                    wan:
+                        WanConfig::Static {
+                            address,
+                            prefix,
+                            gateway,
+                            dns,
+                        },
+                    ..
+                } = w
+                {
+                    let v4_dns: Vec<std::net::Ipv4Addr> = dns
+                        .iter()
+                        .filter_map(|ip| match ip {
+                            std::net::IpAddr::V4(v) => Some(*v),
+                            _ => None,
+                        })
+                        .collect();
+                    let synth = crate::wan_dhcp::DhcpLease {
+                        address: *address,
+                        prefix: *prefix,
+                        gateway: Some(*gateway),
+                        dns: v4_dns,
+                        lease_seconds: u32::MAX,
+                        server: std::net::Ipv4Addr::UNSPECIFIED,
+                    };
+                    leases.insert(name.clone(), Some(synth));
+                }
+            }
+        }
+
         // Failover coordinator: picks highest-priority WAN with
         // a Some lease, mirrors into `wan_lease`, installs default
         // route. Single-WAN deployments still run this; it's a

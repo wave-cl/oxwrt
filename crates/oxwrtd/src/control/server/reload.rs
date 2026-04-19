@@ -92,18 +92,50 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     // is handled by the renewal loop (which runs DISCOVER → REQUEST →
     // ACK and applies the lease independently of reload). Pppoe has
     // its own setup path and isn't reconciled here.
-    if let Some(crate::config::Network::Wan {
-        iface,
-        wan: crate::config::WanConfig::Static {
-            address, prefix, ..
-        },
-        ..
-    }) = new_cfg.primary_wan()
-    {
-        if let Err(e) = reconcile_iface_address(iface, *address, *prefix, "wan").await {
-            return Response::Err {
-                message: format!("reload: wan static address reconcile failed: {e}"),
+    //
+    // Iterate ALL static WANs (not just primary_wan), because multi-
+    // WAN configs can declare static secondaries that need the same
+    // address reconcile. Also publish each into wan_leases as a
+    // synthesized lease so the failover coordinator sees them —
+    // mirrors the init::run() boot-time path.
+    for w in new_cfg.networks.iter() {
+        if let crate::config::Network::Wan {
+            name,
+            iface,
+            wan:
+                crate::config::WanConfig::Static {
+                    address,
+                    prefix,
+                    gateway,
+                    dns,
+                },
+            ..
+        } = w
+        {
+            if let Err(e) = reconcile_iface_address(iface, *address, *prefix, name).await {
+                return Response::Err {
+                    message: format!("reload: static wan {} address reconcile failed: {e}", name),
+                };
+            }
+            // Synthesize lease for the coordinator. Matches init::run.
+            let v4_dns: Vec<std::net::Ipv4Addr> = dns
+                .iter()
+                .filter_map(|ip| match ip {
+                    std::net::IpAddr::V4(v) => Some(*v),
+                    _ => None,
+                })
+                .collect();
+            let synth = oxwrt_linux::wan_dhcp::DhcpLease {
+                address: *address,
+                prefix: *prefix,
+                gateway: Some(*gateway),
+                dns: v4_dns,
+                lease_seconds: u32::MAX,
+                server: std::net::Ipv4Addr::UNSPECIFIED,
             };
+            if let Ok(mut leases) = state.wan_leases.write() {
+                leases.insert(name.clone(), Some(synth));
+            }
         }
     }
 
