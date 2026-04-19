@@ -220,6 +220,42 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                 .map_err(|e| format!("config-push: read {path}: {e}"))?;
             Ok(Request::ConfigPush { toml })
         }
+        "vpn-key-upload" => {
+            // `oxctl <remote> vpn-key-upload <name> <keyfile>`
+            // Reads the private key from the local file, strips a
+            // surrounding wg-quick `[Interface]`-style `PrivateKey
+            // = ...` line if present (so an operator can pass a
+            // `.conf` path directly without pre-extracting), and
+            // sends the base64 key bytes. The router validates +
+            // writes to /etc/oxwrt/vpn/<name>.key.
+            let name = args.first().ok_or("vpn-key-upload: missing <name>")?.clone();
+            let path = args.get(1).ok_or("vpn-key-upload: missing <keyfile>")?;
+            let body = std::fs::read_to_string(path)
+                .map_err(|e| format!("vpn-key-upload: read {path}: {e}"))?;
+            // Accept either a bare base64 key OR a wg-quick
+            // [Interface] block — pull out the first
+            // `PrivateKey = XXX=` line; fall back to trimming
+            // the whole file if it's already just the key.
+            let private_key_b64 = body
+                .lines()
+                .find_map(|l| {
+                    let t = l.trim();
+                    if !t.starts_with("PrivateKey") {
+                        return None;
+                    }
+                    // PrivateKey = AAA= — split at FIRST '=' since
+                    // base64 can contain trailing '=' padding.
+                    t.splitn(2, '=').nth(1).map(|v| v.trim().to_string())
+                })
+                .unwrap_or_else(|| body.trim().to_string());
+            if private_key_b64.is_empty() {
+                return Err("vpn-key-upload: private key empty".into());
+            }
+            Ok(Request::VpnKeyUpload {
+                name,
+                private_key_b64,
+            })
+        }
         "wg-enroll" => {
             // Positional: name allowed_ips endpoint_host [--dns IP]
             let name = args.first().ok_or("wg-enroll: missing <name>")?.clone();

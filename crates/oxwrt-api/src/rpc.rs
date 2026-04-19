@@ -77,6 +77,25 @@ pub enum Request {
     ConfigPush {
         toml: String,
     },
+    /// Upload a `[[vpn_client]]` private key to the router at
+    /// /etc/oxwrt/vpn/<name>.key. `name` must match the profile's
+    /// `name` field in oxwrt.toml; path-traversal defense rejects
+    /// anything that isn't \[a-zA-Z0-9_-\]+.
+    ///
+    /// Private keys never go through the regular config flow —
+    /// they'd be visible in backups and config dumps. This RPC
+    /// writes atomically at 0600 into the existing /etc/oxwrt/
+    /// overlay path so they survive sysupgrade via the existing
+    /// keeplist. Operators who lose the key must re-upload; the
+    /// router neither generates the key from upstream nor echoes
+    /// it back. Pair with `oxctl reload` to pick up.
+    VpnKeyUpload {
+        name: String,
+        /// Raw base64 WireGuard private key (44 chars, same shape
+        /// `wg genkey` emits). Not re-encoded on the wire — it
+        /// travels inside the already-encrypted sQUIC channel.
+        private_key_b64: String,
+    },
     /// Enroll a new WireGuard roadwarrior peer: the server generates
     /// a fresh client keypair, adds the public half to its peer list
     /// (persisted to oxwrt.toml), and returns a complete client

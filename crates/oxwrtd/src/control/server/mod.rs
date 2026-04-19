@@ -191,6 +191,16 @@ impl Server {
                 send.finish().ok();
                 continue;
             }
+            if let Request::VpnKeyUpload {
+                name,
+                private_key_b64,
+            } = &request
+            {
+                let resp = handle_vpn_key_upload(name, private_key_b64);
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
 
             // Firmware apply: trigger sysupgrade + reboot.
             if let Request::FwApply {
@@ -428,6 +438,74 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         Request::ConfigPush { .. } => vec![Response::Err {
             message: "BUG: ConfigPush should be handled upstream".to_string(),
         }],
+        Request::VpnKeyUpload { .. } => vec![Response::Err {
+            message: "BUG: VpnKeyUpload should be handled upstream".to_string(),
+        }],
+    }
+}
+
+/// Write a vpn_client profile's private key to
+/// /etc/oxwrt/vpn/<name>.key with 0600 perms. Path-traversal
+/// defense: `name` must be \[a-zA-Z0-9_-\]+ (same charset as
+/// wg_peer names). Key content is NOT validated beyond
+/// not-empty; `wg setconf` will reject a malformed key on the
+/// next bring-up, which is a clean failure mode. Atomic via
+/// tmp+rename under the same directory.
+fn handle_vpn_key_upload(name: &str, private_key_b64: &str) -> Response {
+    use std::io::Write as _;
+    use std::path::Path;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Response::Err {
+            message: format!(
+                "vpn-key-upload: invalid name {:?} (alphanum + _ - only)",
+                name
+            ),
+        };
+    }
+    if private_key_b64.trim().is_empty() {
+        return Response::Err {
+            message: "vpn-key-upload: empty private key".to_string(),
+        };
+    }
+    let dir = "/etc/oxwrt/vpn";
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return Response::Err {
+            message: format!("vpn-key-upload: mkdir {dir}: {e}"),
+        };
+    }
+    let path_str = format!("{dir}/{name}.key");
+    let tmp_str = format!("{dir}/{name}.key.tmp");
+    let path = Path::new(&path_str);
+    let tmp = Path::new(&tmp_str);
+    let res = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(tmp)?;
+        f.write_all(private_key_b64.trim().as_bytes())?;
+        f.write_all(b"\n")?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.sync_all()?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    })();
+    match res {
+        Ok(()) => {
+            tracing::info!(path = %path_str, "vpn_client: private key uploaded");
+            Response::Ok
+        }
+        Err(e) => Response::Err {
+            message: format!("vpn-key-upload: write {path_str}: {e}"),
+        },
     }
 }
 
