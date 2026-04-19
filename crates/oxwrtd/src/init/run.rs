@@ -547,6 +547,18 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Err(e) = crate::vpn_routing::install_table_51_blackhole(&handle).await {
                 tracing::error!(error = %e, "vpn_routing: blackhole fallback install failed");
             }
+            // Bypass-destination rules: union CIDRs across all
+            // declared vpn_client profiles. Active-profile-
+            // agnostic by design (one stable set for operators
+            // to reason about).
+            let bypass: Vec<String> = cfg
+                .vpn_client
+                .iter()
+                .flat_map(|v| v.bypass_destinations.iter().cloned())
+                .collect();
+            if let Err(e) = crate::vpn_routing::install_bypass_rules(&handle, &bypass).await {
+                tracing::error!(error = %e, "vpn_routing: bypass rule install failed");
+            }
         }
     }
     // MSS clamp on the WAN iface — separate nft table so rustables

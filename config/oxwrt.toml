@@ -522,6 +522,11 @@ action = "accept"
 # endpoint = "193.32.127.66:51820"
 # public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 # persistent_keepalive = 25
+# # Optional: dest CIDRs that bypass the tunnel even when active —
+# # useful for banking / streaming / corp VPN that geoblocks
+# # commercial-VPN ranges. Rules install at a lower priority than
+# # the via_vpn iif rule, so a dest match wins first.
+# # bypass_destinations = ["198.51.100.0/24", "203.0.113.42/32"]
 #
 # [[vpn_client]]
 # name = "mullvad-de"

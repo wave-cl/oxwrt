@@ -244,6 +244,22 @@ pub struct VpnClient {
     /// within ~60s idle).
     #[serde(default = "default_vpn_keepalive")]
     pub persistent_keepalive: u16,
+    /// Destination IPv4 CIDRs that should BYPASS this tunnel and
+    /// egress via the normal WAN default route. Typical uses:
+    ///   - Banking sites that geoblock VPN egress IPs
+    ///   - Streaming services (Netflix / BBC / etc.) that detect
+    ///     commercial-VPN ranges and block them
+    ///   - Corp VPN subnets that the operator wants to reach
+    ///     direct rather than re-tunnel
+    ///
+    /// Implemented as `ip rule to <cidr> lookup main` entries at
+    /// a priority lower than the via_vpn iif rules — matched
+    /// FIRST, so a bypass-destination packet finds the main
+    /// table's WAN default before the iif rule ever sees it.
+    /// Scoped to v4 for v1; `bypass_destinations_v6` is a v2
+    /// follow-up if anyone asks.
+    #[serde(default)]
+    pub bypass_destinations: Vec<String>,
 }
 
 fn default_vpn_priority() -> u32 {

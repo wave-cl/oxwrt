@@ -63,6 +63,14 @@ pub const VPN_TABLE: u32 = 51;
 /// for an operator to squeeze rules in front.
 pub const VPN_RULE_PRIORITY: u32 = 1000;
 
+/// Priority for `bypass_destinations` rules. Must be LOWER than
+/// VPN_RULE_PRIORITY so dest-matched bypass rules evaluate first
+/// (kernel rule order is ascending priority). A packet from a
+/// via_vpn zone whose dest falls in the bypass list hits
+/// `lookup main` here, finds the WAN default, egresses direct —
+/// never reaches the iif rule.
+pub const VPN_BYPASS_PRIORITY: u32 = 500;
+
 /// Set of ifaces we've installed `ip rule iif <iface> lookup 51`
 /// for. Lets reload remove rules for zones that just toggled
 /// via_vpn off. Static because `Net` is reconstructed on every
@@ -70,6 +78,10 @@ pub const VPN_RULE_PRIORITY: u32 = 1000;
 /// ControlState would forget across the reload that spawns a
 /// fresh coordinator.
 static INSTALLED_IIF_RULES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Set of (dest_ip, prefix_len) bypass rules we've installed.
+/// Same diff-on-reload pattern as INSTALLED_IIF_RULES.
+static INSTALLED_BYPASS_RULES: Mutex<Option<HashSet<(Ipv4Addr, u8)>>> = Mutex::new(None);
 
 /// Install one `ip rule iif <zone_iface> lookup 51` per iface of
 /// a via_vpn firewall zone. Idempotent — duplicate adds are
@@ -151,6 +163,92 @@ pub async fn install_policy_rules(
     // diff against.
     *INSTALLED_IIF_RULES.lock().unwrap() = Some(new_set);
     Ok(())
+}
+
+/// Install `ip rule to <cidr> lookup main priority 500` for
+/// every bypass-destination CIDR across the active vpn_client
+/// set. At priority 500 (< VPN_RULE_PRIORITY 1000), these rules
+/// match BEFORE the iif-based VPN rules, so a dest-matched
+/// packet from a via_vpn zone routes direct via WAN.
+///
+/// Parses CIDR strings like "192.0.2.0/24" into (Ipv4Addr, u8).
+/// Malformed entries log a warn and skip — an operator typo
+/// shouldn't block the rest of the bypass list.
+///
+/// Diff-and-delete on reload: rules present in the previous set
+/// but not the current one are removed first; new ones are then
+/// added. Duplicate adds EEXIST-tolerated.
+pub async fn install_bypass_rules(
+    handle: &Handle,
+    bypass_cidrs: &[String],
+) -> Result<(), Error> {
+    let mut new_set: HashSet<(Ipv4Addr, u8)> = HashSet::new();
+    for s in bypass_cidrs {
+        match parse_cidr_v4(s) {
+            Some(parsed) => {
+                new_set.insert(parsed);
+            }
+            None => {
+                tracing::warn!(cidr = %s, "vpn_routing: invalid bypass CIDR; skipped");
+            }
+        }
+    }
+    let old_set = {
+        let guard = INSTALLED_BYPASS_RULES.lock().unwrap();
+        guard.clone().unwrap_or_default()
+    };
+    // Delete stale.
+    for (addr, prefix) in old_set.difference(&new_set) {
+        let mut add_builder = handle
+            .rule()
+            .add()
+            .v4()
+            .destination_prefix(*addr, *prefix)
+            .table_id(254)  // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
+            .priority(VPN_BYPASS_PRIORITY)
+            .action(RuleAction::ToTable);
+        let msg = add_builder.message_mut().clone();
+        match handle.rule().del(msg).execute().await {
+            Ok(()) => tracing::info!(%addr, prefix, "vpn_routing: stale bypass rule removed"),
+            Err(e) if is_noent(&e) => {}
+            Err(e) => tracing::warn!(%addr, prefix, error = %e, "vpn_routing: bypass del failed"),
+        }
+    }
+    // Install new.
+    for (addr, prefix) in &new_set {
+        let res = handle
+            .rule()
+            .add()
+            .v4()
+            .destination_prefix(*addr, *prefix)
+            .table_id(254)  // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
+            .priority(VPN_BYPASS_PRIORITY)
+            .action(RuleAction::ToTable)
+            .execute()
+            .await;
+        match res {
+            Ok(()) => tracing::info!(
+                %addr, prefix,
+                "vpn_routing: bypass rule installed"
+            ),
+            Err(e) if is_exists(&e) => {
+                tracing::debug!(%addr, prefix, "vpn_routing: bypass rule already present");
+            }
+            Err(e) => return Err(Error::Rtnetlink(e)),
+        }
+    }
+    *INSTALLED_BYPASS_RULES.lock().unwrap() = Some(new_set);
+    Ok(())
+}
+
+fn parse_cidr_v4(s: &str) -> Option<(Ipv4Addr, u8)> {
+    let (ip_str, prefix_str) = s.split_once('/')?;
+    let ip: Ipv4Addr = ip_str.parse().ok()?;
+    let prefix: u8 = prefix_str.parse().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    Some((ip, prefix))
 }
 
 /// Plant the kill-switch fallback: a blackhole default in table

@@ -187,16 +187,32 @@ pub fn merge_vpn_block(existing_toml: &str, name: &str, new_block: &str) -> Resu
         .clone();
 
     // Find the target array-of-tables in the existing doc.
-    // toml_edit stores [[foo]] arrays as Item::ArrayOfTables.
-    // Insert-or-replace on `name` field.
+    // toml_edit stores [[foo]] arrays as Item::ArrayOfTables, but
+    // a struct-serialized empty Vec<T> lands as Item::Value(Array
+    // []) — which is also how `handle_config_dump` on the router
+    // emits an absent vpn_client field. Replace either variant
+    // with a fresh ArrayOfTables so push() works.
     use toml_edit::{ArrayOfTables, Item};
-    let arr: &mut ArrayOfTables = match doc.entry("vpn_client").or_insert(Item::ArrayOfTables(
-        ArrayOfTables::new(),
-    )) {
+    let replace = match doc.get("vpn_client") {
+        None => true,
+        Some(Item::ArrayOfTables(_)) => false,
+        Some(Item::Value(v)) => v
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        Some(_) => true,
+    };
+    if replace {
+        doc.insert("vpn_client", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    let arr: &mut ArrayOfTables = match doc
+        .get_mut("vpn_client")
+        .expect("just inserted or verified")
+    {
         Item::ArrayOfTables(a) => a,
         other => {
             return Err(format!(
-                "vpn_client exists but isn't [[array]] ({:?})",
+                "vpn_client exists but isn't [[array]] after normalize ({:?})",
                 other.type_name()
             ));
         }

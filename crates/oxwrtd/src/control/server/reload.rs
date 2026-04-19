@@ -320,6 +320,14 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole(&handle).await {
             tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
         }
+        let bypass: Vec<String> = new_cfg
+            .vpn_client
+            .iter()
+            .flat_map(|v| v.bypass_destinations.iter().cloned())
+            .collect();
+        if let Err(e) = oxwrt_linux::vpn_routing::install_bypass_rules(&handle, &bypass).await {
+            tracing::error!(error = %e, "reload: vpn_routing bypass install failed");
+        }
         conn_task.abort();
         // MSS clamp on WAN. Same gate as boot — no point if no
         // vpn_client profile is declared.
