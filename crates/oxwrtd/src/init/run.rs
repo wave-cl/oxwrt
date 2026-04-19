@@ -80,6 +80,40 @@ pub fn run() -> Result<(), Error> {
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+
+    // Forensics: log the on-disk config size + the WAN count so
+    // we can correlate "pushed config lost on reboot" with what
+    // oxwrtd actually read from disk at pid-1 time. Written to
+    // /dev/kmsg directly (bypassing the tracing layer) so an
+    // early-boot tracing-writer hiccup can't hide it.
+    {
+        use std::io::Write;
+        let live_size = std::fs::metadata(&config_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let rom_path = std::path::PathBuf::from(format!("/rom{}", config_path.display()));
+        let rom_size = std::fs::metadata(&rom_path).map(|m| m.len()).unwrap_or(0);
+        let live_body = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let wan_count = live_body.matches("type = \"wan\"").count();
+        let probes = live_body.matches("probe_target").count();
+        let backups = live_body.matches("wan-backup").count();
+        let upper_new = std::fs::metadata("/overlay/upper/etc/oxwrt/oxwrt.toml")
+            .map(|m| m.len())
+            .ok();
+        let upper_legacy = std::fs::metadata("/overlay/upper/etc/oxwrt.toml")
+            .map(|m| m.len())
+            .ok();
+        let sysupgrade_tgz = std::fs::metadata("/sysupgrade.tgz").is_ok()
+            || std::fs::metadata("/overlay/upper/sysupgrade.tgz").is_ok();
+        let msg = format!(
+            "<4>forensic: path={} live={} rom={} upper_new={:?} upper_legacy={:?} wan_count={} probe_target={} wan_backup={} sysupgrade_tgz={}\n",
+            config_path.display(), live_size, rom_size, upper_new, upper_legacy, wan_count, probes, backups, sysupgrade_tgz
+        );
+        if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+            let _ = kmsg.write_all(msg.as_bytes());
+        }
+    }
+
     let cfg = Config::load(&config_path)?;
 
     // Sanity-truncate coredhcp's persisted lease file if any lease falls

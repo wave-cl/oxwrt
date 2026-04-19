@@ -4,7 +4,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_PATH: &str = "/etc/oxwrt.toml";
+/// Primary location for the persisted config. Lives under
+/// `/etc/oxwrt/` specifically — NOT the more obvious
+/// `/etc/oxwrt.toml` — because the OpenWrt preinit stack's
+/// 80_mount_root extract-of-sysupgrade.tgz silently overwrites
+/// lower-layer files under `/etc/` on every boot, wiping
+/// operator config-push changes. Files under `/etc/oxwrt/` are
+/// NOT in the tgz (sysupgrade.conf lists the dir separately
+/// and the reload survives the extract). Empirically verified
+/// on MT7986 f2fs+overlay by watching upper_size via forensic
+/// logs — oxwrt/urandom.seed persists, oxwrt.toml in /etc/
+/// reverts.
+pub const DEFAULT_PATH: &str = "/etc/oxwrt/oxwrt.toml";
+
+/// Legacy path we read as a fallback for devices flashed before
+/// the primary path moved.
+pub const LEGACY_PATH: &str = "/etc/oxwrt.toml";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -1114,16 +1129,32 @@ impl Wireguard {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Error> {
-        let bytes = std::fs::read(path).map_err(|source| Error::Read {
-            path: path.to_path_buf(),
+        // Resolve: try `path` first, then the legacy /etc/oxwrt.toml
+        // fallback. This lets devices flashed before the DEFAULT_PATH
+        // migration keep reading from /etc/oxwrt.toml while new boots
+        // (or post-config-push writes) land at /etc/oxwrt/oxwrt.toml.
+        let effective: PathBuf = match std::fs::metadata(path) {
+            Ok(_) => path.to_path_buf(),
+            Err(_) if path == Path::new(DEFAULT_PATH) => {
+                let legacy = Path::new(LEGACY_PATH);
+                if std::fs::metadata(legacy).is_ok() {
+                    legacy.to_path_buf()
+                } else {
+                    path.to_path_buf()
+                }
+            }
+            Err(_) => path.to_path_buf(),
+        };
+        let bytes = std::fs::read(&effective).map_err(|source| Error::Read {
+            path: effective.clone(),
             source,
         })?;
         let text = String::from_utf8(bytes).map_err(|e| Error::Read {
-            path: path.to_path_buf(),
+            path: effective.clone(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         })?;
         toml::from_str(&text).map_err(|source| Error::Parse {
-            path: path.to_path_buf(),
+            path: effective,
             source,
         })
     }

@@ -493,7 +493,15 @@ define imagebuilder_stage_bare
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear \
 	         $(IMAGEBUILDER_DIR)/files/lib/preinit
-	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
+	# Install at /etc/oxwrt/oxwrt.toml (NEW canonical path) because
+	# preinit's 80_mount_root silently extracts a sysupgrade.tgz
+	# over /etc on every boot, wiping operator config-push
+	# changes to /etc/oxwrt.toml. Files under /etc/oxwrt/ are not
+	# in that extract and persist. Config::load reads the new
+	# path first, falls back to legacy /etc/oxwrt.toml on devices
+	# flashed before this migration.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt
+	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.toml
 	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	echo control-only > $(IMAGEBUILDER_DIR)/files/etc/oxwrt/mode
@@ -564,7 +572,15 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	# because macOS BSD install lacks -D.)
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin
-	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt.toml
+	# Install at /etc/oxwrt/oxwrt.toml (NEW canonical path) because
+	# preinit's 80_mount_root silently extracts a sysupgrade.tgz
+	# over /etc on every boot, wiping operator config-push
+	# changes to /etc/oxwrt.toml. Files under /etc/oxwrt/ are not
+	# in that extract and persist. Config::load reads the new
+	# path first, falls back to legacy /etc/oxwrt.toml on devices
+	# flashed before this migration.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt
+	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.toml
 	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	# Service binaries at the rootfs-root paths the oxwrt.toml
@@ -777,6 +793,10 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	# `oxctl config-push` or set via CRUD RPCs. Caught during
 	# mwan3 live-verify: pushed configs kept disappearing after
 	# each `apply --confirm`, which silently replaces the file.
+	# /etc/oxwrt/ covers the new config path too (oxwrt.toml moved
+	# to /etc/oxwrt/oxwrt.toml). Legacy /etc/oxwrt.toml still
+	# listed for devices that persisted config there before the
+	# migration — harmless to include and keeps rollback clean.
 	printf "/etc/oxwrt/\n/etc/oxwrt.toml\n" > $(IMAGEBUILDER_DIR)/files/etc/sysupgrade.conf
 	# Pre-provisioned ed25519 seed for the sQUIC server identity. If a
 	# seed exists at provisioning/key.ed25519 on the build host, bake

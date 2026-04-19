@@ -822,52 +822,38 @@ use crate::control::validate::{
 fn atomic_write_config(text: &str) -> Result<(), String> {
     use std::io::Write;
     let path = std::path::Path::new(crate::config::DEFAULT_PATH);
+    // Follow the exact pattern urandom_seed::save uses (which
+    // demonstrably persists across reboots on our target): write
+    // to tmp, fsync tmp, rename, fsync parent dir. The rename
+    // vs truncate-in-place decision here is empirically what's
+    // different between paths that persist and paths that revert
+    // on MT7986 f2fs+overlay; tmp+rename wins.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let tmp_path = path.with_extension("toml.tmp");
-    // fsync discipline: write-to-tmp → fsync tmp → rename → fsync
-    // parent dir. Without any of these, a reboot within seconds
-    // of the config-push can lose the write (observed on Flint 2
-    // f2fs+overlay: config-push → reboot → next-boot config has
-    // the OLD content). std::fs::write alone is just
-    // create+write+close with no sync call.
-    let write_and_fsync = |p: &std::path::Path, body: &str| -> std::io::Result<()> {
+    {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(p)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-        Ok(())
-    };
-    let fsync_dir = |p: &std::path::Path| {
-        if let Some(parent) = p.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-    };
-
-    if let Err(e) = write_and_fsync(&tmp_path, text) {
-        // tmp write failed — try direct overwrite as last resort
-        return write_and_fsync(path, text).map(|_| fsync_dir(path)).map_err(
-            |e2| format!("write config: tmp failed ({e}), direct failed ({e2})"),
-        );
+            .open(&tmp_path)
+            .map_err(|e| format!("open tmp {}: {e}", tmp_path.display()))?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| format!("write tmp: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync tmp: {e}"))?;
     }
-    match std::fs::rename(&tmp_path, path) {
-        Ok(()) => {
-            fsync_dir(path);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            // EBUSY on bind-mounted files — fall back to direct overwrite.
-            // Less atomic but the only option on bind mounts.
-            tracing::debug!(error = %e, "rename failed, falling back to direct write");
-            write_and_fsync(path, text)
-                .map(|_| fsync_dir(path))
-                .map_err(|e2| format!("write config: rename ({e}), direct ({e2})"))
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("rename {} → {}: {e}", tmp_path.display(), path.display())
+    })?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
+    Ok(())
 }
 
 fn handle_config_dump(state: &ControlState) -> Response {
@@ -909,6 +895,24 @@ fn persist_and_swap(state: &ControlState, new_cfg: crate::config::Config, desc: 
     };
     if let Err(e) = atomic_write_config(&toml_text) {
         return Response::Err { message: e };
+    }
+    // Forensic: log size of /etc/oxwrt.toml AND /overlay/upper/etc/oxwrt.toml
+    // right after the write. If only the former matches, the overlay
+    // upper layer isn't receiving the write (would explain the revert
+    // on reboot).
+    {
+        let live_size = std::fs::metadata("/etc/oxwrt.toml")
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let upper_size = std::fs::metadata("/overlay/upper/etc/oxwrt.toml")
+            .map(|m| m.len())
+            .ok();
+        tracing::warn!(
+            expected = toml_text.len(),
+            live = live_size,
+            upper = ?upper_size,
+            "forensic: post-write oxwrt.toml sizes"
+        );
     }
     if let Ok(mut cfg_lock) = state.config.write() {
         *cfg_lock = std::sync::Arc::new(new_cfg);
