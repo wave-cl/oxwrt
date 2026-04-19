@@ -264,10 +264,15 @@ pub struct VpnClient {
     /// a priority lower than the via_vpn iif rules — matched
     /// FIRST, so a bypass-destination packet finds the main
     /// table's WAN default before the iif rule ever sees it.
-    /// Scoped to v4 for v1; `bypass_destinations_v6` is a v2
-    /// follow-up if anyone asks.
     #[serde(default)]
     pub bypass_destinations: Vec<String>,
+    /// IPv6 counterpart to `bypass_destinations`. Rules install
+    /// as `ip -6 rule to <cidr> lookup main priority 500`. Only
+    /// meaningful when `address_v6` is set — otherwise there's
+    /// no v6 tunnel to bypass in the first place. Same dest-
+    /// match-wins-first semantics as the v4 path.
+    #[serde(default)]
+    pub bypass_destinations_v6: Vec<String>,
 }
 
 fn default_vpn_priority() -> u32 {

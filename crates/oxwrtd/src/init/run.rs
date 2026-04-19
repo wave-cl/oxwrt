@@ -574,6 +574,18 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Err(e) = crate::vpn_routing::install_bypass_rules(&handle, &bypass).await {
                 tracing::error!(error = %e, "vpn_routing: bypass rule install failed");
             }
+            let bypass_v6: Vec<String> = cfg
+                .vpn_client
+                .iter()
+                .flat_map(|v| v.bypass_destinations_v6.iter().cloned())
+                .collect();
+            if !bypass_v6.is_empty() {
+                if let Err(e) =
+                    crate::vpn_routing::install_bypass_rules_v6(&handle, &bypass_v6).await
+                {
+                    tracing::error!(error = %e, "vpn_routing: v6 bypass rule install failed");
+                }
+            }
         }
     }
     // MSS clamp on the WAN iface — separate nft table so rustables

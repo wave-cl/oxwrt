@@ -339,6 +339,16 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Err(e) = oxwrt_linux::vpn_routing::install_bypass_rules(&handle, &bypass).await {
             tracing::error!(error = %e, "reload: vpn_routing bypass install failed");
         }
+        let bypass_v6: Vec<String> = new_cfg
+            .vpn_client
+            .iter()
+            .flat_map(|v| v.bypass_destinations_v6.iter().cloned())
+            .collect();
+        if let Err(e) = oxwrt_linux::vpn_routing::install_bypass_rules_v6(&handle, &bypass_v6)
+            .await
+        {
+            tracing::error!(error = %e, "reload: v6 bypass install failed");
+        }
         conn_task.abort();
         // MSS clamp on WAN. Same gate as boot — no point if no
         // vpn_client profile is declared.

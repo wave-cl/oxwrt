@@ -87,6 +87,10 @@ static INSTALLED_BYPASS_RULES: Mutex<Option<HashSet<(Ipv4Addr, u8)>>> = Mutex::n
 /// any vpn_client profile declares `address_v6` — no-op otherwise.
 static INSTALLED_IIF_RULES_V6: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+/// v6 counterpart to INSTALLED_BYPASS_RULES. Tracked separately
+/// because Ipv4Addr and Ipv6Addr aren't the same key type.
+static INSTALLED_BYPASS_RULES_V6: Mutex<Option<HashSet<(Ipv6Addr, u8)>>> = Mutex::new(None);
+
 /// Install one `ip rule iif <zone_iface> lookup 51` per iface of
 /// a via_vpn firewall zone. Idempotent — duplicate adds are
 /// tolerated (EEXIST). Safe to call on every reload because
@@ -594,4 +598,75 @@ pub async fn clear_table_51_default_v6(handle: &Handle) -> Result<(), Error> {
         Err(e) if is_noent(&e) => Ok(()),
         Err(e) => Err(Error::Rtnetlink(e)),
     }
+}
+
+/// v6 counterpart to install_bypass_rules. Same diff + apply
+/// pattern; rules install as `ip -6 rule to <cidr> lookup main
+/// priority 500`. Malformed CIDRs log + skip.
+pub async fn install_bypass_rules_v6(
+    handle: &Handle,
+    bypass_cidrs: &[String],
+) -> Result<(), Error> {
+    let mut new_set: HashSet<(Ipv6Addr, u8)> = HashSet::new();
+    for s in bypass_cidrs {
+        match parse_cidr_v6(s) {
+            Some(parsed) => {
+                new_set.insert(parsed);
+            }
+            None => {
+                tracing::warn!(cidr = %s, "vpn_routing: invalid v6 bypass CIDR; skipped");
+            }
+        }
+    }
+    let old_set = {
+        let guard = INSTALLED_BYPASS_RULES_V6.lock().unwrap();
+        guard.clone().unwrap_or_default()
+    };
+    for (addr, prefix) in old_set.difference(&new_set) {
+        let mut add_builder = handle
+            .rule()
+            .add()
+            .v6()
+            .destination_prefix(*addr, *prefix)
+            .table_id(254) // RT_TABLE_MAIN
+            .priority(VPN_BYPASS_PRIORITY)
+            .action(RuleAction::ToTable);
+        let msg = add_builder.message_mut().clone();
+        match handle.rule().del(msg).execute().await {
+            Ok(()) => tracing::info!(%addr, prefix, "vpn_routing: stale v6 bypass rule removed"),
+            Err(e) if is_noent(&e) => {}
+            Err(e) => {
+                tracing::warn!(%addr, prefix, error = %e, "vpn_routing: v6 bypass del failed");
+            }
+        }
+    }
+    for (addr, prefix) in &new_set {
+        let res = handle
+            .rule()
+            .add()
+            .v6()
+            .destination_prefix(*addr, *prefix)
+            .table_id(254)
+            .priority(VPN_BYPASS_PRIORITY)
+            .action(RuleAction::ToTable)
+            .execute()
+            .await;
+        match res {
+            Ok(()) => tracing::info!(%addr, prefix, "vpn_routing: v6 bypass rule installed"),
+            Err(e) if is_exists(&e) => {}
+            Err(e) => return Err(Error::Rtnetlink(e)),
+        }
+    }
+    *INSTALLED_BYPASS_RULES_V6.lock().unwrap() = Some(new_set);
+    Ok(())
+}
+
+fn parse_cidr_v6(s: &str) -> Option<(Ipv6Addr, u8)> {
+    let (ip_str, prefix_str) = s.split_once('/')?;
+    let ip: Ipv6Addr = ip_str.parse().ok()?;
+    let prefix: u8 = prefix_str.parse().ok()?;
+    if prefix > 128 {
+        return None;
+    }
+    Some((ip, prefix))
 }

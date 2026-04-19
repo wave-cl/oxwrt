@@ -536,6 +536,8 @@ action = "accept"
 #                                    exits. Rules install at lower
 #                                    priority than via_vpn iif so
 #                                    dest match wins first.
+#   bypass_destinations_v6  Vec<String> — IPv6 counterpart; only
+#                                    meaningful with `address_v6`.
 #
 # Example (commented, Mullvad-shaped):
 #
