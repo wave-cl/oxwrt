@@ -294,5 +294,3 @@ fn format_v4_from_attrs(attrs: &[rtnetlink::packet_route::address::AddressAttrib
     }
     "?".to_string()
 }
-
-const LOG_TAIL_LIMIT: usize = 200;

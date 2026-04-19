@@ -2,8 +2,6 @@
 //! /dev/watchdog and pet it every 5s.
 //! Split out of init.rs in step 6.
 
-use super::*;
-
 fn find_inherited_watchdog_fd() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd;
     let rd = std::fs::read_dir("/proc/self/fd").ok()?;

@@ -860,12 +860,9 @@ pub fn format_firewall_dump(cfg: &Config) -> Vec<String> {
                 Action::Dnat => unreachable!(),
             };
             for src_if in &src_ifaces {
-                if is_icmp {
-                    out.push(format!(
-                        "    iif \"{src_if}\" {action_str}   # {}",
-                        rule.name
-                    ));
-                } else if ports.is_empty() && protos.is_empty() {
+                // ICMP rules + no-port-no-proto rules both render as
+                // bare iif+action (no proto/dport bits to add).
+                if is_icmp || (ports.is_empty() && protos.is_empty()) {
                     out.push(format!(
                         "    iif \"{src_if}\" {action_str}   # {}",
                         rule.name

@@ -4,7 +4,6 @@ use super::*;
 
 pub(super) async fn handle_reset(state: &ControlState, confirm: bool) -> Response {
     use crate::config;
-    use std::path::Path;
 
     if !confirm {
         return Response::Err {

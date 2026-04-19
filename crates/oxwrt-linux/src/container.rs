@@ -1304,8 +1304,8 @@ impl PreparedContainer {
             .collect();
 
         let mut env_pairs: Vec<CString> = vec![
-            CString::new(format!("HOME=/")).unwrap(),
-            CString::new(format!("PATH=/usr/bin:/bin")).unwrap(),
+            CString::new("HOME=/".to_string()).unwrap(),
+            CString::new("PATH=/usr/bin:/bin".to_string()).unwrap(),
             CString::new(format!("HOSTNAME={}", spec.name)).unwrap(),
         ];
         for (k, v) in &spec.env {

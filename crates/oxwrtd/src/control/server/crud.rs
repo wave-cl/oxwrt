@@ -920,8 +920,7 @@ pub(super) fn handle_wg_enroll(
     endpoint_host: &str,
     dns: Option<&str>,
 ) -> Response {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     let cfg = state.config_snapshot();
     if cfg.wireguard.is_empty() {

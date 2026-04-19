@@ -462,7 +462,16 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 tracing::error!(iface = %iface, error = %e, "wan dhcp: apply_lease failed");
             }
             *wan_lease_clone.write().unwrap() = Some(lease.clone());
-            let _ = wan_dhcp::spawn_renewal_loop(handle, iface.clone(), lease, wan_lease_clone);
+            // Renewal loop runs as a detached tokio task — the returned
+            // JoinHandle isn't awaited (fire-and-forget). `drop(_)`
+            // over `let _ =` so clippy's non-binding-let-on-future
+            // lint doesn't fire.
+            drop(wan_dhcp::spawn_renewal_loop(
+                handle,
+                iface.clone(),
+                lease,
+                wan_lease_clone,
+            ));
             // SNTP bootstrap once WAN is up. See historical comment:
             // time.cloudflare.com (162.159.200.1) is anycast, no DNS
             // needed, used only to initialize the clock floor before

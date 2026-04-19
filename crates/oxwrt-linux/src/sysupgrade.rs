@@ -265,7 +265,7 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
     // metadata-block start through the 16 trailer bytes.
     let total_trailer_size =
         u32::from_be_bytes([footer[12], footer[13], footer[14], footer[15]]) as u64;
-    if total_trailer_size < 16 || total_trailer_size > 65_536 {
+    if !(16..=65_536).contains(&total_trailer_size) {
         return Err(Error::Fwtool(format!(
             "fwtool trailer size implausible: {total_trailer_size} bytes"
         )));
@@ -745,7 +745,7 @@ fn flash_image(
     // block (64 KiB) alignment is load-bearing — libfstools looks
     // there for either an f2fs magic (continue with existing overlay)
     // or any other bytes (reformat on first boot).
-    let rootfs_blocks = (root_bytes_written + 511) / 512;
+    let rootfs_blocks = root_bytes_written.div_ceil(512);
     let aligned_blocks = (rootfs_blocks + 127) & !127;
     let overlay_off: u64 = aligned_blocks * 512;
 
@@ -806,7 +806,6 @@ fn flash_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     /// Build a synthetic sysupgrade.bin with a minimal fwtool trailer
     /// (big-endian, matching real OpenWrt fwtool output). Not a valid

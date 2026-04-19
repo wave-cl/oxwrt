@@ -116,9 +116,7 @@ impl ControlState {
 // extracted into the oxwrtctl-cli crate, so no caller here uses
 // these on macOS anymore).
 #[cfg(target_os = "linux")]
-pub use oxwrt_proto::{
-    FrameError, default_config_text, format_response, parse_request, read_frame, write_frame,
-};
+pub use oxwrt_proto::{FrameError, default_config_text, read_frame, write_frame};
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]

@@ -587,14 +587,13 @@ async fn recv_expected(
 ) -> Result<Message, Error> {
     let mut buf = vec![0u8; 2048];
     loop {
-        let remaining =
-            deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| match want {
-                    MessageType::Offer => Error::Timeout("OFFER"),
-                    MessageType::Ack => Error::Timeout("ACK"),
-                    _ => Error::Timeout("reply"),
-                })?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(match want {
+                MessageType::Offer => Error::Timeout("OFFER"),
+                MessageType::Ack => Error::Timeout("ACK"),
+                _ => Error::Timeout("reply"),
+            })?;
         let res = tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await;
         let (n, _) = match res {
             Ok(Ok((n, peer))) => (n, peer),

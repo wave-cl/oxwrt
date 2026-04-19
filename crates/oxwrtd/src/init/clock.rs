@@ -1,8 +1,6 @@
 //! Clock bootstrapping: SNTP via anycast + build-epoch floor.
 //! Split out of init.rs in step 6.
 
-use super::*;
-
 pub(super) async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
     use tokio::net::UdpSocket;
     use tokio::time::{Duration, timeout};
@@ -67,13 +65,10 @@ pub(super) async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Locate the /dev/watchdog file descriptor inherited from procd-init.
-///
-/// Walks /proc/self/fd and returns the first entry whose readlink
-/// target matches "/dev/watchdog" (optionally with a trailing " (deleted)"
-/// tag — unlikely here but cheap to tolerate). Returned File takes
-/// ownership of the existing fd via from_raw_fd, so close-on-drop
-
+/// If the system clock is earlier than `BUILD_EPOCH_SECS` (embedded at
+/// build time via the env var), bump it forward. Keeps TLS handshakes
+/// from failing on first boot before SNTP completes, since cert
+/// validation rejects clocks from 1970.
 pub(super) fn bootstrap_clock_floor() {
     const BUILD_EPOCH_SECS: u64 = match u64::from_str_radix(env!("BUILD_EPOCH_SECS"), 10) {
         Ok(v) => v,

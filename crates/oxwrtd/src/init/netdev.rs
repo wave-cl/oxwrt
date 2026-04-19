@@ -1,8 +1,6 @@
 //! Netdev rename from DTS labels + wifi AP interface creation.
 //! Split out of init.rs in step 6.
 
-use super::*;
-
 pub(super) fn rename_netdevs_from_dts() {
     let rd = match std::fs::read_dir("/sys/class/net") {
         Ok(rd) => rd,
@@ -100,25 +98,11 @@ pub(super) fn rename_netdevs_from_dts() {
     });
 }
 
-/// If the rootfs overlay isn't already attached (i.e. /overlay has no
-/// mount entry in /proc/mounts), do a full libfstools-equivalent setup:
-/// find the rootfs partition, locate the overlay region after the
-/// squashfs tail, create a loop device at that offset, detect the
-/// f2fs filesystem on it (or format if first boot / DEADCODE marker),
-/// mount the f2fs, stack overlayfs with `lowerdir=/,upperdir=/overlay/
-/// upper,workdir=/overlay/work`, pivot_root into the stacked tree.
-/// Finally restore any sysupgrade config-backup tgz into upper.
-///
-/// In coexist mode (Stage 1-3), procd-init's preinit pipeline has
-/// already done all this before our pid-1 entry — /proc/mounts will
-/// show an `overlay` mount on `/` and an f2fs mount on /overlay.
-/// Detect and return early with a single info log.
-///
-/// Only the detect path is wired up at this stage. The hot path
-/// is stubbed (with a clear error) until Stage 4, where we actually
-/// remove procd-init and need to own the mount lifecycle. Landing
-/// the function now lets us verify the detection against real boot
-
+/// Create one AP-mode virtual iface per physical wifi radio — one
+/// `{phy}-ap0` per entry under /sys/class/ieee80211. Matches the
+/// naming convention consumed by collect_ap_status + hostapd
+/// config. No-op if `iw` isn't present (dev/test boxes without
+/// wifi kmods) so oxwrtd still boots cleanly.
 pub(super) fn create_wifi_ap_interfaces() {
     let iw_path = std::path::Path::new("/usr/bin/iw");
     if !iw_path.exists() {

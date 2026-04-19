@@ -252,9 +252,13 @@ mod set;
 mod sysupgrade;
 
 // Re-exports for call sites that used to hit these via
-// crate::control::server::build_ping_args etc. (only the
-// diag-binary-arg-builders test needs them).
-pub use diag::{build_drill_args, build_ping_args, build_ss_args, build_traceroute_args};
+// crate::control::server::build_ping_args etc. Only the
+// diag-binary-arg-builders test in control.rs still consumes
+// them, so scope the re-export to `cfg(test)` — keeps clippy's
+// dead-code detector happy in non-test builds without losing
+// test coverage.
+#[cfg(test)]
+pub(crate) use diag::{build_drill_args, build_ping_args, build_ss_args, build_traceroute_args};
 pub use reload::handle_reload_async;
 
 // Submodule-local handlers used by handle_incoming + sync handle()
@@ -531,7 +535,7 @@ fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
                     let mut line = l.line;
                     if line.len() > LAST_LOG_CLIP {
                         line.truncate(LAST_LOG_CLIP);
-                        line.push_str("…");
+                        line.push('…');
                     }
                     line
                 });

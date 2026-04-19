@@ -46,7 +46,7 @@ fn populate_dev_from_sys() {
             let Ok(cpath) = CString::new(devpath.as_bytes()) else {
                 continue;
             };
-            let dev = unsafe { libc::makedev(major, minor) };
+            let dev = libc::makedev(major, minor);
             let rc = unsafe { libc::mknod(cpath.as_ptr(), mode_bits | 0o600, dev) };
             if rc != 0 {
                 let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
@@ -58,25 +58,11 @@ fn populate_dev_from_sys() {
     }
 }
 
-/// Rename network interfaces so their kernel name matches the
-/// DTS-declared label (or `openwrt,netdev-name` property). Equivalent
-/// of the target's /lib/preinit/04_set_netdev_label shell hook.
-///
-/// Walks `/sys/class/net/*/of_node/label` — each entry is one name.
-/// If the current ifname differs from the label, issue RTM_SETLINK
-/// (IFLA_IFNAME) via rtnetlink. Interface must be DOWN for the kernel
-/// to accept a rename; during preinit all interfaces ARE down
-/// (netifd hasn't brought anything up yet), so this is safe before
-/// `net::Net::bring_up`.
-///
-/// Spins its own tokio current-thread runtime — init::run() is sync
-/// and the async main runtime hasn't started yet. Best-effort: a
-/// single bad rename doesn't block the others, and a complete failure
-/// is logged but not propagated.
-///
-/// In coexist, procd-init's preinit already ran this and every
-/// netdev already has its final name. Every iteration here finds
-
+/// Mount the rootfs overlay if procd-init's preinit didn't already do
+/// it for us. Detect via /proc/mounts — skip if an overlay mount is
+/// already present, else engage the full libfstools-equivalent hot
+/// path (loop device, f2fs, overlayfs, pivot_root, config-backup
+/// restore). Stage 4+ (pid1-standalone) always takes the hot path.
 pub(super) fn mount_root_if_needed() -> Result<(), Error> {
     if overlay_is_attached()? {
         tracing::info!("mount_root: rootfs overlay already attached upstream; skipping");
@@ -116,7 +102,6 @@ pub(super) fn mount_root_if_needed() -> Result<(), Error> {
 fn mount_root_hot_path() -> Result<(), Error> {
     use rustix::mount::{MountFlags, mount, mount_move};
     use std::io::{Read, Seek, SeekFrom};
-    use std::os::fd::AsRawFd;
 
     // 1. Rootfs partition.
     let rootfs_dev = crate::sysupgrade::resolve_partition("rootfs")
@@ -442,8 +427,6 @@ fn extract_tgz_over_root(bytes: &[u8]) -> Result<(), Error> {
     let mut ar = tar::Archive::new(gz);
     ar.unpack("/").map_err(Error::Io)
 }
-
-/// Parse /proc/mounts looking for an overlayfs mount on `/`. That's
 
 /// Parse /proc/mounts looking for an overlayfs mount on `/`. That's
 /// what fstools leaves us with after its pivot_root: root filesystem
