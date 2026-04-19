@@ -52,6 +52,22 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
 
     let addr: SocketAddr = remote.parse().map_err(|_| Error::Address(remote.clone()))?;
 
+    // Intercept `vpn-profile import <name> <conf>` before parse_request
+    // sees it — this is a multi-RPC orchestration (key upload + config
+    // dump + config push), not a single RPC, and doesn't fit the
+    // Request enum.
+    if cmd == "vpn-profile" && rest.first().map(|s| s.as_str()) == Some("import") {
+        let name = rest
+            .get(1)
+            .cloned()
+            .ok_or_else(|| Error::Rpc("vpn-profile import: missing <name>".into()))?;
+        let conf_path = rest
+            .get(2)
+            .cloned()
+            .ok_or_else(|| Error::Rpc("vpn-profile import: missing <conf-path>".into()))?;
+        return handle_vpn_profile_import(addr, name, conf_path).await;
+    }
+
     let server_key_hex = std::env::var("SQUIC_SERVER_KEY").map_err(|_| Error::MissingServerKey)?;
     let server_key = parse_pubkey(&server_key_hex)?;
 
@@ -199,4 +215,150 @@ fn parse_pubkey(hex_str: &str) -> Result<[u8; 32], Error> {
     bytes
         .try_into()
         .map_err(|_| Error::InvalidServerKey("expected 32 bytes".to_string()))
+}
+
+/// Drive the three-RPC `vpn-profile import` orchestration on a
+/// single sQUIC connection. Each RPC goes on its own bi-stream.
+///
+/// If any step fails the function returns Err and the operator
+/// sees a clear message — we don't try to unwind / rollback
+/// partial state (e.g. a succeeded key upload + failed config push
+/// leaves a stray key file on the router, which is harmless: the
+/// key isn't wired to any profile until a corresponding config
+/// push names it, and the operator can re-run the same command).
+async fn handle_vpn_profile_import(
+    addr: SocketAddr,
+    name: String,
+    conf_path: String,
+) -> Result<(), Error> {
+    use crate::vpn_import::{merge_vpn_block, parse_conf, render_block};
+
+    // Name validation mirrors the server's (see handle_vpn_key_upload
+    // in oxwrtd/src/control/server/mod.rs). Rejecting locally is
+    // friendlier than round-tripping and seeing a remote error.
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(Error::Rpc(format!(
+            "vpn-profile import: invalid name {:?} (alphanum + _ - only)",
+            name
+        )));
+    }
+
+    // 1. Parse the .conf locally. Fails fast on missing fields
+    //    before we waste a round trip.
+    let text = std::fs::read_to_string(&conf_path)
+        .map_err(|e| Error::Rpc(format!("read {conf_path}: {e}")))?;
+    let parsed = parse_conf(&text).map_err(Error::Rpc)?;
+
+    // 2. Dial once, run all three RPCs on separate bi-streams.
+    let server_key_hex = std::env::var("SQUIC_SERVER_KEY").map_err(|_| Error::MissingServerKey)?;
+    let server_key = parse_pubkey(&server_key_hex)?;
+    let mut config = squic::Config::default();
+    if let Ok(client_key) = std::env::var("SQUIC_CLIENT_KEY") {
+        config.client_key = Some(client_key);
+    }
+    let conn = squic::dial(addr, &server_key, config).await?;
+
+    // 2a. VpnKeyUpload.
+    {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(squic::Error::from)?;
+        let req = Request::VpnKeyUpload {
+            name: name.clone(),
+            private_key_b64: parsed.private_key.clone(),
+        };
+        write_frame(&mut send, &req).await?;
+        send.finish().map_err(|e| Error::Rpc(e.to_string()))?;
+        match read_frame::<_, Response>(&mut recv).await {
+            Ok(Response::Ok) => eprintln!("vpn-profile import: key uploaded"),
+            Ok(Response::Err { message }) => {
+                return Err(Error::Rpc(format!("vpn-key-upload: {message}")));
+            }
+            Ok(other) => return Err(Error::Rpc(format!("unexpected response: {other:?}"))),
+            Err(e) => return Err(Error::Frame(e)),
+        }
+    }
+
+    // 2b. ConfigDump — get current oxwrt.toml text.
+    let existing_toml: String = {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(squic::Error::from)?;
+        write_frame(&mut send, &Request::ConfigDump).await?;
+        send.finish().map_err(|e| Error::Rpc(e.to_string()))?;
+        match read_frame::<_, Response>(&mut recv).await {
+            Ok(Response::Value { value }) => value,
+            Ok(Response::Err { message }) => {
+                return Err(Error::Rpc(format!("config-dump: {message}")));
+            }
+            Ok(other) => return Err(Error::Rpc(format!("unexpected response: {other:?}"))),
+            Err(e) => return Err(Error::Frame(e)),
+        }
+    };
+
+    // 3. Merge the new [[vpn_client]] block.
+    //    Default iface = "wgvpn<N>" where N is the current count
+    //    of vpn_client entries (so a first import gets wgvpn0, a
+    //    second wgvpn1, etc.). Priority defaults to 100 for the
+    //    first, 200 for the second, etc. — matches the mwan2
+    //    convention so failover "just works" when the operator
+    //    imports multiple profiles.
+    let existing_count = existing_toml
+        .lines()
+        .filter(|l| l.trim() == "[[vpn_client]]")
+        .count();
+    // If the profile name already exists we're REPLACING it, so
+    // the count doesn't grow — reuse the existing iface + priority
+    // rather than bumping.
+    let existing_idx = find_existing_profile_idx(&existing_toml, &name);
+    let (iface, priority) = match existing_idx {
+        Some(i) => (format!("wgvpn{i}"), 100u32 + (i as u32) * 100),
+        None => (
+            format!("wgvpn{existing_count}"),
+            100u32 + (existing_count as u32) * 100,
+        ),
+    };
+    let key_path = format!("/etc/oxwrt/vpn/{}.key", name);
+    let new_block = render_block(&name, &iface, priority, &parsed, &key_path);
+    let merged = merge_vpn_block(&existing_toml, &name, &new_block).map_err(Error::Rpc)?;
+
+    // 4. ConfigPush the merged TOML.
+    {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(squic::Error::from)?;
+        let req = Request::ConfigPush { toml: merged };
+        write_frame(&mut send, &req).await?;
+        send.finish().map_err(|e| Error::Rpc(e.to_string()))?;
+        match read_frame::<_, Response>(&mut recv).await {
+            Ok(Response::Ok) => {}
+            Ok(Response::Err { message }) => {
+                return Err(Error::Rpc(format!("config-push: {message}")));
+            }
+            Ok(other) => return Err(Error::Rpc(format!("unexpected response: {other:?}"))),
+            Err(e) => return Err(Error::Frame(e)),
+        }
+    }
+
+    conn.close(0u32.into(), b"bye");
+    eprintln!(
+        "vpn-profile import: profile {:?} merged as iface {} priority {}",
+        name, iface, priority
+    );
+    eprintln!("vpn-profile import: run `oxctl {} reload` to activate.", addr);
+    Ok(())
+}
+
+/// Scan an oxwrt.toml text for an existing `[[vpn_client]]` block
+/// with the given name; return its zero-based index among all
+/// `[[vpn_client]]` entries, or None. Matches what `merge_vpn_block`
+/// does for replace semantics — we just need the index to reuse
+/// the iface + priority slot.
+fn find_existing_profile_idx(toml: &str, name: &str) -> Option<usize> {
+    let doc: toml_edit::DocumentMut = toml.parse().ok()?;
+    let arr = doc.get("vpn_client")?.as_array_of_tables()?;
+    arr.iter().position(|t| {
+        t.get("name")
+            .and_then(|i| i.as_value())
+            .and_then(|v| v.as_str())
+            == Some(name)
+    })
 }

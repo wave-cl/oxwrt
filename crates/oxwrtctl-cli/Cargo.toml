@@ -41,3 +41,8 @@ base64.workspace = true
 # Local QR rendering for `wg-enroll --qr`. No-std-friendly,
 # no transitive deps worth noting.
 qrcodegen = "1"
+# .conf (wg-quick) parsing + TOML edit for `vpn-profile import`.
+# toml_edit preserves comments / formatting so merging an imported
+# profile into an operator's hand-written oxwrt.toml doesn't wipe
+# their inline notes.
+toml_edit.workspace = true

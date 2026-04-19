@@ -14,6 +14,7 @@
 
 pub mod client;
 pub mod qr;
+pub mod vpn_import;
 
 pub use client::{Error, run};
 
