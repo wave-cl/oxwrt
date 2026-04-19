@@ -1,25 +1,35 @@
 //! Policy routing for the client-side VPN feature.
 //!
-//! Traffic from firewall zones flagged `via_vpn = true` is marked
-//! (fwmark 0x1a) in the nftables forward chain, then a single
-//! `ip rule fwmark 0x1a lookup 51` diverts those packets into
-//! routing table 51, whose default route points at the currently-
-//! active vpn_client iface.
+//! For each firewall zone flagged `via_vpn = true`, we install
+//! `ip rule iif <zone_iface> lookup 51` — any forwarded packet
+//! arriving on that iface uses routing table 51 for its next-hop
+//! decision. Table 51's default points at the currently-active
+//! vpn_client iface (set by the coordinator), with a blackhole
+//! fallback at a worse metric so kill-switch stays in effect
+//! when no profile is healthy.
 //!
-//! Why fwmark + separate table instead of swapping the main-table
-//! default:
-//!   - LAN zones without `via_vpn` keep using the WAN default
+//! iif-based rules over fwmark-based:
+//!   - Simpler. No nftables marking required; the routing
+//!     decision happens at the kernel's routing layer where the
+//!     iif is already known.
+//!   - Correctness: fwmark stamped in a forward chain runs AFTER
+//!     the routing decision is made, so the mark wouldn't affect
+//!     routing at all. Would need a mangle/prerouting chain to
+//!     work, which adds another chain + another hook.
+//!   - LAN zones without via_vpn keep using the WAN default
 //!     regardless of tunnel state — no split-tunnel config.
-//!   - Router-originated traffic (SSH from WAN, oxctl callbacks)
-//!     stays on WAN — no marking.
-//!   - Kill-switch is a property of table 51: a blackhole
-//!     fallback route lives there permanently at a worse metric,
-//!     so when no profile is active the table still "routes"
-//!     marked traffic — just into /dev/null.
+//!   - Router-originated traffic (output path) has no iif so
+//!     these rules don't match. oxctl callbacks, sQUIC, NTP all
+//!     stay on WAN.
 //!
 //! Ordering inside this module:
-//!   - `install_policy_rule` + `install_table_51_blackhole` run
-//!     ONCE at init. Idempotent (EEXIST tolerated) so reload is safe.
+//!   - `install_policy_rules` + `install_table_51_blackhole` run
+//!     on every reload and at boot. Each per-iface rule is
+//!     idempotent (EEXIST tolerated). Stale rules from a
+//!     previous via_vpn=true that's now false are currently NOT
+//!     cleaned — operators changing that flag live should reboot
+//!     for the cleanest result. Follow-up: track installed rules
+//!     on ControlState and diff.
 //!   - `set_table_51_default` + `clear_table_51_default` are called
 //!     by the coordinator on active-profile change.
 //!   - `install_endpoint_exemption` is called by the coordinator
@@ -39,57 +49,61 @@ use rtnetlink::{Error as RtError, Handle, RouteMessageBuilder};
 
 use crate::net::Error;
 
-/// Fwmark value stamped on via_vpn-zone traffic. Picked from the
-/// top of the private-use range (most routing-mark examples use
-/// 1..=255; we go higher so we don't collide with anything an
-/// operator hand-adds).
-pub const VPN_FWMARK: u32 = 0x1a;
-
 /// Routing table that holds the VPN default route. Any table ID
 /// 1..=2^31 not already in use works; 51 is far enough from the
 /// reserved main (254) / local (255) / default (253) tables to
 /// avoid confusion in `ip route show table all`.
 pub const VPN_TABLE: u32 = 51;
 
-/// Priority the ip rule sits at in the lookup order. Lower =
+/// Priority the iif rules sit at in the lookup order. Lower =
 /// earlier. The default `main` lookup is at 32766; sitting at
-/// 1000 means our fwmark rule runs first but still leaves
-/// headroom for an operator to squeeze rules in front.
+/// 1000 means our iif rule runs first but still leaves headroom
+/// for an operator to squeeze rules in front.
 pub const VPN_RULE_PRIORITY: u32 = 1000;
 
-/// Install the `ip rule fwmark 0x1a lookup 51` rule. Idempotent:
-/// the "File exists" error from a duplicate add is tolerated.
-/// Call once at boot before any `set_table_51_default` — the
-/// rule being present earlier is harmless (table 51 is empty
-/// until the coordinator populates it, so traffic falls through
-/// to `main`).
-pub async fn install_policy_rule(handle: &Handle) -> Result<(), Error> {
-    let res = handle
-        .rule()
-        .add()
-        .v4()
-        .fw_mark(VPN_FWMARK)
-        .table_id(VPN_TABLE)
-        .priority(VPN_RULE_PRIORITY)
-        .action(RuleAction::ToTable)
-        .execute()
-        .await;
-    match res {
-        Ok(()) => {
-            tracing::info!(
-                mark = format_args!("0x{:x}", VPN_FWMARK),
-                table = VPN_TABLE,
-                priority = VPN_RULE_PRIORITY,
-                "vpn_routing: policy rule installed"
-            );
-            Ok(())
+/// Install one `ip rule iif <zone_iface> lookup 51` per iface of
+/// a via_vpn firewall zone. Idempotent — duplicate adds are
+/// tolerated (EEXIST). Safe to call on every reload because
+/// adding a rule that already exists is a no-op.
+///
+/// Caveat: this function doesn't CLEAN UP rules for ifaces that
+/// were via_vpn in the previous config and aren't anymore. Live-
+/// toggling the flag off requires a reboot (the stale rule stays
+/// until then, which is harmless because table 51 still has the
+/// kill-switch blackhole so the worst case is "zone uses VPN
+/// when it shouldn't"). Follow-up: track installed rules on
+/// ControlState and diff on reload.
+pub async fn install_policy_rules(
+    handle: &Handle,
+    via_vpn_ifaces: &[String],
+) -> Result<(), Error> {
+    for iface in via_vpn_ifaces {
+        let res = handle
+            .rule()
+            .add()
+            .v4()
+            .input_interface(iface.clone())
+            .table_id(VPN_TABLE)
+            .priority(VPN_RULE_PRIORITY)
+            .action(RuleAction::ToTable)
+            .execute()
+            .await;
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    iif = %iface,
+                    table = VPN_TABLE,
+                    priority = VPN_RULE_PRIORITY,
+                    "vpn_routing: iif policy rule installed"
+                );
+            }
+            Err(e) if is_exists(&e) => {
+                tracing::debug!(iif = %iface, "vpn_routing: iif rule already present");
+            }
+            Err(e) => return Err(Error::Rtnetlink(e)),
         }
-        Err(e) if is_exists(&e) => {
-            tracing::debug!("vpn_routing: policy rule already present");
-            Ok(())
-        }
-        Err(e) => Err(Error::Rtnetlink(e)),
     }
+    Ok(())
 }
 
 /// Plant the kill-switch fallback: a blackhole default in table

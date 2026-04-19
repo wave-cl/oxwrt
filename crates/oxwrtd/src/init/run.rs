@@ -523,19 +523,26 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "vpn_client setup failed; tunnels disabled");
     }
 
-    // One-time policy-routing scaffolding for the via_vpn feature.
-    // Both calls are idempotent across reload + across reboot —
-    // the fwmark rule and the blackhole fallback are installed
-    // even when no `[[vpn_client]]` profile is declared, so toggling
-    // the feature on via `config-push` + `reload` doesn't need a
-    // reboot to pick up the routing rule. Scoped to `if let Some(net)`
-    // so the builder isn't accidentally invoked during rtnetlink-
-    // unavailable degraded-mode operation.
+    // Policy-routing scaffolding for the via_vpn feature. Per
+    // via_vpn zone, install `ip rule iif <iface> lookup 51`; plant
+    // a blackhole default in table 51 so when no profile is
+    // active marked traffic is kill-switched instead of falling
+    // through to main. Both calls are idempotent across reload +
+    // reboot. Scoped to `if let Some(net)` so we don't invoke
+    // without rtnetlink.
     if let Some(net_handle) = &net {
         if !cfg.vpn_client.is_empty() || cfg.firewall.zones.iter().any(|z| z.via_vpn) {
             let handle = net_handle.handle().clone();
-            if let Err(e) = crate::vpn_routing::install_policy_rule(&handle).await {
-                tracing::error!(error = %e, "vpn_routing: policy rule install failed");
+            let via_vpn_ifaces: Vec<String> = cfg
+                .firewall
+                .zones
+                .iter()
+                .filter(|z| z.via_vpn)
+                .flat_map(|z| crate::net::zone_ifaces(&cfg, &z.name))
+                .collect();
+            if let Err(e) = crate::vpn_routing::install_policy_rules(&handle, &via_vpn_ifaces).await
+            {
+                tracing::error!(error = %e, "vpn_routing: policy rules install failed");
             }
             if let Err(e) = crate::vpn_routing::install_table_51_blackhole(&handle).await {
                 tracing::error!(error = %e, "vpn_routing: blackhole fallback install failed");

@@ -572,46 +572,6 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
     }
 
-    // Per-zone fwmark stamping for the via_vpn feature. For every
-    // zone with `via_vpn = true`, prepend a forward-chain rule
-    // that sets meta mark = VPN_FWMARK (0x1a) on packets arriving
-    // on any of the zone's ifaces. The fwmark routes the packet
-    // through table 51 (installed by vpn_routing::install_policy_rule
-    // at boot), whose default points at the active vpn_client iface.
-    //
-    // Runs BEFORE the user-declared firewall.rules so that flow-
-    // control operators (accept/drop) see a marked packet; they're
-    // free to ct-state-accept an established flow without losing
-    // its routing. Doesn't yet handle ct mark stickiness — flows
-    // spanning a profile transition may flap between tables; that
-    // edge case lands in commit 3 alongside the killswitch.
-    for zone in &cfg.firewall.zones {
-        if !zone.via_vpn {
-            continue;
-        }
-        for iface in zone_ifaces(cfg, &zone.name) {
-            // "meta mark set 0x1a" =
-            //   Immediate: load 0x1a into Reg1
-            //   Meta { key=Mark, sreg=Reg1 }: write Reg1 to skb mark
-            let mark_bytes = crate::vpn_routing::VPN_FWMARK.to_le_bytes().to_vec();
-            Rule::new(&forward)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .iiface(&iface)
-                .map_err(|e| Error::Firewall(e.to_string()))?
-                .with_expr(rustables::expr::Immediate::new_data(
-                    mark_bytes,
-                    rustables::expr::Register::Reg1,
-                ))
-                .with_expr(
-                    rustables::expr::Meta::default()
-                        .with_key(rustables::expr::MetaType::Mark)
-                        .with_sreg(rustables::expr::Register::Reg1),
-                )
-                .add_to_batch(&mut batch);
-            tracing::debug!(zone = %zone.name, %iface, "via_vpn fwmark rule emitted");
-        }
-    }
-
     // Emit each config rule into the right chain.
     for rule in &cfg.firewall.rules {
         // ct_state rules go into both input + forward.
@@ -848,12 +808,63 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
     }
 
+    // Kill-switch for via_vpn zones. For each zone × each declared
+    // vpn_client iface, emit a FORWARD accept (so packets routed
+    // through the tunnel by the ip rule above leave cleanly).
+    // Then a final `iifname $zone_iface drop` catches anything
+    // that tried to leave by some other oif — the accept rules
+    // above, the kernel's blackhole fallback in table 51, AND
+    // this drop layer mean a broken tunnel takes three
+    // misconfigurations to leak.
+    //
+    // Return-path traffic (established flows initiated by LAN
+    // clients and coming back in) is accepted earlier by the
+    // ct-state rules — nftables evaluates rules top-down and
+    // takes the first verdict, so established accept beats this
+    // drop for response packets.
+    if cfg.firewall.zones.iter().any(|z| z.via_vpn) {
+        let vpn_ifaces: Vec<String> =
+            cfg.vpn_client.iter().map(|v| v.iface.clone()).collect();
+        for zone in &cfg.firewall.zones {
+            if !zone.via_vpn {
+                continue;
+            }
+            for zone_if in zone_ifaces(cfg, &zone.name) {
+                // Accept-first for each vpn iface.
+                for vpn_if in &vpn_ifaces {
+                    Rule::new(&forward)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .iiface(&zone_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .oiface(vpn_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .accept()
+                        .add_to_batch(&mut batch);
+                }
+                // Drop everything else out of this zone.
+                Rule::new(&forward)
+                    .map_err(|e| Error::Firewall(e.to_string()))?
+                    .iiface(&zone_if)
+                    .map_err(|e| Error::Firewall(e.to_string()))?
+                    .drop()
+                    .add_to_batch(&mut batch);
+                tracing::debug!(
+                    zone = %zone.name,
+                    iface = %zone_if,
+                    vpn_ifaces = vpn_ifaces.len(),
+                    "via_vpn killswitch rules emitted"
+                );
+            }
+        }
+    }
+
     batch.send().map_err(|e| Error::Firewall(e.to_string()))?;
     tracing::info!(
         zones = cfg.firewall.zones.len(),
         rules = cfg.firewall.rules.len(),
         port_forwards = cfg.port_forwards.len(),
         wg_ports = cfg.wireguard.len(),
+        via_vpn_zones = cfg.firewall.zones.iter().filter(|z| z.via_vpn).count(),
         "nftables inet filter installed"
     );
 
@@ -905,9 +916,29 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .filter(|r| r.action == Action::Dnat && r.dnat_target.is_some())
         .collect();
 
+    // Via-VPN DNS redirection: for every `via_vpn = true` zone,
+    // rewrite outbound port-53 (udp + tcp) to the highest-priority
+    // vpn_client profile's `dns[0]`. Catches hardcoded-8.8.8.8
+    // clients that ignore the DHCP-pushed resolver; their query
+    // packet's destination is rewritten to the provider DNS, then
+    // the ip rule at the iif layer routes it through the tunnel.
+    //
+    // When the active profile changes, the DNAT target doesn't —
+    // clients transiently resolve via whatever DNS this points at,
+    // which is correct for same-provider failover and suboptimal
+    // but not leaky for cross-provider. Runtime DNAT rewriting is
+    // deferred to a follow-up.
+    let via_vpn_dns_target: Option<Ipv4Addr> = cfg
+        .vpn_client
+        .iter()
+        .min_by_key(|v| v.priority)
+        .and_then(|v| v.dns.first().copied());
+    let need_via_vpn_dns = via_vpn_dns_target.is_some()
+        && cfg.firewall.zones.iter().any(|z| z.via_vpn);
+
     // Build the DNAT table if EITHER legacy DNAT rules or port-forwards
-    // need it. Two sources, one table.
-    if !dnat_rules.is_empty() || !cfg.port_forwards.is_empty() {
+    // or via_vpn-DNS redirection need it. Three sources, one table.
+    if !dnat_rules.is_empty() || !cfg.port_forwards.is_empty() || need_via_vpn_dns {
         let dnat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-dnat");
         let mut dnat_batch = Batch::new();
         dnat_batch.add(&dnat_table, MsgType::Add);
@@ -1015,6 +1046,47 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             tracing::info!(pf = %pf.name, external = pf.external_port, target = %pf.internal, "port-forward DNAT emitted");
         }
 
+        // Via-VPN DNS DNAT. Rewrite port-53 from via_vpn zones to
+        // the provider DNS. Emitted on the prerouting chain so
+        // the rewrite happens before the routing decision (the
+        // iif ip rule then diverts the rewritten packet into the
+        // VPN table). Both UDP and TCP since some resolvers fall
+        // through to TCP on large responses.
+        if let Some(vpn_dns) = via_vpn_dns_target {
+            let dns_ip_bytes = vpn_dns.octets().to_vec();
+            let dns_port_bytes = 53u16.to_be_bytes().to_vec();
+            for zone in &cfg.firewall.zones {
+                if !zone.via_vpn {
+                    continue;
+                }
+                for zone_if in zone_ifaces(cfg, &zone.name) {
+                    for &proto in &[rustables::Protocol::UDP, rustables::Protocol::TCP] {
+                        let nat_expr = Nat::default()
+                            .with_nat_type(NatType::DNat)
+                            .with_family(ProtocolFamily::Ipv4)
+                            .with_ip_register(Register::Reg1)
+                            .with_port_register(Register::Reg2);
+                        Rule::new(&prerouting)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .iiface(&zone_if)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .dport(53, proto)
+                            .with_expr(Immediate::new_data(
+                                dns_ip_bytes.clone(),
+                                Register::Reg1,
+                            ))
+                            .with_expr(Immediate::new_data(
+                                dns_port_bytes.clone(),
+                                Register::Reg2,
+                            ))
+                            .with_expr(nat_expr)
+                            .add_to_batch(&mut dnat_batch);
+                    }
+                    tracing::debug!(zone = %zone.name, iface = %zone_if, target = %vpn_dns, "via_vpn DNS DNAT emitted");
+                }
+            }
+        }
+
         dnat_batch.send().map_err(|e| {
             tracing::error!(error = %e, "nftables DNAT batch send failed");
             Error::Firewall(e.to_string())
@@ -1022,6 +1094,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         tracing::info!(
             rule_dnat = dnat_rules.len(),
             port_forwards = cfg.port_forwards.len(),
+            via_vpn_dns = via_vpn_dns_target.is_some(),
             "nftables DNAT installed"
         );
     }
@@ -1235,7 +1308,7 @@ fn ipv4_in_subnet(ip: Ipv4Addr, subnet: Ipv4Addr, prefix: u8) -> bool {
 
 /// Resolve a zone name to the set of interface names it covers.
 /// Uses the unified `cfg.network(name)` helper to look up any network.
-fn zone_ifaces(cfg: &Config, zone_name: &str) -> Vec<String> {
+pub fn zone_ifaces(cfg: &Config, zone_name: &str) -> Vec<String> {
     // First check if a firewall zone with this name exists; if so,
     // resolve its `networks` list.
     if let Some(zone) = cfg.firewall.zones.iter().find(|z| z.name == zone_name) {

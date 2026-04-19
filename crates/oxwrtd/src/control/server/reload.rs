@@ -223,6 +223,41 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         tracing::error!(error = %e, "reload: vpn_client reapply failed");
     }
 
+    // Phase 3a.2: policy-routing scaffolding for via_vpn zones.
+    // Same idempotent add pattern as at boot — EEXIST tolerated.
+    // Reload is the only moment a via_vpn=true flag can appear
+    // mid-run, so this re-add picks it up. Stale rules from a
+    // flag-off aren't cleaned (documented limitation).
+    if !new_cfg.vpn_client.is_empty() || new_cfg.firewall.zones.iter().any(|z| z.via_vpn) {
+        use oxwrt_linux::net::zone_ifaces;
+        let (connection, handle, _messages) = match rtnetlink::new_connection() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "reload: vpn_routing rtnetlink failed");
+                return Response::Err {
+                    message: format!("reload: vpn_routing rtnetlink: {e}"),
+                };
+            }
+        };
+        let conn_task = tokio::spawn(connection);
+        let via_vpn_ifaces: Vec<String> = new_cfg
+            .firewall
+            .zones
+            .iter()
+            .filter(|z| z.via_vpn)
+            .flat_map(|z| zone_ifaces(&new_cfg, &z.name))
+            .collect();
+        if let Err(e) =
+            oxwrt_linux::vpn_routing::install_policy_rules(&handle, &via_vpn_ifaces).await
+        {
+            tracing::error!(error = %e, "reload: vpn_routing policy rules failed");
+        }
+        if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole(&handle).await {
+            tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
+        }
+        conn_task.abort();
+    }
+
     // Regenerate corerad config from new_cfg.networks' ipv6_*
     // fields. The corerad service picks it up on its next restart;
     // supervisor::from_config below replays the service list so this
