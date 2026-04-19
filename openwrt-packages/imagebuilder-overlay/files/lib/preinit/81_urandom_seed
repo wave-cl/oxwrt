@@ -32,9 +32,17 @@ _do_urandom_seed() {
 
 do_urandom_seed() {
     [ -c /dev/urandom ] || { log_urandom_seed "Something is wrong with /dev/urandom"; return; }
+    # Primary path: /etc/oxwrt/urandom.seed — written by oxwrtd's
+    # urandom_seed saver every 30 min. Lives under /etc/oxwrt/
+    # so our /etc/sysupgrade.conf's "/etc/oxwrt/" entry preserves
+    # it across sysupgrade without a dedicated keep-list entry.
+    _do_urandom_seed "/etc/oxwrt/urandom.seed"
+    # Fallback: the legacy /etc/urandom.seed path, for devices
+    # upgraded from an old oxwrtd that wrote there. Harmless to
+    # try both — _do_urandom_seed is a no-op when the file is
+    # absent.
     _do_urandom_seed "/etc/urandom.seed"
     # stock: SEED="$(uci -q get system.@system[0].urandom_seed)"
-    # stock: [ "${SEED:0:1}" = "/" -a "$SEED" != "/etc/urandom.seed" ] && _do_urandom_seed "$SEED"
     # dropped — we don't run uci.
 }
 

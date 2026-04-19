@@ -38,6 +38,7 @@ pub mod net;
 pub mod sqm;
 pub mod static_routes;
 pub mod sysupgrade;
+pub mod urandom_seed;
 pub mod wan_dhcp;
 pub mod wan_dhcp6;
 pub mod wifi;

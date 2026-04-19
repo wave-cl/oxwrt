@@ -7,7 +7,7 @@ pub use oxwrt_api::{config, rpc};
 #[cfg(target_os = "linux")]
 pub use oxwrt_linux::{
     blocklists, container, corerad, logd, metrics_state, miniupnpd, net, sqm, static_routes,
-    sysupgrade, wan_dhcp, wan_dhcp6, wifi, wireguard,
+    sysupgrade, urandom_seed, wan_dhcp, wan_dhcp6, wifi, wireguard,
 };
 mod control;
 
@@ -115,8 +115,13 @@ fn init_tracing() {
     // Timer: suppressed in kmsg mode (kernel adds its own); Uptime
     // in stderr mode so dev builds still see meaningful timestamps
     // without the wall-clock 1970 problem before NTP sync.
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
+    // Default: info-level for our own crates, warn for transitive
+    // deps. `oxwrt_linux=info` matters because modules like
+    // `urandom_seed`, `wan_dhcp`, `blocklists` live there and their
+    // once-per-event info lines are useful operator signal — prior
+    // to this, those messages were silently dropped.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,oxwrt_linux=info,warn"));
     if let Some(writer) = KmsgMakeWriter::try_new() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)

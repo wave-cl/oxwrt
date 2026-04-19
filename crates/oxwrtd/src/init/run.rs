@@ -706,6 +706,15 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // and `curl http://router:9100/metrics` return consistent data.
     crate::metrics::spawn(state.clone());
 
+    // Persistent urandom seed. Periodic writes to
+    // /etc/urandom.seed so the next boot's preinit finds a warm
+    // CRNG seed to feed into /dev/urandom — closes the "Seed
+    // file not found" gap on every first-after-flash boot. Also
+    // means unexpected power-cycles preserve up to 30 min of
+    // entropy freshness. Fire-and-forget: task lives for the
+    // process lifetime, no explicit abort on shutdown.
+    let _ = crate::urandom_seed::spawn_saver();
+
     // AP-state watcher. Fires a warn-log if any expected AP iface
     // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s
     // past boot. Caught today's MT7986 DFS-CAC-stuck bug cold; without
