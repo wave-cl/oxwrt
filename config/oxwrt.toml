@@ -302,6 +302,23 @@ action = "accept"
 # src = "wan"                      # default "wan"
 # dest = "lan"                     # default auto-detected from internal IP
 
+# ---------------- Static routes ----------------
+#
+# Extra IPv4 routes on top of what the kernel installs automatically
+# (on-link routes from addresses, default route from WAN DHCP). Each
+# entry is `{ dest, prefix, gateway?, iface, metric }`. Reconciled on
+# every reload: routes that disappear from config get removed from
+# the kernel. No IPv6 yet — duplicate pattern coming when needed.
+#
+# Example (commented):
+#
+# [[routes]]
+# dest = "10.20.0.0"
+# prefix = 16
+# gateway = "10.8.0.1"              # optional; omit for onlink route
+# iface = "wg0"
+# metric = 200                      # default 1024
+
 # ---------------- WireGuard ----------------
 #
 # Each [[wireguard]] entry is one wg interface (e.g. wg0) with a list

@@ -71,7 +71,45 @@ pub struct Config {
     /// (typically bind to the LAN IP + allow only LAN queries).
     #[serde(default)]
     pub metrics: Option<Metrics>,
+    /// Static IPv4 routes installed at boot and reconciled on reload.
+    /// Covers the common OpenWrt use cases of "route 10.20.0.0/16 via
+    /// my VPN gateway" and "policy route subnet X out iface Y". IPv6
+    /// gets its own `[[routes6]]` whenever someone needs it — same
+    /// shape, different address type. Empty = no extra routes beyond
+    /// the kernel's on-link + DHCP-installed default.
+    #[serde(default)]
+    pub routes: Vec<Route>,
     pub control: Control,
+}
+
+/// Static IPv4 route declaration. Output iface is required (kernel
+/// needs it for an onlink route, and for a via-gateway route it
+/// disambiguates which link to use when the gateway is reachable
+/// through multiple ifaces — common with multi-WAN / VPN overlays).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Route {
+    /// Network address (e.g. 10.20.0.0). Must align with `prefix` —
+    /// validated at install time, not parse time.
+    pub dest: Ipv4Addr,
+    /// Prefix length, 0..=32. `0` = default route (unusual; WAN DHCP
+    /// already installs one). `32` = host route.
+    pub prefix: u8,
+    /// Next-hop gateway. `None` = on-link route (dest is directly
+    /// reachable on `iface`, no router in between).
+    #[serde(default)]
+    pub gateway: Option<Ipv4Addr>,
+    /// Output interface. Required — see struct-level doc.
+    pub iface: String,
+    /// Route metric. Lower wins when multiple routes match. Default
+    /// 1024 matches iproute2's convention for operator-installed
+    /// static routes (kernel default routes are metric 0, DHCP
+    /// installs at metric 100-ish).
+    #[serde(default = "default_route_metric")]
+    pub metric: u32,
+}
+
+fn default_route_metric() -> u32 {
+    1024
 }
 
 /// Prometheus `/metrics` endpoint configuration.

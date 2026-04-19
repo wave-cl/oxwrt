@@ -576,6 +576,19 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         Vec::new()
     };
 
+    // Static routes: install after WAN bring-up + firewall. If a route
+    // targets a gateway reachable only via WAN, and WAN DHCP is still
+    // in progress at this point, the add returns ENETUNREACH — we log
+    // warn and the reconcile on the next `reload` picks it up once WAN
+    // is live. This is fine because real deployments that need routes
+    // synchronized with WAN acquisition use the DHCP client's own
+    // classless-static-routes handling instead.
+    if let Some(ref net) = net {
+        if let Err(e) = crate::static_routes::install(&cfg, net.handle()).await {
+            tracing::error!(error = %e, "static_routes install failed");
+        }
+    }
+
     // Pre-create host-side veth for every Isolated service + enable
     // forwarding + install NAT MASQUERADE. These are one-shot boot steps;
     // the per-spawn peer move/config happens inside `container::spawn`.

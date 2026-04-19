@@ -385,6 +385,7 @@ mod tests {
             wireguard: vec![],
             ddns: vec![],
             metrics: None,
+            routes: vec![],
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),

@@ -135,6 +135,29 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         tracing::error!(error = %e, "reload: sqm reapply failed");
     }
 
+    // Reconcile static routes: del routes that disappeared from
+    // new_cfg, add the ones that appeared. Unchanged routes are left
+    // alone so a config change that doesn't touch `[[routes]]`
+    // produces zero kernel route-table churn.
+    {
+        let (connection, handle, _messages) = match rtnetlink::new_connection() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "reload: static_routes rtnetlink failed");
+                return Response::Err {
+                    message: format!("reload: static_routes rtnetlink: {e}"),
+                };
+            }
+        };
+        let conn_task = tokio::spawn(connection);
+        if let Err(e) = crate::static_routes::reload(&new_cfg, &handle).await {
+            tracing::error!(error = %e, "reload: static_routes reload failed");
+            // Non-fatal: logged and skipped. Same policy as sqm —
+            // a bad route shouldn't block the rest of reload.
+        }
+        conn_task.abort();
+    }
+
     // Phase 3b: regenerate per-phy hostapd.conf files at
     // /etc/oxwrt/hostapd/. Must run BEFORE phase 4 (supervisor rebuild)
     // so when the new hostapd-5g / hostapd-2g services come up they
