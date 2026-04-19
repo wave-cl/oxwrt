@@ -13,6 +13,7 @@
 //! Linux-glibc, Linux-musl — without cross toolchains.
 
 pub mod client;
+pub mod mullvad;
 pub mod qr;
 pub mod vpn_import;
 

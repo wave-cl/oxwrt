@@ -68,6 +68,29 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
         return handle_vpn_profile_import(addr, name, conf_path).await;
     }
 
+    // Mullvad relay list — hits api.mullvad.net, no router RPC.
+    // Supports --country=XX --city=XX --limit=N --include-inactive.
+    if cmd == "mullvad-relays" {
+        return handle_mullvad_relays(&rest).await;
+    }
+
+    // Switch an existing vpn_client profile to a different Mullvad
+    // relay by hostname. Looks up via API, updates endpoint +
+    // public_key in place, config-dumps + merges + config-pushes.
+    // Private key / address / DNS stay as-is because Mullvad uses
+    // one account-level keypair for all relays.
+    if cmd == "vpn-switch-relay" {
+        let profile = rest
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::Rpc("vpn-switch-relay: missing <profile>".into()))?;
+        let hostname = rest
+            .get(1)
+            .cloned()
+            .ok_or_else(|| Error::Rpc("vpn-switch-relay: missing <relay-hostname>".into()))?;
+        return handle_vpn_switch_relay(addr, profile, hostname).await;
+    }
+
     let server_key_hex = std::env::var("SQUIC_SERVER_KEY").map_err(|_| Error::MissingServerKey)?;
     let server_key = parse_pubkey(&server_key_hex)?;
 
@@ -361,4 +384,181 @@ fn find_existing_profile_idx(toml: &str, name: &str) -> Option<usize> {
             .and_then(|v| v.as_str())
             == Some(name)
     })
+}
+
+/// Parse `--flag=value` or `--flag value` pairs out of a slice of
+/// argv tokens. Returns the matched value and the remaining args
+/// minus the flag. Simple — oxctl isn't a general-purpose CLI
+/// framework; clap/structopt would be overkill for two
+/// subcommands with ≤3 flags apiece.
+fn pull_flag(args: &[String], name: &str) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        if let Some(rest) = a.strip_prefix(&format!("--{name}=")) {
+            return Some(rest.to_string());
+        }
+        if a == &format!("--{name}") {
+            return args.get(i + 1).cloned();
+        }
+    }
+    None
+}
+
+fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == &format!("--{name}"))
+}
+
+/// Handle `oxctl <remote> mullvad-relays [--country=XX] [--city=XX]
+/// [--limit=N] [--include-inactive]`.
+///
+/// Takes a remote address parameter only for syntactic symmetry
+/// with other oxctl commands — the router isn't involved. Hits
+/// api.mullvad.net directly, prints a formatted table to stdout.
+async fn handle_mullvad_relays(rest: &[String]) -> Result<(), Error> {
+    use crate::mullvad;
+    let country = pull_flag(rest, "country");
+    let city = pull_flag(rest, "city");
+    let include_inactive = has_flag(rest, "include-inactive");
+    let limit: usize = pull_flag(rest, "limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(usize::MAX);
+
+    let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
+    let filtered = mullvad::filter_relays(
+        &relays.wireguard.relays,
+        country.as_deref(),
+        city.as_deref(),
+        include_inactive,
+    );
+    // Header + one line per relay. Fixed-width columns so the
+    // output pipes into `column -t` / `awk` without surprises.
+    println!(
+        "{:<22} {:<3} {:<4} {:<20} {:<6} {}",
+        "hostname", "cc", "city", "ipv4", "active", "pubkey"
+    );
+    for r in filtered.iter().take(limit) {
+        println!(
+            "{:<22} {:<3} {:<4} {:<20} {:<6} {}",
+            r.hostname,
+            r.country_code().unwrap_or("?"),
+            r.city_code().unwrap_or("?"),
+            r.ipv4_addr_in.as_deref().unwrap_or("?"),
+            if r.active { "yes" } else { "no" },
+            r.public_key.as_deref().unwrap_or("?"),
+        );
+    }
+    eprintln!(
+        "({} relays, {} shown)",
+        filtered.len(),
+        filtered.len().min(limit)
+    );
+    Ok(())
+}
+
+/// Handle `oxctl <remote> vpn-switch-relay <profile> <hostname>`.
+///
+/// Looks up the relay in Mullvad's list, confirms it exists,
+/// then does ConfigDump + toml_edit patch + ConfigPush to rewrite
+/// JUST `endpoint` and `public_key` on the named profile. All
+/// other fields (private_key path, address, DNS, probe_target,
+/// priority) are preserved — Mullvad uses one account-level
+/// keypair across all relays.
+async fn handle_vpn_switch_relay(
+    addr: SocketAddr,
+    profile: String,
+    hostname: String,
+) -> Result<(), Error> {
+    use crate::mullvad;
+
+    // 1. API lookup — fail early before touching the router.
+    let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
+    let relay = mullvad::find_by_hostname(&relays.wireguard.relays, &hostname)
+        .ok_or_else(|| {
+            Error::Rpc(format!(
+                "vpn-switch-relay: no Mullvad relay with hostname {:?}",
+                hostname
+            ))
+        })?;
+    let new_endpoint_ip = relay
+        .ipv4_addr_in
+        .clone()
+        .ok_or_else(|| Error::Rpc(format!("relay {hostname} has no ipv4_addr_in")))?;
+    let new_pubkey = relay
+        .public_key
+        .clone()
+        .ok_or_else(|| Error::Rpc(format!("relay {hostname} has no public_key")))?;
+    let new_endpoint = format!("{}:{}", new_endpoint_ip, mullvad::MULLVAD_WG_PORT);
+
+    // 2. Dial router, ConfigDump, patch, ConfigPush. Same pattern
+    //    as vpn-profile import but smaller — only two field edits.
+    let server_key_hex = std::env::var("SQUIC_SERVER_KEY").map_err(|_| Error::MissingServerKey)?;
+    let server_key = parse_pubkey(&server_key_hex)?;
+    let mut squic_config = squic::Config::default();
+    if let Ok(client_key) = std::env::var("SQUIC_CLIENT_KEY") {
+        squic_config.client_key = Some(client_key);
+    }
+    let conn = squic::dial(addr, &server_key, squic_config).await?;
+
+    let existing_toml: String = {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(squic::Error::from)?;
+        write_frame(&mut send, &Request::ConfigDump).await?;
+        send.finish().map_err(|e| Error::Rpc(e.to_string()))?;
+        match read_frame::<_, Response>(&mut recv).await {
+            Ok(Response::Value { value }) => value,
+            Ok(Response::Err { message }) => {
+                return Err(Error::Rpc(format!("config-dump: {message}")));
+            }
+            Ok(other) => return Err(Error::Rpc(format!("unexpected: {other:?}"))),
+            Err(e) => return Err(Error::Frame(e)),
+        }
+    };
+
+    // 3. Patch the matching [[vpn_client]] block's endpoint +
+    //    public_key via toml_edit so comments/order elsewhere
+    //    survive. Reject if the profile isn't found — don't
+    //    silently append as a new one, that's `vpn-profile import`
+    //    territory.
+    let mut doc: toml_edit::DocumentMut = existing_toml
+        .parse()
+        .map_err(|e| Error::Rpc(format!("parse oxwrt.toml: {e}")))?;
+    let arr = doc
+        .get_mut("vpn_client")
+        .and_then(|i| i.as_array_of_tables_mut())
+        .ok_or_else(|| Error::Rpc("no [[vpn_client]] entries in config".into()))?;
+    let target = arr.iter_mut().find(|t| {
+        t.get("name")
+            .and_then(|i| i.as_value())
+            .and_then(|v| v.as_str())
+            == Some(profile.as_str())
+    });
+    let Some(target) = target else {
+        return Err(Error::Rpc(format!(
+            "vpn-switch-relay: profile {:?} not found",
+            profile
+        )));
+    };
+    target["endpoint"] = toml_edit::value(new_endpoint.clone());
+    target["public_key"] = toml_edit::value(new_pubkey.clone());
+    let merged = doc.to_string();
+
+    // 4. ConfigPush.
+    {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(squic::Error::from)?;
+        write_frame(&mut send, &Request::ConfigPush { toml: merged }).await?;
+        send.finish().map_err(|e| Error::Rpc(e.to_string()))?;
+        match read_frame::<_, Response>(&mut recv).await {
+            Ok(Response::Ok) => {}
+            Ok(Response::Err { message }) => {
+                return Err(Error::Rpc(format!("config-push: {message}")));
+            }
+            Ok(other) => return Err(Error::Rpc(format!("unexpected: {other:?}"))),
+            Err(e) => return Err(Error::Frame(e)),
+        }
+    }
+    conn.close(0u32.into(), b"bye");
+    eprintln!(
+        "vpn-switch-relay: profile {:?} → {} ({})",
+        profile, hostname, new_endpoint
+    );
+    eprintln!("vpn-switch-relay: run `oxctl {} reload` to activate.", addr);
+    Ok(())
 }
