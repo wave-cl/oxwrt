@@ -311,6 +311,24 @@ authorized_keys = "{authorized_keys}"
     )
 }
 
+/// Human-readable byte formatter for Status output. Scales to
+/// KB/MB/GB/TB with 1 decimal; stays in bytes below 1 KiB so tiny
+/// counters don't show as "0.0 KB". Kept terse — the Status
+/// display has limited width.
+fn human_bytes(b: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    if b < 1024 {
+        return format!("{b} B");
+    }
+    let mut v = b as f64;
+    let mut u = 0usize;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.1} {}", UNITS[u])
+}
+
 pub fn format_response(resp: &Response) -> String {
     match resp {
         Response::Ok => "ok".to_string(),
@@ -321,6 +339,7 @@ pub fn format_response(resp: &Response) -> String {
             wan,
             firewall_rules,
             aps,
+            wg,
         } => {
             let mut out = String::new();
             out.push_str(&format!(
@@ -360,6 +379,43 @@ pub fn format_response(resp: &Response) -> String {
                             String::new()
                         },
                     ));
+                }
+            }
+            if !wg.is_empty() {
+                out.push_str("wireguard:\n");
+                for iface in wg {
+                    out.push_str(&format!(
+                        "  {:<10} :{} ({} peers)\n",
+                        iface.iface,
+                        iface.listen_port,
+                        iface.peers.len()
+                    ));
+                    for peer in &iface.peers {
+                        // Render handshake age as human text. Three
+                        // buckets: live (<5 min), stale (<30 days),
+                        // never. "never" includes config-only peers
+                        // that haven't dialed in yet.
+                        let hs = match peer.last_handshake_secs_ago {
+                            None => "never".to_string(),
+                            Some(s) if s < 300 => format!("{}s ago", s),
+                            Some(s) if s < 3600 => format!("{}m ago", s / 60),
+                            Some(s) if s < 86400 => format!("{}h ago", s / 3600),
+                            Some(s) => format!("{}d ago", s / 86400),
+                        };
+                        let endpoint = if peer.endpoint.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            peer.endpoint.clone()
+                        };
+                        out.push_str(&format!(
+                            "    {:<16} hs={:<10} rx={} tx={} ep={}\n",
+                            peer.name,
+                            hs,
+                            human_bytes(peer.rx_bytes),
+                            human_bytes(peer.tx_bytes),
+                            endpoint
+                        ));
+                    }
                 }
             }
             if services.is_empty() {

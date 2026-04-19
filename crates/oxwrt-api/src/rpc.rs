@@ -168,6 +168,16 @@ pub enum Response {
         /// short of associating a client and seeing it fail.
         #[serde(default)]
         aps: Vec<ApStatus>,
+        /// Per-WireGuard-iface live peer state. One entry per
+        /// declared `[[wireguard]]` iface; each contains zero or more
+        /// peers as surfaced by `wg show <iface> dump`. "last
+        /// handshake = never" tells you at a glance which clients
+        /// have never come up; a stale rx_bytes suggests an asymmetric
+        /// MTU issue; a "huge tx_bytes, tiny rx_bytes" pattern
+        /// typically means the peer's routing is pointing the wrong
+        /// direction.
+        #[serde(default)]
+        wg: Vec<WgIfaceStatus>,
     },
     LogLine {
         line: String,
@@ -234,6 +244,40 @@ pub struct ApStatus {
     /// beaconing AP, "down" pre-bring-up or post-CAC-fail,
     /// "unknown" when kernel hasn't classified it yet.
     pub operstate: String,
+}
+
+/// One WireGuard iface's live state. `iface` is the kernel iface
+/// name (e.g. "wg0"), `listen_port` is the bound UDP port. `peers`
+/// mirrors the `[[wireguard.peers]]` declared in config, with live
+/// fields filled in from `wg show dump` output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WgIfaceStatus {
+    pub iface: String,
+    #[serde(default)]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub peers: Vec<WgPeerStatus>,
+}
+
+/// One peer on a WireGuard iface. `name` is the operator-supplied
+/// label from the CRUD config; `pubkey` is the cryptographic
+/// identity. `endpoint` is the last-seen remote address; empty when
+/// the peer has never connected. `last_handshake_secs_ago` is None
+/// for a peer that's never handshaked (cold peer, config-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WgPeerStatus {
+    pub name: String,
+    pub pubkey: String,
+    #[serde(default)]
+    pub endpoint: String,
+    /// Seconds since the last successful handshake with this peer.
+    /// None = never. `Some(very_large)` means the tunnel is idle.
+    #[serde(default)]
+    pub last_handshake_secs_ago: Option<u64>,
+    #[serde(default)]
+    pub rx_bytes: u64,
+    #[serde(default)]
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

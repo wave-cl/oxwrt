@@ -146,6 +146,34 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             }
             Response::Value { value: out }
         }
+        "wg" => {
+            use std::process::Command;
+            let iface = args.first().map(|s| s.as_str()).unwrap_or("wg0");
+            match Command::new("wg").args(["show", iface]).output() {
+                Ok(o) if o.status.success() => Response::Value {
+                    value: format!(
+                        "--- wg show {iface} ---\n{}\n--- wg show {iface} dump ---\n{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        {
+                            let d = Command::new("wg").args(["show", iface, "dump"]).output();
+                            match d {
+                                Ok(dd) => String::from_utf8_lossy(&dd.stdout).to_string(),
+                                Err(e) => format!("(dump: {e})"),
+                            }
+                        }
+                    ),
+                },
+                Ok(o) => Response::Err {
+                    message: format!(
+                        "diag wg: wg show {iface} failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                },
+                Err(e) => Response::Err {
+                    message: format!("diag wg: spawn wg: {e}"),
+                },
+            }
+        }
         "qdisc" => {
             // Dump the tc qdisc state for every iface. Useful for
             // verifying SQM/CAKE is actually installed, checking

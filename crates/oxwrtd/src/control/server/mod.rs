@@ -300,12 +300,14 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
                 });
             let firewall_rules = state.firewall_dump.read().unwrap().len();
             let aps = collect_ap_status(&state.config_snapshot());
+            let wg = collect_wg_status(&state.config_snapshot());
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
                 wan,
                 firewall_rules,
                 aps,
+                wg,
             }]
         }
         Request::Logs { service, follow } => handle_logs(state, &service, follow),
@@ -585,6 +587,113 @@ pub(crate) fn collect_ap_status(cfg: &crate::config::Config) -> Vec<crate::rpc::
             }
         })
         .collect()
+}
+
+/// For each `[[wireguard]]` entry, shell out to `wg show <iface>
+/// dump` to pull live peer state. Parse the tab-separated output
+/// and correlate pubkey back to the peer name from cfg.
+///
+/// Output format (hard-coded in wireguard-tools' wg(8)):
+///   line 1: <priv> <pub> <listen_port> <fwmark>
+///   lines 2..: <peer_pub> <psk> <endpoint> <allowed_ips>
+///              <last_handshake_unix> <rx> <tx> <persistent_keepalive>
+/// Empty fields render as "(none)" or "0". Handshake unix timestamp
+/// of 0 means "never".
+///
+/// Error paths: missing `wg` binary, iface doesn't exist, or wg
+/// isn't available are all logged debug + produce an empty entry
+/// (the iface still shows up in Status as declared, just with no
+/// peers) — a missing binary shouldn't fail the whole Status RPC.
+pub(crate) fn collect_wg_status(cfg: &crate::config::Config) -> Vec<crate::rpc::WgIfaceStatus> {
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut out = Vec::with_capacity(cfg.wireguard.len());
+    for wg in &cfg.wireguard {
+        let iface = wg.iface.as_deref().unwrap_or(&wg.name).to_string();
+        let result = Command::new("wg").args(["show", &iface, "dump"]).output();
+        let output = match result {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                tracing::debug!(
+                    iface,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "wg show dump non-zero exit"
+                );
+                out.push(crate::rpc::WgIfaceStatus {
+                    iface,
+                    listen_port: wg.listen_port,
+                    peers: Vec::new(),
+                });
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(iface, error = %e, "wg show dump spawn failed");
+                out.push(crate::rpc::WgIfaceStatus {
+                    iface,
+                    listen_port: wg.listen_port,
+                    peers: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut lines = text.lines();
+
+        // Interface line (skip — we already have listen_port from cfg).
+        let _ = lines.next();
+
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut peers = Vec::new();
+        for line in lines {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 7 {
+                continue;
+            }
+            let pubkey = f[0].to_string();
+            let endpoint = if f[2] == "(none)" {
+                String::new()
+            } else {
+                f[2].to_string()
+            };
+            let last_handshake_unix: u64 = f[4].parse().unwrap_or(0);
+            let last_handshake_secs_ago = if last_handshake_unix == 0 {
+                None
+            } else {
+                Some(now_unix.saturating_sub(last_handshake_unix))
+            };
+            let rx_bytes: u64 = f[5].parse().unwrap_or(0);
+            let tx_bytes: u64 = f[6].parse().unwrap_or(0);
+            // Match back to the operator-supplied name via pubkey.
+            // Unknown pubkeys (shouldn't happen unless someone poked
+            // `wg` directly) render with name = "(unknown)" so they
+            // still show up in status.
+            let name = wg
+                .peers
+                .iter()
+                .find(|p| p.pubkey == pubkey)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            peers.push(crate::rpc::WgPeerStatus {
+                name,
+                pubkey,
+                endpoint,
+                last_handshake_secs_ago,
+                rx_bytes,
+                tx_bytes,
+            });
+        }
+        out.push(crate::rpc::WgIfaceStatus {
+            iface,
+            listen_port: wg.listen_port,
+            peers,
+        });
+    }
+    out
 }
 
 fn load_or_create_signing_key(path: &Path) -> Result<SigningKey, Error> {
