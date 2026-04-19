@@ -892,6 +892,39 @@ target = "/etc/ntp.toml"
 [services.security]
 caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 
+# --- upnpd: UPnP IGD + NAT-PMP daemon (commented, opt-in) ---
+#
+# miniupnpd serves UPnP / NAT-PMP / PCP to LAN clients so games and
+# p2p apps get WAN port mappings on demand. Binary is cross-built
+# by `make services-upnpd` (pulls Alpine's aarch64-musl miniupnpd
+# 2.3.x) and staged at /usr/lib/oxwrt/services/upnpd/rootfs/.
+#
+# Requires the `[upnp]` block at the top of this file to be
+# uncommented too — that's the source of truth for wan/lan ifaces
+# + port range. oxwrtd regenerates /etc/oxwrt/miniupnpd.conf from
+# `[upnp]` at boot + every reload.
+#
+# net_mode=host: miniupnpd receives LAN-side SSDP multicast on
+# :1900 and writes nftables rules into `oxwrt-upnpd` — both need
+# the host netns. The table is separate from oxwrt-dnat so our
+# firewall reloads don't wipe miniupnpd's transient mappings.
+#
+# [[services]]
+# name = "upnpd"
+# rootfs = "/usr/lib/oxwrt/services/upnpd/rootfs"
+# entrypoint = ["/sbin/miniupnpd", "-f", "/etc/miniupnpd/miniupnpd.conf", "-d"]
+# net_mode = "host"
+# memory_max = 33554432
+# pids_max = 16
+# depends_on = []
+#
+# [[services.binds]]
+# source = "/etc/oxwrt/miniupnpd.conf"
+# target = "/etc/miniupnpd/miniupnpd.conf"
+#
+# [services.security]
+# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW"]
+
 # --- debug-ssh: dropbear escape hatch for bring-up ---
 #
 # Runs under the same supervisor as any other service so an operator
@@ -958,13 +991,18 @@ landlock = false
 # DNAT rules into a dedicated `oxwrt-upnpd` nftables table so its
 # transient mappings never collide with static forwards.
 #
-# The miniupnpd binary is not bundled in oxwrt today — the schema
-# + config rendering land first so operators shipping their own
-# build have a /etc/oxwrt/miniupnpd.conf waiting. Adding the
-# services-upnpd cross-build to the Makefile + a matching
-# [[services]] entry here is tracked as a follow-up.
+# Scaffolding is in place — `make services-upnpd` cross-builds
+# miniupnpd from Alpine, the oxwrt-linux renderer generates
+# /etc/oxwrt/miniupnpd.conf, and UUID persists at
+# /etc/oxwrt/miniupnpd.uuid. BUT Alpine ships miniupnpd with the
+# iptables backend only, which doesn't compose with our pure-
+# nftables firewall. Enabling the service today fails with
+# "invalid option ... upnp_nftables_family=inet".
 #
-# Example (commented):
+# To ship: swap the `services-upnpd` target to a from-source build
+# configured with `--firewall=nftables` against libnftnl. Tracked
+# follow-up; the schema + [[services]] template below are ready
+# to flip the moment the binary is.
 #
 # [upnp]
 # wan = "eth1"                    # WAN iface (outside)

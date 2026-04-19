@@ -79,7 +79,7 @@ AR_AARCH64     ?= $(shell command -v /Users/c/homebrew/opt/binutils/bin/ar 2>/de
 
 .PHONY: services-stage services-dns services-ntp services-dhcp services-debug-ssh services-corerad services-hostapd
 
-services-stage: services-dns services-ntp services-dhcp services-debug-ssh services-corerad services-hostapd
+services-stage: services-dns services-ntp services-dhcp services-debug-ssh services-corerad services-hostapd services-upnpd
 
 # ── hostapd (wifi AP daemon) ────────────────────────────────────────
 #
@@ -129,6 +129,50 @@ $(BUILD_SERVICES)/hostapd/sbin/hostapd:
 	@echo ""
 	@echo "Staged hostapd under $(BUILD_SERVICES)/hostapd/:"
 	@find $(BUILD_SERVICES)/hostapd -type f -ls
+
+# ── miniupnpd (UPnP IGD + NAT-PMP daemon) ───────────────────────────
+#
+# Alpine ships only the iptables-backend miniupnpd package —
+# `miniupnpd` (default) and `miniupnpd-iptables` are both iptables,
+# there's no aarch64 nftables variant in 3.20 or 3.21. Since our
+# firewall is pure nftables, the two don't compose (miniupnpd
+# would install into iptables; oxwrt lives in nftables; nft_compat
+# can bridge but the "single source of truth" property breaks).
+#
+# Staged as a placeholder so operators who compile their own
+# nftables-backend miniupnpd from source can drop the binary in
+# and wire up [[services]] upnpd. Follow-up: source-build target
+# pulling libnftnl-dev + libmnl-dev from Alpine and running
+# `./configure --firewall=nftables` against miniupnpd 2.3.x.
+#
+# miniupnpd also links against libuuid for its device-uuid
+# generation; we pull it alongside so the container rootfs is
+# self-contained.
+#
+# Output layout (build-services/upnpd/):
+#   sbin/miniupnpd
+#   lib/libnftnl.so.*
+#   lib/libmnl.so.*
+#   lib/libuuid.so.1
+#   lib/ld-musl-aarch64.so.1
+services-upnpd: $(BUILD_SERVICES)/upnpd/sbin/miniupnpd
+$(BUILD_SERVICES)/upnpd/sbin/miniupnpd:
+	mkdir -p $(BUILD_SERVICES)/upnpd/sbin $(BUILD_SERVICES)/upnpd/lib
+	docker run --rm --platform linux/arm64 \
+		-v $(CURDIR)/$(BUILD_SERVICES)/upnpd:/out \
+		alpine:3.20 sh -c '\
+		apk add --no-cache miniupnpd libuuid && \
+		cp /usr/sbin/miniupnpd /out/sbin/miniupnpd && \
+		cp /lib/ld-musl-aarch64.so.1 /out/lib/ld-musl-aarch64.so.1 && \
+		for lib in $$(ldd /usr/sbin/miniupnpd 2>/dev/null | awk "/=>/{print \$$3}"); do \
+			case "$$lib" in \
+				/lib/ld-musl-*|/lib/libc.musl-*) ;; \
+				*) [ -f "$$lib" ] && cp -n "$$lib" /out/lib/ || true ;; \
+			esac; \
+		done'
+	@echo ""
+	@echo "Staged miniupnpd under $(BUILD_SERVICES)/upnpd/:"
+	@find $(BUILD_SERVICES)/upnpd -type f -ls
 
 # ── CoreRAD (IPv6 Router Advertisement daemon) ──────────────────────
 #
@@ -585,7 +629,7 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
 	# Service binaries at the rootfs-root paths the oxwrt.toml
 	# entrypoints expect.
-	for svc in dns ntp dhcp corerad hostapd; do \
+	for svc in dns ntp dhcp corerad hostapd upnpd; do \
 		mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc \
 		         $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/tmp; \
 		chmod 1777 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/tmp; \
@@ -604,6 +648,23 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	   $(BUILD_SERVICES)/hostapd/lib/libcrypto.so.3 \
 	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/lib/
 	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/hostapd/rootfs/sbin/hostapd
+	# miniupnpd container: binary + .so deps. Same shape as hostapd.
+	mkdir -p $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/sbin \
+	         $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/lib \
+	         $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/etc/miniupnpd
+	cp $(BUILD_SERVICES)/upnpd/sbin/miniupnpd \
+	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/sbin/miniupnpd
+	cp $(BUILD_SERVICES)/upnpd/lib/ld-musl-aarch64.so.1 \
+	   $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/lib/
+	# Copy all remaining .so deps that were pulled into the stage
+	# dir (libuuid, libip4tc, libip6tc, and anything else apk
+	# happened to drop in). Wildcard-safe: only one ld-musl-* exists.
+	for lib in $(BUILD_SERVICES)/upnpd/lib/*.so*; do \
+		case "$$(basename $$lib)" in ld-musl-*|libc.musl-*) ;; \
+		*) cp "$$lib" $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/lib/ ;; \
+		esac; \
+	done
+	chmod 0755 $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/upnpd/rootfs/sbin/miniupnpd
 	# hostapd ctrl socket lives on each container's tmpfs /tmp — no
 	# host-side dir needed. Previously staged under /etc/oxwrt/ but
 	# that broke sysupgrade's config-backup tar step (UNIX domain
@@ -674,7 +735,7 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	touch $(IMAGEBUILDER_DIR)/files/etc/oxwrt/coredhcp/leases.txt
 	# Minimal passwd/group inside service rootfs (see per-package
 	# Makefiles for rationale — musl static getpwnam reads /etc/passwd).
-	for svc in dns ntp dhcp corerad hostapd; do \
+	for svc in dns ntp dhcp corerad hostapd upnpd; do \
 		printf 'root:x:0:0:root:/:/bin/false\nnobody:x:65534:65534:nobody:/:/bin/false\n' \
 			> $(IMAGEBUILDER_DIR)/files/usr/lib/oxwrt/services/$$svc/rootfs/etc/passwd; \
 		printf 'root:x:0:\nnobody:x:65534:\n' \
