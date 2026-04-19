@@ -79,6 +79,11 @@ pub async fn install(cfg: &Config) -> Result<(), Error> {
                     name = %bl.name, url = %bl.url, count = cidrs.len(),
                     "blocklist: fetched"
                 );
+                crate::metrics_state::record_blocklist_fetch(
+                    &bl.name,
+                    "ok",
+                    Some(cidrs.len()),
+                );
                 entries.push((bl.name.clone(), cidrs));
             }
             Err(e) => {
@@ -86,6 +91,7 @@ pub async fn install(cfg: &Config) -> Result<(), Error> {
                     name = %bl.name, url = %bl.url, error = %e,
                     "blocklist: fetch failed, installing empty set"
                 );
+                crate::metrics_state::record_blocklist_fetch(&bl.name, "http_error", Some(0));
                 entries.push((bl.name.clone(), Vec::new()));
             }
         }
@@ -124,14 +130,33 @@ pub fn spawn_refreshers(cfg: Arc<Config>) -> Vec<tokio::task::JoinHandle<()>> {
                 tokio::time::sleep(interval).await;
                 match fetch_and_parse(&client, &bl).await {
                     Ok(cidrs) => {
+                        let count = cidrs.len();
                         if let Err(e) = update_set(&bl.name, &cidrs) {
                             tracing::warn!(name = %bl.name, error = %e, "blocklist: set update failed");
+                            // nft apply failed: treat like a parse
+                            // error for metrics — we didn't end up
+                            // with fresh entries installed.
+                            crate::metrics_state::record_blocklist_fetch(
+                                &bl.name,
+                                "parse_error",
+                                None,
+                            );
                         } else {
-                            tracing::info!(name = %bl.name, count = cidrs.len(), "blocklist: refreshed");
+                            tracing::info!(name = %bl.name, count, "blocklist: refreshed");
+                            crate::metrics_state::record_blocklist_fetch(
+                                &bl.name,
+                                "ok",
+                                Some(count),
+                            );
                         }
                     }
                     Err(e) => {
                         tracing::warn!(name = %bl.name, error = %e, "blocklist: refresh fetch failed");
+                        crate::metrics_state::record_blocklist_fetch(
+                            &bl.name,
+                            "http_error",
+                            None,
+                        );
                     }
                 }
             }

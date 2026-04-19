@@ -911,8 +911,8 @@ landlock = false
 # WAN. Exports service state, AP operstate, WAN lease, WG handshakes,
 # firewall rule count. Comment out to disable.
 #
-# [metrics]
-# listen = "192.168.50.1:9100"
+[metrics]
+listen = "192.168.50.1:9100"
 
 # ---------------- Control plane ----------------
 #

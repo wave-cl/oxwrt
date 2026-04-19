@@ -83,6 +83,24 @@ pub async fn acquire(
     iface_name: &str,
     overall_timeout: Duration,
 ) -> Result<DhcpLease, Error> {
+    let start = Instant::now();
+    let result = acquire_inner(handle, iface_name, overall_timeout).await;
+    let elapsed = start.elapsed();
+    let label: &'static str = match &result {
+        Ok(_) => "ok",
+        Err(Error::Timeout(_)) => "timeout",
+        Err(_) => "error",
+    };
+    let latency = matches!(&result, Ok(_)).then_some(elapsed);
+    crate::metrics_state::record_dhcp_acquire(iface_name, label, latency);
+    result
+}
+
+async fn acquire_inner(
+    handle: &Handle,
+    iface_name: &str,
+    overall_timeout: Duration,
+) -> Result<DhcpLease, Error> {
     let (iface_idx, hw_addr) = get_iface_mac(handle, iface_name).await?;
 
     // Wait for the iface to have a carrier before firing DISCOVER.

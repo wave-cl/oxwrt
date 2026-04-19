@@ -276,7 +276,121 @@ fn render(state: &ControlState) -> String {
         }
     }
 
+    // ── In-process counters (metrics_state) ─────────────────────────
+    // Reload, DHCP acquire, blocklist-fetch counters. One cheap
+    // snapshot() clone out of the global Mutex keeps the critical
+    // section short during a scrape.
+    let m = crate::metrics_state::snapshot();
+    render_counters(&mut out, &m);
+
     out
+}
+
+/// Extracted for unit testing: emit the metrics_state snapshot as
+/// Prometheus text. Pure over the snapshot type — no globals read.
+fn render_counters(out: &mut String, m: &crate::metrics_state::MetricsState) {
+    use std::fmt::Write;
+
+    // Reload counters ─────────────────────────────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_reloads_total Cumulative reload RPCs by result.\n\
+         # TYPE oxwrt_reloads_total counter\n\
+         oxwrt_reloads_total{{result=\"ok\"}} {}\n\
+         oxwrt_reloads_total{{result=\"error\"}} {}",
+        m.reloads_ok_total, m.reloads_err_total,
+    );
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_reload_last_duration_seconds Wall-clock duration of the most recent reload.\n\
+         # TYPE oxwrt_reload_last_duration_seconds gauge\n\
+         oxwrt_reload_last_duration_seconds {:.3}",
+        m.reload_last_duration_ms as f64 / 1000.0,
+    );
+
+    // DHCP acquire counters ───────────────────────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_wan_dhcp_acquires_total DHCP acquire attempts by iface + result.\n\
+         # TYPE oxwrt_wan_dhcp_acquires_total counter"
+    );
+    // Sort for stable output (scrape diffing, test snapshots).
+    let mut keys: Vec<_> = m.dhcp_acquires.keys().collect();
+    keys.sort();
+    for k in &keys {
+        let v = m.dhcp_acquires[*k];
+        let _ = writeln!(
+            out,
+            "oxwrt_wan_dhcp_acquires_total{{iface=\"{}\",result=\"{}\"}} {}",
+            esc(&k.0),
+            k.1,
+            v
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_wan_dhcp_last_acquire_seconds Duration of the most recent successful acquire per iface.\n\
+         # TYPE oxwrt_wan_dhcp_last_acquire_seconds gauge"
+    );
+    let mut latency_keys: Vec<_> = m.dhcp_last_latency_ms.keys().collect();
+    latency_keys.sort();
+    for iface in &latency_keys {
+        let ms = m.dhcp_last_latency_ms[*iface];
+        let _ = writeln!(
+            out,
+            "oxwrt_wan_dhcp_last_acquire_seconds{{iface=\"{}\"}} {:.3}",
+            esc(iface),
+            ms as f64 / 1000.0,
+        );
+    }
+
+    // Blocklist counters ──────────────────────────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_blocklist_entries Number of CIDRs currently installed in each blocklist's nftables set.\n\
+         # TYPE oxwrt_blocklist_entries gauge"
+    );
+    let mut bl_keys: Vec<_> = m.blocklist_entries.keys().collect();
+    bl_keys.sort();
+    for name in &bl_keys {
+        let _ = writeln!(
+            out,
+            "oxwrt_blocklist_entries{{name=\"{}\"}} {}",
+            esc(name),
+            m.blocklist_entries[*name],
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_blocklist_fetches_total Blocklist fetch attempts by name + result.\n\
+         # TYPE oxwrt_blocklist_fetches_total counter"
+    );
+    let mut fetch_keys: Vec<_> = m.blocklist_fetches.keys().collect();
+    fetch_keys.sort();
+    for k in &fetch_keys {
+        let _ = writeln!(
+            out,
+            "oxwrt_blocklist_fetches_total{{name=\"{}\",result=\"{}\"}} {}",
+            esc(&k.0),
+            k.1,
+            m.blocklist_fetches[*k],
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_blocklist_last_fetch_timestamp Unix timestamp of the most recent successful fetch per blocklist.\n\
+         # TYPE oxwrt_blocklist_last_fetch_timestamp gauge"
+    );
+    let mut ts_keys: Vec<_> = m.blocklist_last_fetch_unix.keys().collect();
+    ts_keys.sort();
+    for name in &ts_keys {
+        let _ = writeln!(
+            out,
+            "oxwrt_blocklist_last_fetch_timestamp{{name=\"{}\"}} {}",
+            esc(name),
+            m.blocklist_last_fetch_unix[*name],
+        );
+    }
 }
 
 /// Escape a label value per Prometheus text format: `\`, `"` and
@@ -307,5 +421,107 @@ mod tests {
         assert_eq!(esc("a\nb"), "a\\nb");
         // UTF-8 unchanged
         assert_eq!(esc("αβ"), "αβ");
+    }
+
+    // ── render_counters ─────────────────────────────────────────────
+
+    fn mk_state() -> crate::metrics_state::MetricsState {
+        use std::collections::HashMap;
+        let mut dhcp_acquires: HashMap<(String, &'static str), u64> = HashMap::new();
+        dhcp_acquires.insert(("eth1".into(), "ok"), 3);
+        dhcp_acquires.insert(("eth1".into(), "timeout"), 1);
+        let mut dhcp_last_latency_ms: HashMap<String, u64> = HashMap::new();
+        dhcp_last_latency_ms.insert("eth1".into(), 1234);
+        let mut blocklist_entries: HashMap<String, u64> = HashMap::new();
+        blocklist_entries.insert("firehol".into(), 912);
+        let mut blocklist_fetches: HashMap<(String, &'static str), u64> = HashMap::new();
+        blocklist_fetches.insert(("firehol".into(), "ok"), 7);
+        blocklist_fetches.insert(("firehol".into(), "http_error"), 2);
+        let mut blocklist_last_fetch_unix: HashMap<String, u64> = HashMap::new();
+        blocklist_last_fetch_unix.insert("firehol".into(), 1_700_000_000);
+        crate::metrics_state::MetricsState {
+            reloads_ok_total: 5,
+            reloads_err_total: 1,
+            reload_last_duration_ms: 42,
+            dhcp_acquires,
+            dhcp_last_latency_ms,
+            blocklist_entries,
+            blocklist_fetches,
+            blocklist_last_fetch_unix,
+        }
+    }
+
+    #[test]
+    fn render_counters_emits_reload_block() {
+        let mut out = String::new();
+        render_counters(&mut out, &mk_state());
+        assert!(out.contains(r#"oxwrt_reloads_total{result="ok"} 5"#));
+        assert!(out.contains(r#"oxwrt_reloads_total{result="error"} 1"#));
+        assert!(out.contains("oxwrt_reload_last_duration_seconds 0.042"));
+    }
+
+    #[test]
+    fn render_counters_emits_dhcp_block() {
+        let mut out = String::new();
+        render_counters(&mut out, &mk_state());
+        assert!(
+            out.contains(r#"oxwrt_wan_dhcp_acquires_total{iface="eth1",result="ok"} 3"#),
+            "got:\n{out}"
+        );
+        assert!(out.contains(
+            r#"oxwrt_wan_dhcp_acquires_total{iface="eth1",result="timeout"} 1"#
+        ));
+        assert!(out.contains(r#"oxwrt_wan_dhcp_last_acquire_seconds{iface="eth1"} 1.234"#));
+    }
+
+    #[test]
+    fn render_counters_emits_blocklist_block() {
+        let mut out = String::new();
+        render_counters(&mut out, &mk_state());
+        assert!(out.contains(r#"oxwrt_blocklist_entries{name="firehol"} 912"#));
+        assert!(
+            out.contains(r#"oxwrt_blocklist_fetches_total{name="firehol",result="ok"} 7"#)
+        );
+        assert!(
+            out.contains(
+                r#"oxwrt_blocklist_fetches_total{name="firehol",result="http_error"} 2"#
+            )
+        );
+        assert!(out.contains(
+            r#"oxwrt_blocklist_last_fetch_timestamp{name="firehol"} 1700000000"#
+        ));
+    }
+
+    #[test]
+    fn render_counters_keys_are_sorted() {
+        // Sorted output keeps scrapes diff-stable and makes golden-
+        // file tests possible downstream. Verify by adding two
+        // ifaces with different names; the ordering by label must
+        // match Vec::sort over &keys.
+        use std::collections::HashMap;
+        let mut dhcp_acquires: HashMap<(String, &'static str), u64> = HashMap::new();
+        dhcp_acquires.insert(("zzz".into(), "ok"), 1);
+        dhcp_acquires.insert(("aaa".into(), "ok"), 1);
+        let state = crate::metrics_state::MetricsState {
+            dhcp_acquires,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        render_counters(&mut out, &state);
+        let aaa = out.find("iface=\"aaa\"").unwrap();
+        let zzz = out.find("iface=\"zzz\"").unwrap();
+        assert!(aaa < zzz, "aaa must come before zzz");
+    }
+
+    #[test]
+    fn render_counters_empty_state_emits_only_help_lines() {
+        let mut out = String::new();
+        render_counters(&mut out, &crate::metrics_state::MetricsState::default());
+        // Reload block always emits ok+error (they're atomic
+        // counters, always present). DHCP and blocklist blocks
+        // emit only # HELP/# TYPE but no data lines.
+        assert!(out.contains(r#"oxwrt_reloads_total{result="ok"} 0"#));
+        assert!(!out.contains("oxwrt_wan_dhcp_acquires_total{iface"));
+        assert!(!out.contains("oxwrt_blocklist_entries{name"));
     }
 }

@@ -32,6 +32,7 @@ pub mod blocklists;
 pub mod container;
 pub mod corerad;
 pub mod logd;
+pub mod metrics_state;
 pub mod miniupnpd;
 pub mod net;
 pub mod sqm;

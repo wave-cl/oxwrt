@@ -4,6 +4,15 @@
 use super::*;
 
 pub async fn handle_reload_async(state: &ControlState) -> Response {
+    let start = std::time::Instant::now();
+    let resp = handle_reload_inner(state).await;
+    let duration = start.elapsed();
+    let success = matches!(resp, Response::Ok);
+    crate::metrics_state::record_reload(success, duration);
+    resp
+}
+
+async fn handle_reload_inner(state: &ControlState) -> Response {
     use crate::config::Config;
     use std::path::Path;
 
