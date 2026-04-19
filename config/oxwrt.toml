@@ -21,7 +21,9 @@
 #   blocklists     banip-style periodic CIDR drop sets
 #   wireguard      roadwarrior + site-to-site tunnels (server side)
 #   vpn_client     outbound WG tunnels to commercial VPN providers
-#                  (client side, full-tunnel + killswitch + failover)
+#                  (full-tunnel v4+v6, killswitch, multi-profile
+#                  failover, per-zone opt-in via `via_vpn`, dest
+#                  bypass CIDRs, Mullvad API relay picker)
 #   radios         per-phy wifi config
 #   wifi           per-SSID wifi config (multi-BSS capable)
 #   services       containerized services (dns, dhcp, hostapd, …)
@@ -484,13 +486,30 @@ action = "accept"
 # VPN provider (Mullvad, Proton, etc.). Distinct from [[wireguard]]
 # above — that's the server side (peers connect IN). Here, the
 # router is the client dialing out. AllowedIPs is hardcoded to
-# 0.0.0.0/0; any zone with `via_vpn = true` routes through it.
+# 0.0.0.0/0 (+ ::/0 when `address_v6` is set); any zone with
+# `via_vpn = true` routes forwarded traffic through the active
+# profile via policy routing (table 51).
 #
 # Multi-profile: declare several with different `priority` values;
 # the coordinator picks the lowest-priority HEALTHY profile as
 # the active exit. Probes (ICMP via the wg iface) every 5s with
 # 3-fail hysteresis. Kill-switch engages when none are healthy —
 # flagged zones lose internet rather than leak out the WAN.
+#
+# Operator workflow (Mullvad-shaped, other providers similar):
+#
+#   # 1. Download a .conf from the provider portal (any relay).
+#   oxctl <remote> vpn-profile import mullvad-se /path/to/xx.conf
+#
+#   # 2. Flag which zone(s) should use it.
+#   #    Edit [[firewall.zones]] block → `via_vpn = true`.
+#   oxctl <remote> reload
+#
+#   # 3. Switch relays whenever. Key stays the same (Mullvad's
+#   #    account-level keypair accepts any of their relays).
+#   oxctl <remote> mullvad-relays --country=se
+#   oxctl <remote> vpn-switch-relay mullvad-se se-sto-wg-007
+#   oxctl <remote> reload
 #
 # ── Required ──
 #   name           String   — CRUD key, unique.
@@ -501,12 +520,22 @@ action = "accept"
 #   public_key     String   — server pubkey (provider-supplied).
 #
 # ── Optional ──
-#   priority                u32   — default 100. Lower = preferred.
+#   priority                u32    — default 100. Lower = preferred.
 #   key_path                String — default /etc/oxwrt/vpn-client.key.
 #   dns                     Vec<Ipv4Addr> — provider DNS, reached via tunnel.
-#   mtu                     u32   — default 1420.
+#   mtu                     u32    — default 1420.
 #   preshared_key_path      String — base64 PSK file.
-#   persistent_keepalive    u16   — default 25s.
+#   persistent_keepalive    u16    — default 25s.
+#   address_v6              String — IPv6 tunnel CIDR; enables v6
+#                                    full-tunnel via parallel
+#                                    ip-6 rule + table-51 v6 default.
+#   bypass_destinations     Vec<String> — dest CIDRs that skip the
+#                                    tunnel even when active. Useful
+#                                    for banking / streaming / corp
+#                                    VPN that geoblocks commercial
+#                                    exits. Rules install at lower
+#                                    priority than via_vpn iif so
+#                                    dest match wins first.
 #
 # Example (commented, Mullvad-shaped):
 #
@@ -1102,6 +1131,7 @@ landlock = false
 #   oxwrt_firewall_rules
 #   oxwrt_blocklist_{entries,fetches_total,last_fetch_timestamp}
 #   oxwrt_wg_peer_{last_handshake_seconds,rx_bytes_total,tx_bytes_total}
+#   oxwrt_vpn_{active,healthy}{profile,iface}  — per-vpn_client profile
 #
 [metrics]
 listen = "192.168.50.1:9100"
