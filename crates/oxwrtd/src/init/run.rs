@@ -429,29 +429,34 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // in the image — without them the `ip link add type wireguard`
     // or `wg` invocations fail at runtime and the error is logged
     // (non-fatal: the rest of the router stays up).
-    if let Err(e) = crate::wireguard::setup_wireguard(&cfg) {
+    // Run the independent setup steps in parallel. Each is
+    // blocking I/O (subprocess exec for wg / tc, file writes for
+    // corerad / miniupnpd configs), and none of them depend on
+    // each other — sequentially they cost ~150-300 ms on first
+    // boot (wireguard genkey + tc qdisc add dominate), which all
+    // runs before the first service spawn. tokio::join! on
+    // spawn_blocking wrappers lets them overlap, clawing back
+    // that window for services to come up sooner.
+    let cfg_wg = cfg.clone();
+    let cfg_corerad = cfg.clone();
+    let cfg_upnp = cfg.clone();
+    let cfg_sqm = cfg.clone();
+    let (wg_res, corerad_res, upnp_res, sqm_res) = tokio::join!(
+        tokio::task::spawn_blocking(move || crate::wireguard::setup_wireguard(&cfg_wg)),
+        tokio::task::spawn_blocking(move || crate::corerad::write_config(&cfg_corerad)),
+        tokio::task::spawn_blocking(move || crate::miniupnpd::write_config(&cfg_upnp)),
+        tokio::task::spawn_blocking(move || crate::sqm::setup_sqm(&cfg_sqm)),
+    );
+    if let Ok(Err(e)) = wg_res {
         tracing::error!(error = %e, "wireguard setup failed; tunnels disabled");
     }
-
-    // corerad config is derived from cfg.networks' ipv6_* fields;
-    // regenerate at boot so changes to [[networks]] take effect
-    // without a rebuild-and-flash cycle.
-    if let Err(e) = crate::corerad::write_config(&cfg) {
+    if let Ok(Err(e)) = corerad_res {
         tracing::error!(error = %e, "corerad config generation failed");
     }
-
-    // miniupnpd config (no-op when [upnp] absent). The binary
-    // itself isn't bundled today — schema + generator land first
-    // so operators who ship their own miniupnpd build have a
-    // config file waiting for them at /etc/oxwrt/miniupnpd.conf.
-    if let Err(e) = crate::miniupnpd::write_config(&cfg) {
+    if let Ok(Err(e)) = upnp_res {
         tracing::error!(error = %e, "miniupnpd config generation failed");
     }
-
-    // SQM: install CAKE qdiscs on any WAN iface declaring `sqm`.
-    // Idempotent + no-op when unconfigured. Needs iproute2 + the
-    // kmod-sched-cake kernel module in the image.
-    if let Err(e) = crate::sqm::setup_sqm(&cfg) {
+    if let Ok(Err(e)) = sqm_res {
         tracing::error!(error = %e, "sqm setup failed");
     }
 

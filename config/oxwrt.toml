@@ -673,7 +673,12 @@ entrypoint = ["/coredhcp", "-c", "/etc/coredhcp.yml"]
 net_mode = "host"
 memory_max = 67108864
 pids_max = 32
-depends_on = ["dns"]         # coredhcp needs DNS to log hostnames
+# coredhcp doesn't actually need DNS at runtime — the old
+# depends_on=["dns"] was for hostname logging only, which gated
+# dhcp's spawn by 500ms of dns startup unnecessarily. Drop the
+# dep so dhcp joins the first spawn wave alongside dns + hostapd
+# + corerad, saving ~500ms on boot-to-lease.
+depends_on = []
 
 [[services.binds]]
 source = "/usr/lib/oxwrt/services/dhcp/coredhcp.yml"

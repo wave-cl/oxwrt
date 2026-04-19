@@ -196,10 +196,16 @@ impl AnyChild {
 /// are allowed to start. Approximates "dep has finished initializing"
 /// without any cooperation from the dep itself — if a dep crashes on
 /// startup, it never reaches this threshold and dependents stay
-/// blocked. Empirically chosen: hickory-dns, ntpd-rs, and coredhcp all
-/// bind their listeners within ~200-400 ms on the target hardware, so
-/// 1 second is comfortably past the typical "initial bind" moment.
-const DEP_STARTUP_GRACE: Duration = Duration::from_secs(1);
+/// blocked.
+///
+/// Empirically calibrated on Flint 2: hickory-dns binds in
+/// ~150-300 ms, coredhcp in ~100 ms, ntpd-rs in ~200 ms. 500 ms
+/// gives 2-3x headroom over the slowest binder while saving ~500 ms
+/// of boot-to-steady-state over the original 1 s value. A dep that
+/// crashes inside the grace window (rare — would indicate a config
+/// or binary problem) just means dependents wait for the next
+/// successful respawn, same as before.
+const DEP_STARTUP_GRACE: Duration = Duration::from_millis(500);
 
 #[cfg(target_arch = "x86_64")]
 const SECCOMP_TARGET_ARCH: TargetArch = TargetArch::x86_64;
