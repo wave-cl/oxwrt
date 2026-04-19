@@ -662,6 +662,11 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // skips ticks where the lease is still None.
     crate::ddns::spawn(state.clone(), wan_lease.clone());
 
+    // Prometheus /metrics endpoint. No-op when cfg.metrics is None.
+    // Same Arc<ControlState> the RPC server uses, so `oxctl status`
+    // and `curl http://router:9100/metrics` return consistent data.
+    crate::metrics::spawn(state.clone());
+
     // AP-state watcher. Fires a warn-log if any expected AP iface
     // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s
     // past boot. Caught today's MT7986 DFS-CAC-stuck bug cold; without

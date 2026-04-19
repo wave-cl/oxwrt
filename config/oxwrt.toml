@@ -748,6 +748,16 @@ seccomp_allow = []
 user_namespace = false
 landlock = false
 
+# ---------------- Metrics ----------------
+#
+# Optional Prometheus-format /metrics endpoint. Plain HTTP, no auth —
+# bind to the LAN IP and rely on firewall zone rules to keep it off
+# WAN. Exports service state, AP operstate, WAN lease, WG handshakes,
+# firewall rule count. Comment out to disable.
+#
+# [metrics]
+# listen = "192.168.50.1:9100"
+
 # ---------------- Control plane ----------------
 #
 # Listen on [::1]:51820 (loopback) AND on the LAN bridge IP so the

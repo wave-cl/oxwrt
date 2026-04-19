@@ -63,7 +63,26 @@ pub struct Config {
     /// feature off.
     #[serde(default)]
     pub ddns: Vec<Ddns>,
+    /// Optional Prometheus-format /metrics endpoint. When set, a
+    /// tokio TCP listener binds to `listen` and exports counters
+    /// for service state, WG peer handshakes, WAN lease time
+    /// remaining, firewall rule count, etc. None = disabled.
+    /// No auth — rely on firewall zone rules to restrict access
+    /// (typically bind to the LAN IP + allow only LAN queries).
+    #[serde(default)]
+    pub metrics: Option<Metrics>,
     pub control: Control,
+}
+
+/// Prometheus `/metrics` endpoint configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Metrics {
+    /// Bind address:port. Typical values:
+    ///   "192.168.50.1:9100" — LAN-only, no exposure on WAN
+    ///   "127.0.0.1:9100"    — localhost only (ssh tunnel from LAN)
+    ///   "0.0.0.0:9100"      — all ifaces; pair with a firewall
+    ///                         rule that restricts src zone.
+    pub listen: String,
 }
 
 /// A single network entry in the unified `[[networks]]` array. The `type`

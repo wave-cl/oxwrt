@@ -129,6 +129,7 @@ mod tests {
             port_forwards: vec![],
             wireguard: vec![],
             ddns: vec![],
+            metrics: None,
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),

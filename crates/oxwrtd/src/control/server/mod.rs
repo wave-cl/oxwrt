@@ -516,7 +516,7 @@ fn handle_restart(state: &ControlState, name: &str) -> Response {
 /// dwarf the useful fields above it.
 const LAST_LOG_CLIP: usize = 240;
 
-fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
+pub(crate) fn collect_status(state: &ControlState) -> Vec<ServiceStatus> {
     let Ok(sup) = state.supervisor.lock() else {
         return vec![];
     };

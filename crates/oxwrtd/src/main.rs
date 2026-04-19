@@ -14,6 +14,8 @@ mod control;
 mod ddns;
 #[cfg(target_os = "linux")]
 mod init;
+#[cfg(target_os = "linux")]
+mod metrics;
 
 use std::process::ExitCode;
 
