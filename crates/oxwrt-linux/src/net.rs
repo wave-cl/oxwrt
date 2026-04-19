@@ -572,6 +572,46 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
     }
 
+    // Per-zone fwmark stamping for the via_vpn feature. For every
+    // zone with `via_vpn = true`, prepend a forward-chain rule
+    // that sets meta mark = VPN_FWMARK (0x1a) on packets arriving
+    // on any of the zone's ifaces. The fwmark routes the packet
+    // through table 51 (installed by vpn_routing::install_policy_rule
+    // at boot), whose default points at the active vpn_client iface.
+    //
+    // Runs BEFORE the user-declared firewall.rules so that flow-
+    // control operators (accept/drop) see a marked packet; they're
+    // free to ct-state-accept an established flow without losing
+    // its routing. Doesn't yet handle ct mark stickiness — flows
+    // spanning a profile transition may flap between tables; that
+    // edge case lands in commit 3 alongside the killswitch.
+    for zone in &cfg.firewall.zones {
+        if !zone.via_vpn {
+            continue;
+        }
+        for iface in zone_ifaces(cfg, &zone.name) {
+            // "meta mark set 0x1a" =
+            //   Immediate: load 0x1a into Reg1
+            //   Meta { key=Mark, sreg=Reg1 }: write Reg1 to skb mark
+            let mark_bytes = crate::vpn_routing::VPN_FWMARK.to_le_bytes().to_vec();
+            Rule::new(&forward)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .iiface(&iface)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .with_expr(rustables::expr::Immediate::new_data(
+                    mark_bytes,
+                    rustables::expr::Register::Reg1,
+                ))
+                .with_expr(
+                    rustables::expr::Meta::default()
+                        .with_key(rustables::expr::MetaType::Mark)
+                        .with_sreg(rustables::expr::Register::Reg1),
+                )
+                .add_to_batch(&mut batch);
+            tracing::debug!(zone = %zone.name, %iface, "via_vpn fwmark rule emitted");
+        }
+    }
+
     // Emit each config rule into the right chain.
     for rule in &cfg.firewall.rules {
         // ct_state rules go into both input + forward.

@@ -523,6 +523,26 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "vpn_client setup failed; tunnels disabled");
     }
 
+    // One-time policy-routing scaffolding for the via_vpn feature.
+    // Both calls are idempotent across reload + across reboot —
+    // the fwmark rule and the blackhole fallback are installed
+    // even when no `[[vpn_client]]` profile is declared, so toggling
+    // the feature on via `config-push` + `reload` doesn't need a
+    // reboot to pick up the routing rule. Scoped to `if let Some(net)`
+    // so the builder isn't accidentally invoked during rtnetlink-
+    // unavailable degraded-mode operation.
+    if let Some(net_handle) = &net {
+        if !cfg.vpn_client.is_empty() || cfg.firewall.zones.iter().any(|z| z.via_vpn) {
+            let handle = net_handle.handle().clone();
+            if let Err(e) = crate::vpn_routing::install_policy_rule(&handle).await {
+                tracing::error!(error = %e, "vpn_routing: policy rule install failed");
+            }
+            if let Err(e) = crate::vpn_routing::install_table_51_blackhole(&handle).await {
+                tracing::error!(error = %e, "vpn_routing: blackhole fallback install failed");
+            }
+        }
+    }
+
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
     // Per-WAN lease slots: one entry per Network::Wan declared in
