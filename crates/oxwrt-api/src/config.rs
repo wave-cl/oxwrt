@@ -85,6 +85,13 @@ pub enum Network {
         /// `ipv6_address` per-LAN instead.
         #[serde(default)]
         ipv6_pd: bool,
+        /// Smart Queue Management (CAKE) for bufferbloat mitigation
+        /// on the WAN pipe. When set, oxwrtd installs tc qdiscs that
+        /// shape traffic to the declared bandwidths — egress
+        /// directly on this iface, ingress via an IFB redirect.
+        /// None = no SQM (default FIFO, may bufferbloat under load).
+        #[serde(default)]
+        sqm: Option<SqmConfig>,
     },
     Lan {
         name: String,
@@ -379,6 +386,38 @@ fn default_true() -> bool {
 
 /// WAN-mode configuration, flattened into the `Network::Wan` variant.
 /// The `mode` tag selects between DHCP, static, and PPPoE.
+/// Smart Queue Management (SQM) configuration for a WAN iface.
+///
+/// Today only the CAKE qdisc is supported — it's the Linux default
+/// for bufferbloat mitigation and handles both shaping + fair-
+/// queueing in one box. Upload bandwidth is shaped on eth1's egress
+/// directly; download is shaped on a per-WAN IFB iface that we
+/// mirror eth1's ingress to (standard Linux pattern — ingress qdiscs
+/// can't shape, only egress can, so we redirect).
+///
+/// Bandwidths are in kilobits per second (kbit). Set either or both;
+/// unset direction = unshaped. A typical home cable link might set
+/// bandwidth_up_kbps = 18_000 (about 10% below the 20 Mbps uplink)
+/// and bandwidth_down_kbps = 180_000 (10% below a 200 Mbps downlink)
+/// — leaving headroom is what prevents the ISP's own queue from
+/// filling up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqmConfig {
+    /// Egress-direction shaping rate in kbit/s. None = unshaped.
+    #[serde(default)]
+    pub bandwidth_up_kbps: Option<u32>,
+    /// Ingress-direction shaping rate in kbit/s. Applied to an
+    /// IFB iface fed by mirrored eth1 ingress. None = unshaped.
+    #[serde(default)]
+    pub bandwidth_down_kbps: Option<u32>,
+    /// Extra `tc qdisc add ... cake` arguments appended verbatim to
+    /// the command line. Useful for tuning (`docsis`, `ethernet`,
+    /// `flows`, `nat`, `rtt Nms`, etc.) without us re-exposing every
+    /// CAKE knob as a typed field. Example: `"besteffort ethernet"`.
+    #[serde(default)]
+    pub extra_args: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum WanConfig {

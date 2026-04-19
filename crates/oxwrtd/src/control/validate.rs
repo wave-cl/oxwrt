@@ -233,6 +233,7 @@ mod tests {
                     iface: "eth1".to_string(),
                     wan: crate::config::WanConfig::Dhcp,
                     ipv6_pd: false,
+                    sqm: None,
                 },
                 Network::Lan {
                     name: "lan".to_string(),

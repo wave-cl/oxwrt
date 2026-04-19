@@ -129,6 +129,12 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         tracing::error!(error = %e, "reload: corerad config write failed");
     }
 
+    // Reapply SQM — picks up bandwidth/extra_args changes; removes
+    // stale qdiscs when sqm goes from Some → None.
+    if let Err(e) = crate::sqm::setup_sqm(&new_cfg) {
+        tracing::error!(error = %e, "reload: sqm reapply failed");
+    }
+
     // Phase 3b: regenerate per-phy hostapd.conf files at
     // /etc/oxwrt/hostapd/. Must run BEFORE phase 4 (supervisor rebuild)
     // so when the new hostapd-5g / hostapd-2g services come up they

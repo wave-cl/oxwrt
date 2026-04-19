@@ -440,6 +440,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "corerad config generation failed");
     }
 
+    // SQM: install CAKE qdiscs on any WAN iface declaring `sqm`.
+    // Idempotent + no-op when unconfigured. Needs iproute2 + the
+    // kmod-sched-cake kernel module in the image.
+    if let Err(e) = crate::sqm::setup_sqm(&cfg) {
+        tracing::error!(error = %e, "sqm setup failed");
+    }
+
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
     if let (

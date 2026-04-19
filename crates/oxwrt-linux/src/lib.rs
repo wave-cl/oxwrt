@@ -32,6 +32,7 @@ pub mod container;
 pub mod corerad;
 pub mod logd;
 pub mod net;
+pub mod sqm;
 pub mod sysupgrade;
 pub mod wan_dhcp;
 pub mod wan_dhcp6;

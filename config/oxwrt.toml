@@ -27,6 +27,19 @@ name = "wan"
 type = "wan"
 iface = "eth1"
 mode = "dhcp"
+# SQM / CAKE for bufferbloat control. Uncomment + set to your
+# actual measured speeds × 0.9 (leaving 10% headroom prevents
+# the ISP's own queue from filling). kbit/s units. Without
+# `sqm`, the iface uses pfifo_fast and can bufferbloat under
+# load. See crates/oxwrt-linux/src/sqm.rs for impl.
+#
+# sqm = { bandwidth_up_kbps = 18000, bandwidth_down_kbps = 180000 }
+#
+# Extra CAKE args (optional): "docsis" for cable, "ethernet"
+# for most home WAN, "ptm" for VDSL. "nat" enables NAT-aware
+# fair-queueing across LAN flows.
+#
+# sqm = { bandwidth_up_kbps = 18000, bandwidth_down_kbps = 180000, extra_args = "ethernet nat" }
 
 # [[networks]]                         # alternative: static IPv4 on eth1
 # name = "wan"

@@ -146,6 +146,27 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             }
             Response::Value { value: out }
         }
+        "qdisc" => {
+            // Dump the tc qdisc state for every iface. Useful for
+            // verifying SQM/CAKE is actually installed, checking
+            // queue depths under load, etc. Shells out to `tc`
+            // rather than duplicating its formatting.
+            use std::process::Command;
+            match Command::new("tc").args(["qdisc", "show"]).output() {
+                Ok(o) if o.status.success() => Response::Value {
+                    value: String::from_utf8_lossy(&o.stdout).to_string(),
+                },
+                Ok(o) => Response::Err {
+                    message: format!(
+                        "diag qdisc: tc qdisc show failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                },
+                Err(e) => Response::Err {
+                    message: format!("diag qdisc: spawn tc: {e} (tc-tiny installed?)"),
+                },
+            }
+        }
         "resolv" => {
             // Dump /etc/resolv.conf so operators can confirm the
             // router's own libc resolver is pointing at the LAN IP
@@ -202,7 +223,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, conntrack, resolv, sysctl, ping, traceroute, dig)"
+                 modules, dmesg, nft, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig)"
             ),
         },
     }

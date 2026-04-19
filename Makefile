@@ -284,6 +284,9 @@ IMAGEBUILDER_PACKAGES := \
 	kmod-nft-nat \
 	kmod-wireguard \
 	wireguard-tools \
+	kmod-sched-cake \
+	kmod-ifb \
+	tc-tiny \
 	ca-bundle \
 	nftables \
 	-netifd \
