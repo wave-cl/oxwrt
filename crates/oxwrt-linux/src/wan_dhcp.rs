@@ -26,7 +26,7 @@ use dhcproto::v4::{DhcpOption, Flags, HType, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::packet_route::link::LinkAttribute;
-use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder};
+use rtnetlink::{Handle, LinkUnspec};
 use tokio::net::UdpSocket;
 
 #[derive(Debug, thiserror::Error)]
@@ -220,29 +220,15 @@ pub async fn apply_lease(
         Err(e) => return Err(Error::Rtnetlink(e)),
     }
 
-    if let Some(gw) = lease.gateway {
-        let route = RouteMessageBuilder::<Ipv4Addr>::new()
-            .destination_prefix(Ipv4Addr::UNSPECIFIED, 0)
-            .gateway(gw)
-            .build();
-        match handle.route().add(route).execute().await {
-            Ok(()) => {
-                tracing::info!(iface = %iface_name, %gw, "wan dhcp: default route installed");
-            }
-            Err(e) if is_exists(&e) => {
-                // A default route already exists. In production this would
-                // only happen on a supervisor rerun; in nested test
-                // environments (docker) it also happens when the outer
-                // netns has its own default route. Either way, log and
-                // continue — the lease still applied.
-                tracing::warn!(
-                    iface = %iface_name, %gw,
-                    "wan dhcp: default route already exists, keeping existing"
-                );
-            }
-            Err(e) => return Err(Error::Rtnetlink(e)),
-        }
-    }
+    // NOTE: default route installation is owned by the failover
+    // coordinator (wan_failover::spawn), not here. The coordinator
+    // sees all per-WAN leases via the shared WanLeases map plus
+    // per-WAN health from ICMP probes, and picks exactly one to
+    // install. If we also installed the default here, we'd race
+    // the coordinator on every lease renewal (the EEXIST warning
+    // we used to log — "add default failed ... File exists").
+    // Single-WAN setups are unaffected: the coordinator still runs
+    // and installs the default from the single lease.
 
     tracing::info!(
         iface = %iface_name,
