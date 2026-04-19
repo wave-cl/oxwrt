@@ -27,6 +27,11 @@ name = "wan"
 type = "wan"
 iface = "eth1"
 mode = "dhcp"
+# Request a DHCPv6 prefix delegation (IA_PD) from the ISP in
+# parallel with the IPv4 lease. The delegated prefix is sliced
+# into per-subnet /64s via each network's `ipv6_subnet_id`. Set
+# to true once your ISP supports IPv6 PD.
+# ipv6_pd = true
 # SQM / CAKE for bufferbloat control. Uncomment + set to your
 # actual measured speeds × 0.9 (leaving 10% headroom prevents
 # the ISP's own queue from filling). kbit/s units. Without
@@ -74,6 +79,12 @@ prefix = 24
 # corerad RA config (see oxwrt-linux/src/corerad.rs).
 ipv6_address = "fdbe:cafe::1"
 ipv6_prefix = 64
+# Subnet id within the DHCPv6-PD delegated prefix. When the WAN has
+# `ipv6_pd = true` and the ISP hands over e.g. a /56, this network
+# gets a /64 at `<prefix>:0001::/64` with `::1` as the router. Keep
+# these unique across all networks — collisions mean address
+# conflicts on the PD side. Ignored when `ipv6_pd` is off.
+ipv6_subnet_id = 1
 
 # --- Guest ---
 
@@ -83,6 +94,11 @@ type = "simple"
 iface = "br-guest"
 address = "10.99.0.1"
 prefix = 24
+ipv6_subnet_id = 2
+# Optional ULA fallback when DHCPv6-PD isn't available. Without
+# ipv6_address, this network is IPv4-only until the PD kicks in.
+# ipv6_address = "fdbe:cafe:2::1"
+# ipv6_prefix = 64
 
 # --- IoT ---
 
@@ -92,6 +108,7 @@ type = "simple"
 iface = "br-iot"
 address = "10.20.0.1"
 prefix = 24
+ipv6_subnet_id = 3
 
 # ---------------- Firewall ----------------
 #
@@ -282,6 +299,61 @@ action = "accept"
 # proto = "tcp"
 # external_port = 25565
 # internal = "192.168.50.50:25565"
+# src = "wan"                      # default "wan"
+# dest = "lan"                     # default auto-detected from internal IP
+
+# ---------------- WireGuard ----------------
+#
+# Each [[wireguard]] entry is one wg interface (e.g. wg0) with a list
+# of allowed client peers. Server keys auto-generate on first boot at
+# `key_path` (never shipped in the image). Peers are CRUD-managed at
+# runtime via `oxctl wg-peer add/update/remove` + `reload`, so the
+# on-disk list is often short — it grows as clients enrol.
+#
+# Firewall: oxwrtd auto-installs an INPUT accept for each
+# `listen_port` on the WAN zone; no manual rule needed. Traffic out
+# the tunnel is subject to normal zone forwarding (declare the
+# wireguard iface as a network if you want it in a zone).
+#
+# ── Required on [[wireguard]] ──
+#   name          String  — CRUD key. Also default iface name.
+#   listen_port   u16     — UDP port for inbound handshakes.
+#
+# ── Optional on [[wireguard]] ──
+#   iface         String  — kernel iface; default = name.
+#   key_path      String  — default "/etc/oxwrt/wg0.key".
+#
+# ── Required on [[wireguard.peers]] ──
+#   name          String  — CRUD key, operator label.
+#   pubkey        String  — base64, 44 chars.
+#   allowed_ips   String  — CIDRs, comma-separated.
+#
+# ── Optional on [[wireguard.peers]] ──
+#   preshared_key          String — PSK; adds forward secrecy.
+#   endpoint               String — "host:port"; site-to-site only.
+#   persistent_keepalive   u16    — seconds; 25 typical for NAT.
+#
+# Example (commented — uncomment + run `oxctl wg-peer add` to grow):
+#
+# [[wireguard]]
+# name = "wg0"
+# listen_port = 51820
+# # iface = "wg0"                     # default = name
+# # key_path = "/etc/oxwrt/wg0.key"   # default
+#
+# [[wireguard.peers]]
+# name = "laptop"
+# pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+# allowed_ips = "10.8.0.2/32"
+# persistent_keepalive = 25
+#
+# [[wireguard.peers]]
+# name = "site-b"
+# pubkey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+# preshared_key = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+# allowed_ips = "10.8.0.3/32,192.168.100.0/24"
+# endpoint = "site-b.example.com:51820"
+# persistent_keepalive = 25
 
 # ---------------- Radios ----------------
 #
@@ -326,10 +398,12 @@ action = "accept"
 phy = "phy0"
 band = "2g"
 channel = 6
+country_code = "US"
 
 [[radios]]
 phy = "phy1"
 band = "5g"
+country_code = "US"
 # Channel 36 @ 80 MHz (U-NII-1, channels 36-48). Zero DFS, so
 # hostapd beacons immediately on boot — no 60-second CAC wait.
 # VHT80 / HE80 defaults fall out of wifi.rs's `vht_seg0(36) == 42`
@@ -348,6 +422,7 @@ channel = 36
 # phy = "phy1"
 # band = "5g"
 # channel = 149
+# disabled = false
 # country_code = "US"
 # vht_oper_chwidth = 2                     # VHT160
 # vht_oper_centr_freq_seg0_idx = 155
@@ -355,6 +430,8 @@ channel = 36
 # he_oper_centr_freq_seg0_idx = 155
 # vht_capab = "[SHORT-GI-80][SHORT-GI-160][TX-STBC-2BY1][RX-STBC-1]"
 # ht_capab = "[HT40+][SHORT-GI-40][TX-STBC][RX-STBC1][MAX-AMSDU-7935]"
+# ieee80211n = true
+# ieee80211ac = true
 # ieee80211ax = true
 # ieee80211d = true
 # ieee80211h = true
