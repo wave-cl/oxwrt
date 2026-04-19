@@ -7,11 +7,12 @@
 //! ISP for a WAN-side address; link-local suffices for routing).
 //! No Rapid Commit. No Reconfigure. No relay-agent mode.
 //!
-//! DUID: hand-built DUID-LL (RFC 8415 § 11.4) from the WAN MAC.
-//! We don't persist the DUID across reboots — a fresh boot presents
-//! a fresh IAID/DUID combo, and well-behaved PD servers will issue
-//! a new prefix. Some aggressive servers may not release the old
-//! prefix promptly; that's an ISP-side concern, not ours.
+//! DUID: hand-built DUID-LL (RFC 8415 § 11.4) from the WAN MAC,
+//! persisted at `/etc/oxwrt/dhcp6-duid` (covered by sysupgrade.conf)
+//! alongside the IAID. ISPs key the delegated prefix on (DUID,
+//! IAID), so persisting means the same /56 survives reboots +
+//! sysupgrades; regenerating would force every boot to be a fresh
+//! allocation, wasteful and potentially billable on per-lease ISPs.
 //!
 //! Socket: bound to `[::]:546` with SO_BINDTODEVICE to the WAN
 //! iface, destination `ff02::1:2` (DHCP_All-Servers-and-Relays)
@@ -69,8 +70,14 @@ pub async fn acquire(iface: &str, timeout: Duration) -> Result<DhcpV6Lease, Erro
     let ifindex = read_iface_index(iface)?;
 
     let sock = build_socket(ifindex)?;
-    let duid = build_duid_ll(mac);
-    let iaid: u32 = rand::random();
+    // DUID + IAID must be stable across reboots: ISPs key the
+    // delegated prefix on (DUID, IAID), so regenerating on every
+    // boot means every boot gets a fresh /56 allocation. That's
+    // painful if the ISP has per-customer quotas or billing on
+    // leases, and just plain wasteful otherwise. Persist at
+    // /etc/oxwrt/dhcp6-duid (which is in sysupgrade.conf) so the
+    // identity survives reboots + sysupgrades.
+    let (duid, iaid) = load_or_create_duid_iaid(mac)?;
 
     let (server_id, advertised_prefix, advertised_len, advertised_iapd) =
         solicit_phase(&sock, ifindex, &duid, iaid, timeout).await?;
@@ -696,6 +703,60 @@ fn build_request(
 
 // ── DUID + helpers ─────────────────────────────────────────────────
 
+/// Persistent DUID+IAID storage for the DHCPv6 client. The ISP keys
+/// the delegated prefix on this pair; regenerating across reboots
+/// means a fresh /56 every time — wasteful and potentially billable.
+/// File format: [4 bytes IAID, big-endian][DUID bytes to EOF].
+const DUID_PATH: &str = "/etc/oxwrt/dhcp6-duid";
+
+fn load_or_create_duid_iaid(mac: [u8; 6]) -> Result<(Vec<u8>, u32), Error> {
+    match std::fs::read(DUID_PATH) {
+        Ok(bytes) if bytes.len() > 4 => {
+            let iaid = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let duid = bytes[4..].to_vec();
+            return Ok((duid, iaid));
+        }
+        Ok(_) => {
+            tracing::warn!("dhcp6-duid: file too short to parse; regenerating");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // First boot — fall through to generate.
+        }
+        Err(e) => {
+            return Err(Error::Io(e));
+        }
+    }
+    // Generate a fresh DUID-LL from the WAN MAC + random IAID,
+    // persist both.
+    let duid = build_duid_ll(mac);
+    let iaid: u32 = rand::random();
+    if let Some(parent) = std::path::Path::new(DUID_PATH).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut buf = Vec::with_capacity(4 + duid.len());
+    buf.extend_from_slice(&iaid.to_be_bytes());
+    buf.extend_from_slice(&duid);
+    if let Err(e) = std::fs::write(DUID_PATH, &buf) {
+        tracing::warn!(
+            path = DUID_PATH, error = %e,
+            "dhcp6-duid: write failed; proceeding with ephemeral DUID"
+        );
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(DUID_PATH, std::fs::Permissions::from_mode(0o600));
+        }
+        tracing::info!(
+            path = DUID_PATH,
+            duid_len = duid.len(),
+            iaid,
+            "dhcp6-duid: generated + persisted"
+        );
+    }
+    Ok((duid, iaid))
+}
+
 /// DUID-LL per RFC 8415 § 11.4 for Ethernet:
 ///   [ 00 03 ][ 00 01 ][ 6 bytes of MAC ]  → 10 bytes total.
 /// (dhcproto's Duid::link_layer helper writes 16 MAC bytes which is
@@ -820,5 +881,24 @@ mod tests {
         assert_eq!(&duid[0..2], &[0, 3]); // LL
         assert_eq!(&duid[2..4], &[0, 1]); // Ethernet
         assert_eq!(&duid[4..10], &mac);
+    }
+
+    /// Persisted DUID file round-trip: write [IAID BE][DUID], read
+    /// it back, the bytes decompose into the same iaid + duid. We
+    /// don't exercise load_or_create_duid_iaid directly because it
+    /// uses /etc/oxwrt paths; this test validates the format
+    /// contract the function relies on.
+    #[test]
+    fn duid_file_format_roundtrip() {
+        let iaid: u32 = 0xdeadbeef;
+        let duid = build_duid_ll([0x94, 0x83, 0xc4, 0xca, 0x5c, 0x78]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&iaid.to_be_bytes());
+        buf.extend_from_slice(&duid);
+        // Decode.
+        let got_iaid = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let got_duid = &buf[4..];
+        assert_eq!(got_iaid, iaid);
+        assert_eq!(got_duid, duid.as_slice());
     }
 }
