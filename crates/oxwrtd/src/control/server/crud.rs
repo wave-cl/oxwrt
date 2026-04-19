@@ -41,6 +41,9 @@ pub(super) fn handle_crud_network(state: &ControlState, action: &CrudAction) -> 
             }
             let mut new_cfg = (*cfg).clone();
             new_cfg.networks.push(item);
+            if let Err(e) = crate::control::validate::check_vlan_consistency(&new_cfg) {
+                return Response::Err { message: e };
+            }
             persist_and_swap(state, new_cfg, &format!("added network {item_name}"))
         }
         CrudAction::Update { name, json } => {
@@ -79,6 +82,9 @@ pub(super) fn handle_crud_network(state: &ControlState, action: &CrudAction) -> 
             };
             let mut new_cfg = (*cfg).clone();
             new_cfg.networks[idx] = updated;
+            if let Err(e) = crate::control::validate::check_vlan_consistency(&new_cfg) {
+                return Response::Err { message: e };
+            }
             persist_and_swap(state, new_cfg, &format!("updated network {name}"))
         }
         CrudAction::Remove { name } => {
