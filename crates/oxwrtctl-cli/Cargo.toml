@@ -52,3 +52,5 @@ toml_edit.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# For parallel-ping the relay list in `vpn-auto-switch`.
+futures-util.workspace = true

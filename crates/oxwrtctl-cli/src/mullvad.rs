@@ -154,6 +154,56 @@ pub fn find_by_hostname<'a>(relays: &'a [Relay], hostname: &str) -> Option<&'a R
     relays.iter().find(|r| r.hostname == hostname)
 }
 
+/// Measure ping latency to a single IP. Returns latency in
+/// milliseconds on success, or None if the ping failed or timed
+/// out.
+///
+/// Uses the system `ping` binary — available on macOS, Linux,
+/// BSD. Parses the "time=XX.XX ms" line from stdout. Timeout is
+/// ~1 second; a relay that takes longer than that to respond
+/// isn't a candidate anyway.
+pub async fn ping_latency_ms(ip: &str) -> Option<f64> {
+    // -c 1: single echo. -W: per-reply timeout. macOS uses
+    // seconds, Linux uses milliseconds. Using 1000 works on Linux
+    // (1000ms) and macOS treats the arg as seconds (1000s — never
+    // hit in practice because -t also caps total). Add -t 2 to
+    // cap wall-clock at 2s on macOS. Cross-platform enough.
+    let out = tokio::process::Command::new("ping")
+        .args(["-c", "1", "-W", "1000", "-t", "2", ip])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.split_once("time=") {
+            let ms_str = rest.1.split_whitespace().next()?;
+            return ms_str.parse::<f64>().ok();
+        }
+    }
+    None
+}
+
+/// Ping a batch of IPs in parallel, return (ip, latency) pairs
+/// sorted ascending by latency. Failed pings are dropped.
+/// Concurrency matters: 10 candidates × ~800ms each serial
+/// would be 8s; in parallel it's a single timeout window.
+pub async fn race_pings(ips: Vec<String>) -> Vec<(String, f64)> {
+    let futs = ips.into_iter().map(|ip| async move {
+        let latency = ping_latency_ms(&ip).await;
+        (ip, latency)
+    });
+    let results = futures_util::future::join_all(futs).await;
+    let mut timed: Vec<(String, f64)> = results
+        .into_iter()
+        .filter_map(|(ip, lat)| lat.map(|l| (ip, l)))
+        .collect();
+    timed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    timed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

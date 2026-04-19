@@ -91,6 +91,17 @@ pub async fn run(args: Vec<String>) -> Result<(), Error> {
         return handle_vpn_switch_relay(addr, profile, hostname).await;
     }
 
+    // Auto-pick the lowest-latency relay from Mullvad's list and
+    // switch a profile to it. Client-side ping-race — fast and
+    // good-enough for home operator use.
+    if cmd == "vpn-auto-switch" {
+        let profile = rest
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::Rpc("vpn-auto-switch: missing <profile>".into()))?;
+        return handle_vpn_auto_switch(addr, profile, &rest[1..]).await;
+    }
+
     let server_key_hex = std::env::var("SQUIC_SERVER_KEY").map_err(|_| Error::MissingServerKey)?;
     let server_key = parse_pubkey(&server_key_hex)?;
 
@@ -452,6 +463,87 @@ async fn handle_mullvad_relays(rest: &[String]) -> Result<(), Error> {
         filtered.len().min(limit)
     );
     Ok(())
+}
+
+/// Handle `oxctl <remote> vpn-auto-switch <profile>
+///     [--country=XX] [--city=XX] [--candidates=N]`.
+///
+/// Fetches Mullvad relay list → filters by country/city → takes
+/// top N candidates (default 10) sorted by Mullvad's own weight
+/// → parallel ICMP pings → picks the lowest-latency winner →
+/// calls the same path as `vpn-switch-relay` to rewrite the
+/// profile. Operator still runs `reload` to activate.
+///
+/// Client-side ping race rather than router-side because the
+/// latency signal from the operator's network is usually within
+/// tens of ms of the router's (same ISP, same geography). For a
+/// precise router-side measurement we'd need a new diag RPC;
+/// that's a v2 if anyone asks.
+async fn handle_vpn_auto_switch(
+    addr: SocketAddr,
+    profile: String,
+    flags: &[String],
+) -> Result<(), Error> {
+    use crate::mullvad;
+
+    let country = pull_flag(flags, "country");
+    let city = pull_flag(flags, "city");
+    let candidates: usize = pull_flag(flags, "candidates")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+
+    eprintln!("vpn-auto-switch: fetching Mullvad relay list...");
+    let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
+    let mut filtered =
+        mullvad::filter_relays(&relays.wireguard.relays, country.as_deref(), city.as_deref(), false);
+    if filtered.is_empty() {
+        return Err(Error::Rpc(format!(
+            "no relays matched country={:?} city={:?}",
+            country, city
+        )));
+    }
+    // Mullvad's `weight` gauges relay capacity; higher weight =
+    // more popular / reliable. Pick top-N by weight BEFORE ping-
+    // racing so we don't waste pings on obscure relays.
+    filtered.sort_by(|a, b| {
+        b.weight
+            .unwrap_or(0)
+            .cmp(&a.weight.unwrap_or(0))
+            .then_with(|| a.hostname.cmp(&b.hostname))
+    });
+    filtered.truncate(candidates);
+    let ips: Vec<String> = filtered
+        .iter()
+        .filter_map(|r| r.ipv4_addr_in.clone())
+        .collect();
+    eprintln!(
+        "vpn-auto-switch: pinging {} candidate(s) in parallel...",
+        ips.len()
+    );
+
+    let ranked = mullvad::race_pings(ips).await;
+    if ranked.is_empty() {
+        return Err(Error::Rpc(
+            "vpn-auto-switch: all candidates timed out or failed to ping".into(),
+        ));
+    }
+    let (winner_ip, winner_ms) = &ranked[0];
+    let winner = filtered
+        .iter()
+        .find(|r| r.ipv4_addr_in.as_deref() == Some(winner_ip))
+        .ok_or_else(|| Error::Rpc("internal: winner IP not in filtered set".into()))?;
+    eprintln!(
+        "vpn-auto-switch: winner = {} ({}) @ {:.2} ms",
+        winner.hostname, winner_ip, winner_ms
+    );
+    // Log the rest for operator review.
+    for (ip, ms) in ranked.iter().skip(1).take(5) {
+        eprintln!("   …also: {} @ {:.2} ms", ip, ms);
+    }
+
+    // Delegate to vpn-switch-relay's patch logic. Same hostname
+    // lookup + config-dump + toml patch + config-push.
+    handle_vpn_switch_relay(addr, profile, winner.hostname.clone()).await
 }
 
 /// Handle `oxctl <remote> vpn-switch-relay <profile> <hostname>`.
