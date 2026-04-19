@@ -111,6 +111,27 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         );
     }
 
+    // Phase 2b: re-run net.bring_up for Simple VLAN networks. The
+    // core LAN/WAN address reconcile above keeps wired ifaces in
+    // sync, but newly-added Simple networks with `vlan` set need
+    // their sub-iface created via rtnetlink. bring_up is idempotent
+    // — existing ifaces are skipped by its link_index check — so
+    // calling it here doesn't disturb the already-configured world.
+    // Scoped to a new rtnetlink connection because the caller
+    // doesn't have a Handle in scope.
+    {
+        match crate::net::Net::new() {
+            Ok(net) => {
+                if let Err(e) = net.bring_up(&new_cfg).await {
+                    tracing::warn!(error = %e, "reload: net.bring_up had errors");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reload: Net::new failed; skipping bring_up");
+            }
+        }
+    }
+
     // Phase 3: reinstall firewall.
     if let Err(e) = crate::net::install_firewall(&new_cfg) {
         return Response::Err {
