@@ -120,6 +120,7 @@ mod tests {
                 prefix: 24,
                 ipv6_address: Some("fdbe:cafe::1".parse().unwrap()),
                 ipv6_prefix: Some(64),
+                ipv6_subnet_id: None,
             }],
             firewall: Firewall::default(),
             radios: vec![],

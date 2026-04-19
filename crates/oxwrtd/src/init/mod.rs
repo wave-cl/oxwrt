@@ -36,6 +36,7 @@ pub(super) use crate::control::{self, ControlState, server::Server};
 pub(super) use crate::logd::Logd;
 pub(super) use crate::net::{self, Net};
 pub(super) use crate::wan_dhcp;
+pub(super) use crate::wan_dhcp6;
 
 pub(super) const SIGNING_KEY_PATH: &str = "/etc/oxwrt/key.ed25519";
 

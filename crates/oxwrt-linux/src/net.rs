@@ -1160,6 +1160,7 @@ mod tests {
                     prefix: 24,
                     ipv6_address: None,
                     ipv6_prefix: None,
+                    ipv6_subnet_id: None,
                 },
                 Network::Simple {
                     name: "guest".to_string(),
@@ -1168,6 +1169,7 @@ mod tests {
                     prefix: 24,
                     ipv6_address: None,
                     ipv6_prefix: None,
+                    ipv6_subnet_id: None,
                 },
             ],
             firewall: Firewall {

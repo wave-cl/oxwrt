@@ -5,7 +5,9 @@
 // churning thousands of imports across init.rs + control/server.rs.
 pub use oxwrt_api::{config, rpc};
 #[cfg(target_os = "linux")]
-pub use oxwrt_linux::{container, corerad, logd, net, sysupgrade, wan_dhcp, wifi, wireguard};
+pub use oxwrt_linux::{
+    container, corerad, logd, net, sysupgrade, wan_dhcp, wan_dhcp6, wifi, wireguard,
+};
 mod control;
 
 #[cfg(target_os = "linux")]

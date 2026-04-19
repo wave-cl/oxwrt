@@ -34,5 +34,6 @@ pub mod logd;
 pub mod net;
 pub mod sysupgrade;
 pub mod wan_dhcp;
+pub mod wan_dhcp6;
 pub mod wifi;
 pub mod wireguard;

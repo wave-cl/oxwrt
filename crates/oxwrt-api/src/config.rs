@@ -76,6 +76,15 @@ pub enum Network {
         iface: String,
         #[serde(flatten)]
         wan: WanConfig,
+        /// Enable DHCPv6-PD on this WAN iface. When true, oxwrtd
+        /// solicits a delegated prefix (typically a /56 or /60
+        /// from the ISP), then slices it into /64s addressed to
+        /// each LAN/Simple network that declares `ipv6_subnet_id`.
+        /// Default false — operators on ISPs without PD (or with
+        /// static v6 routed to them) leave this off and declare
+        /// `ipv6_address` per-LAN instead.
+        #[serde(default)]
+        ipv6_pd: bool,
     },
     Lan {
         name: String,
@@ -84,19 +93,24 @@ pub enum Network {
         members: Vec<String>,
         address: Ipv4Addr,
         prefix: u8,
-        /// Optional IPv6 address to assign to the bridge. Typically
-        /// the first host address of a /64 the operator allocated
-        /// (from a ULA like `fd12:3456:789a:1::1`, or the first /64
-        /// of a WAN-delegated /56 — until DHCPv6-PD lands this is
-        /// operator-managed, see `[[networks]]` examples in
-        /// config/oxwrt.toml). Paired with `ipv6_prefix`.
+        /// Static IPv6 address to assign to the bridge. Typically a
+        /// ULA (fd00::/8) for isolated setups, or a static v6 from
+        /// the ISP. Ignored when DHCPv6-PD is active AND
+        /// `ipv6_subnet_id` is set — the delegated prefix's
+        /// per-subnet /64 takes precedence. Paired with
+        /// `ipv6_prefix`.
         #[serde(default)]
         ipv6_address: Option<Ipv6Addr>,
-        /// IPv6 prefix length for `ipv6_address`. Defaults to 64
-        /// when `ipv6_address` is set and this is omitted —
-        /// matches the SLAAC convention used by RAs.
+        /// IPv6 prefix length for `ipv6_address`. Defaults to 64.
         #[serde(default)]
         ipv6_prefix: Option<u8>,
+        /// Subnet identifier for DHCPv6-PD slicing. When the WAN
+        /// has `ipv6_pd=true` and acquires a delegated prefix, each
+        /// LAN/Simple with a subnet_id gets `<prefix>:{subnet_id:x}::1/64`.
+        /// Operator picks the ids (0, 1, 2, ...); for a /56
+        /// delegation that's up to 256 networks (8 bits of room).
+        #[serde(default)]
+        ipv6_subnet_id: Option<u16>,
     },
     Simple {
         name: String,
@@ -107,6 +121,8 @@ pub enum Network {
         ipv6_address: Option<Ipv6Addr>,
         #[serde(default)]
         ipv6_prefix: Option<u8>,
+        #[serde(default)]
+        ipv6_subnet_id: Option<u16>,
     },
 }
 
@@ -147,6 +163,17 @@ impl Network {
             Network::Wan { .. } => return None,
         };
         Some((*addr, prefix.unwrap_or(64)))
+    }
+
+    /// DHCPv6-PD subnet id if declared. Combined with a delegated
+    /// prefix, yields the per-network /64.
+    pub fn ipv6_subnet_id(&self) -> Option<u16> {
+        match self {
+            Network::Lan { ipv6_subnet_id, .. } | Network::Simple { ipv6_subnet_id, .. } => {
+                *ipv6_subnet_id
+            }
+            Network::Wan { .. } => None,
+        }
     }
 }
 

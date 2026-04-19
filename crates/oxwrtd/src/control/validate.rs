@@ -232,6 +232,7 @@ mod tests {
                     name: "wan".to_string(),
                     iface: "eth1".to_string(),
                     wan: crate::config::WanConfig::Dhcp,
+                    ipv6_pd: false,
                 },
                 Network::Lan {
                     name: "lan".to_string(),
@@ -241,6 +242,7 @@ mod tests {
                     prefix: 24,
                     ipv6_address: None,
                     ipv6_prefix: None,
+                    ipv6_subnet_id: None,
                 },
                 Network::Simple {
                     name: "guest".to_string(),
@@ -249,6 +251,7 @@ mod tests {
                     prefix: 24,
                     ipv6_address: None,
                     ipv6_prefix: None,
+                    ipv6_subnet_id: None,
                 },
             ],
             firewall: Firewall {
