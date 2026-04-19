@@ -63,6 +63,12 @@ pub struct ControlState {
     /// changes listen addr stops the old task and starts a new
     /// one. None = no listener running.
     pub metrics_task: Mutex<Option<MetricsTask>>,
+    /// Active WAN name — set by the wan_failover coordinator
+    /// each time it picks a WAN to serve the default route. `None`
+    /// until the first lease arrives. Read by Status RPC; optional
+    /// in single-WAN deployments (the sole WAN's lease appears in
+    /// `wan` anyway).
+    pub active_wan: Arc<Mutex<Option<String>>>,
 }
 
 /// Tracking record for the current metrics HTTP listener.
@@ -80,6 +86,7 @@ impl ControlState {
         logd: Logd,
         firewall_dump: Vec<String>,
         wan_lease: SharedLease,
+        active_wan: Arc<Mutex<Option<String>>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             config: RwLock::new(Arc::new(config)),
@@ -90,6 +97,7 @@ impl ControlState {
             boot_time: std::time::Instant::now(),
             control_only: false,
             metrics_task: Mutex::new(None),
+            active_wan,
         })
     }
 
@@ -112,6 +120,7 @@ impl ControlState {
             boot_time: std::time::Instant::now(),
             control_only: true,
             metrics_task: Mutex::new(None),
+            active_wan: Arc::new(Mutex::new(None)),
         })
     }
 

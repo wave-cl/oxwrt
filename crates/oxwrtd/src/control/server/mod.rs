@@ -327,10 +327,17 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
             let firewall_rules = state.firewall_dump.read().unwrap().len();
             let aps = collect_ap_status(&state.config_snapshot());
             let wg = collect_wg_status(&state.config_snapshot());
+            let active_wan: Option<String> = state
+                .active_wan
+                .lock()
+                .ok()
+                .and_then(|g| (*g).clone());
+            tracing::debug!(?active_wan, "status: active_wan snapshot");
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
                 wan,
+                active_wan,
                 firewall_rules,
                 aps,
                 wg,

@@ -41,5 +41,6 @@ pub mod sysupgrade;
 pub mod urandom_seed;
 pub mod wan_dhcp;
 pub mod wan_dhcp6;
+pub mod wan_failover;
 pub mod wifi;
 pub mod wireguard;

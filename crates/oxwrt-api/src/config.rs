@@ -150,6 +150,10 @@ fn default_upnp_natpmp() -> bool {
     true
 }
 
+fn default_wan_priority() -> u32 {
+    100
+}
+
 /// A single IP blocklist entry. `name` doubles as the nftables set
 /// name — keep it `[A-Za-z0-9_-]` to match the kernel's allowed
 /// character set. Typical lists: firehol_level1 (~900 prefixes of
@@ -262,6 +266,25 @@ pub enum Network {
         /// None = no SQM (default FIFO, may bufferbloat under load).
         #[serde(default)]
         sqm: Option<SqmConfig>,
+        /// Failover priority. Lower = higher preference, iproute2
+        /// convention. On a multi-WAN deployment, oxwrtd picks the
+        /// lowest-numbered WAN whose DHCP lease is healthy as the
+        /// active egress, installs its gateway as the default
+        /// route, and mirrors its lease into DDNS / SharedLease.
+        /// On failure (lease lost, carrier down) the next
+        /// priority takes over. Single-WAN deployments don't need
+        /// to set this — default 100 covers every one-WAN case.
+        #[serde(default = "default_wan_priority")]
+        priority: u32,
+        /// Optional ICMP probe target for active health checks.
+        /// When set, oxwrtd pings this address through the WAN's
+        /// iface every `probe_interval_s` seconds (default 5);
+        /// a lost probe marks the WAN unhealthy regardless of the
+        /// lease state. Covers the "lease valid but upstream router
+        /// is dead" case that pure-lease health misses. None =
+        /// lease-state alone decides health.
+        #[serde(default)]
+        probe_target: Option<std::net::IpAddr>,
     },
     Lan {
         name: String,
@@ -372,10 +395,41 @@ impl Network {
 
 impl Config {
     /// Find the first WAN network (for DHCP client, default route, etc.).
+    /// On multi-WAN deployments this returns the lowest-priority
+    /// entry, which matches the failover convention: lowest number
+    /// wins by default. Callers that want the actual runtime-active
+    /// WAN should use the failover coordinator's `active_wan`
+    /// signal instead — this is just "what the config asks to be
+    /// primary before any probes run."
     pub fn primary_wan(&self) -> Option<&Network> {
-        self.networks
+        self.wans_by_priority().into_iter().next()
+    }
+
+    /// All WAN entries, sorted by `priority` ascending (lowest =
+    /// highest preference, iproute2 convention). Ties break on
+    /// insertion order. On a single-WAN config this is just
+    /// `vec![primary_wan()]`; on multi-WAN it's the failover order
+    /// the coordinator will walk.
+    pub fn wans_by_priority(&self) -> Vec<&Network> {
+        let mut wans: Vec<&Network> = self
+            .networks
             .iter()
-            .find(|n| matches!(n, Network::Wan { .. }))
+            .filter(|n| matches!(n, Network::Wan { .. }))
+            .collect();
+        wans.sort_by_key(|n| match n {
+            Network::Wan { priority, .. } => *priority,
+            _ => u32::MAX,
+        });
+        wans
+    }
+
+    /// Read the priority from a Network::Wan; useful for sorting
+    /// per-WAN lease maps or Status RPC entries.
+    pub fn wan_priority(net: &Network) -> u32 {
+        match net {
+            Network::Wan { priority, .. } => *priority,
+            _ => u32::MAX,
+        }
     }
 
     /// Find the first LAN network.

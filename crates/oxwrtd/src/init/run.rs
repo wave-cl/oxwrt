@@ -467,61 +467,131 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
 
     let wan_lease: control::SharedLease = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-    if let (
-        Some(net_handle),
-        Some(Network::Wan {
-            iface,
-            wan: WanConfig::Dhcp,
-            ..
-        }),
-    ) = (&net, cfg.primary_wan())
-    {
-        let handle = net_handle.handle().clone();
-        let iface = iface.clone();
-        let wan_lease_clone = wan_lease.clone();
-        // Spawn acquire + renewal as a single background task so initial
-        // failure (e.g. WAN cable not plugged at boot) doesn't give up
-        // forever. The task retries acquire with 10s→5min backoff until
-        // the link is usable, then spawns the normal renewal loop and
-        // triggers SNTP bootstrap. Keeps oxwrt boot deterministic — we
-        // don't block userspace-init waiting for DHCP.
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(10);
-            let lease = loop {
-                match wan_dhcp::acquire(&handle, &iface, Duration::from_secs(15)).await {
-                    Ok(l) => break l,
-                    Err(e) => {
-                        tracing::warn!(
-                            iface = %iface, error = %e, backoff_s = backoff.as_secs(),
-                            "wan dhcp: initial acquire failed; retrying"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(300));
+    // Per-WAN lease slots: one entry per Network::Wan declared in
+    // cfg, keyed by name. Each DHCP client writes into its own
+    // slot; the failover coordinator picks the best-priority
+    // healthy slot and mirrors it into `wan_lease` above (which
+    // downstream code — DDNS, Status, metrics — reads).
+    let wan_leases = crate::wan_failover::new_wan_leases();
+    let active_wan = crate::wan_failover::new_active_wan();
+
+    if let Some(net_handle) = &net {
+        // Pre-populate the slots so the coordinator sees entries
+        // from t=0 (even with no lease yet). Without this, a WAN
+        // that hasn't ACQUIRED yet would be absent from the map,
+        // which works but is noisier in the coordinator logs.
+        {
+            let mut leases = wan_leases.write().unwrap();
+            for w in cfg.wans_by_priority() {
+                leases.insert(w.name().to_string(), None);
+            }
+        }
+
+        // Spawn DHCP acquire + renewal per WAN. Same retry/backoff
+        // pattern as before; only change is each task writes its
+        // own named slot in wan_leases instead of the shared one.
+        // SNTP bootstrap still fires once any WAN reaches Acquired
+        // — first-to-acquire wins the "set the clock" race, which
+        // is fine because all WANs talk to the same anycast NTP.
+        let sntp_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for w in cfg.wans_by_priority() {
+            if let Network::Wan {
+                name,
+                iface,
+                wan: WanConfig::Dhcp,
+                ..
+            } = w
+            {
+                let handle = net_handle.handle().clone();
+                let iface = iface.clone();
+                let name = name.clone();
+                let wan_leases = wan_leases.clone();
+                let sntp_fired = sntp_fired.clone();
+                tokio::spawn(async move {
+                    let mut backoff = Duration::from_secs(10);
+                    let lease = loop {
+                        match wan_dhcp::acquire(&handle, &iface, Duration::from_secs(15)).await {
+                            Ok(l) => break l,
+                            Err(e) => {
+                                tracing::warn!(
+                                    wan = %name, iface = %iface, error = %e, backoff_s = backoff.as_secs(),
+                                    "wan dhcp: initial acquire failed; retrying"
+                                );
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(Duration::from_secs(300));
+                            }
+                        }
+                    };
+                    if let Err(e) = wan_dhcp::apply_lease(&handle, &iface, &lease).await {
+                        tracing::error!(wan = %name, iface = %iface, error = %e, "wan dhcp: apply_lease failed");
                     }
-                }
-            };
-            if let Err(e) = wan_dhcp::apply_lease(&handle, &iface, &lease).await {
-                tracing::error!(iface = %iface, error = %e, "wan dhcp: apply_lease failed");
+                    wan_leases
+                        .write()
+                        .unwrap()
+                        .insert(name.clone(), Some(lease.clone()));
+
+                    // Per-WAN renewal loop. The lease-slot
+                    // parameter is THIS wan's slot — a renewal
+                    // failure clears our slot, the failover
+                    // coordinator notices and switches to the
+                    // next priority.
+                    //
+                    // spawn_renewal_loop takes a SharedLease
+                    // (single-slot). To fit the per-WAN map, we
+                    // thread a dedicated SharedLease through and
+                    // copy changes back into wan_leases via a
+                    // mirror task. Cheap.
+                    let per_wan_shared: control::SharedLease =
+                        std::sync::Arc::new(std::sync::RwLock::new(Some(lease.clone())));
+                    drop(wan_dhcp::spawn_renewal_loop(
+                        handle,
+                        iface.clone(),
+                        lease,
+                        per_wan_shared.clone(),
+                    ));
+                    // Mirror per_wan_shared → wan_leases[name]
+                    // every 2 s so failover sees renewals.
+                    {
+                        let wan_leases = wan_leases.clone();
+                        let name = name.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                let snap: Option<Option<crate::wan_dhcp::DhcpLease>> =
+                                    per_wan_shared.read().ok().map(|g| g.clone());
+                                if let Some(s) = snap {
+                                    wan_leases.write().unwrap().insert(name.clone(), s);
+                                }
+                            }
+                        });
+                    }
+
+                    // Fire SNTP bootstrap once across all WANs —
+                    // the first to reach Acquired wins. Uses the
+                    // anycast time.cloudflare.com so there's no
+                    // per-WAN dependency.
+                    if !sntp_fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        if let Err(e) = sntp_bootstrap_clock("162.159.200.1:123").await {
+                            tracing::warn!(error = %e, "sntp bootstrap failed");
+                        }
+                    }
+                });
             }
-            *wan_lease_clone.write().unwrap() = Some(lease.clone());
-            // Renewal loop runs as a detached tokio task — the returned
-            // JoinHandle isn't awaited (fire-and-forget). `drop(_)`
-            // over `let _ =` so clippy's non-binding-let-on-future
-            // lint doesn't fire.
-            drop(wan_dhcp::spawn_renewal_loop(
-                handle,
-                iface.clone(),
-                lease,
-                wan_lease_clone,
-            ));
-            // SNTP bootstrap once WAN is up. See historical comment:
-            // time.cloudflare.com (162.159.200.1) is anycast, no DNS
-            // needed, used only to initialize the clock floor before
-            // ntpd-rs takes over.
-            if let Err(e) = sntp_bootstrap_clock("162.159.200.1:123").await {
-                tracing::warn!(error = %e, "sntp bootstrap failed");
-            }
-        });
+        }
+
+        // Failover coordinator: picks highest-priority WAN with
+        // a Some lease, mirrors into `wan_lease`, installs default
+        // route. Single-WAN deployments still run this; it's a
+        // no-op on the trivial case (pick_active always returns
+        // the sole WAN's lease).
+        let cfg_for_failover = std::sync::Arc::new(cfg.clone());
+        drop(crate::wan_failover::spawn(
+            cfg_for_failover,
+            wan_leases.clone(),
+            active_wan.clone(),
+            wan_lease.clone(),
+            net_handle.handle().clone(),
+        ));
     }
 
     // DHCPv6-PD on WAN. Gated on `ipv6_pd = true`. Acquire → apply
@@ -687,6 +757,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         logd.clone(),
         firewall_dump,
         wan_lease.clone(),
+        active_wan.clone(),
     );
 
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);

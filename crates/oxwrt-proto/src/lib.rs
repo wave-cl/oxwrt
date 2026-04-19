@@ -349,6 +349,7 @@ pub fn format_response(resp: &Response) -> String {
             services,
             supervisor_uptime_secs,
             wan,
+            active_wan,
             firewall_rules,
             aps,
             wg,
@@ -360,12 +361,17 @@ pub fn format_response(resp: &Response) -> String {
             ));
             match wan {
                 Some(w) => {
+                    let active = active_wan
+                        .as_deref()
+                        .map(|n| format!(" [active={n}]"))
+                        .unwrap_or_default();
                     out.push_str(&format!(
-                        "wan:               {}/{} via {} (lease {}s)\n",
+                        "wan:               {}/{} via {} (lease {}s){}\n",
                         w.address,
                         w.prefix,
                         w.gateway.as_deref().unwrap_or("none"),
-                        w.lease_seconds
+                        w.lease_seconds,
+                        active,
                     ));
                 }
                 None => {

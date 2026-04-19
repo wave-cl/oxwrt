@@ -169,8 +169,18 @@ pub enum Response {
         supervisor_uptime_secs: u64,
         /// Summary of the current WAN state. `None` for a router
         /// with no WAN lease (static config or failed acquire).
+        /// On multi-WAN deployments this is the ACTIVE WAN's
+        /// lease — the failover coordinator picks the lowest-
+        /// priority healthy one and mirrors it here.
         #[serde(default)]
         wan: Option<WanSummary>,
+        /// Name of the active WAN on a multi-WAN deployment.
+        /// `None` = no healthy WAN right now, or single-WAN
+        /// setup where the field is redundant with `wan`. Lets
+        /// operators see which upstream is serving traffic
+        /// without parsing the route table.
+        #[serde(default)]
+        active_wan: Option<String>,
         /// Number of rules in the installed firewall ruleset (from
         /// the cached dump). Useful for a smoke-test "did the firewall
         /// install?" check without pulling the full dump.
