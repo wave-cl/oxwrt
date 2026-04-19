@@ -23,10 +23,10 @@
 //! whenever someone asks — `RouteMessageBuilder` is generic over
 //! the address type, so it's ~30 LOC of copy-paste.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 
-use oxwrt_api::config::{Config, Route};
+use oxwrt_api::config::{Config, Route, Route6};
 use rtnetlink::packet_route::link::LinkAttribute;
 use rtnetlink::{Handle, RouteMessageBuilder};
 
@@ -46,6 +46,10 @@ pub enum Error {
 /// a shell.
 pub static LAST_INSTALLED: Mutex<Vec<Route>> = Mutex::new(Vec::new());
 
+/// v6 counterpart to `LAST_INSTALLED`. Kept separate so a reload
+/// that only touches one address family doesn't churn the other.
+pub static LAST_INSTALLED_V6: Mutex<Vec<Route6>> = Mutex::new(Vec::new());
+
 /// Install the currently-configured static routes. Idempotent: a
 /// second call with the same `cfg.routes` does nothing (each add
 /// returns EEXIST, which we swallow). Called once at boot from
@@ -54,6 +58,8 @@ pub static LAST_INSTALLED: Mutex<Vec<Route>> = Mutex::new(Vec::new());
 pub async fn install(cfg: &Config, handle: &Handle) -> Result<(), Error> {
     reconcile(&[], &cfg.routes, handle).await?;
     *LAST_INSTALLED.lock().unwrap() = cfg.routes.clone();
+    reconcile6(&[], &cfg.routes6, handle).await?;
+    *LAST_INSTALLED_V6.lock().unwrap() = cfg.routes6.clone();
     Ok(())
 }
 
@@ -66,6 +72,9 @@ pub async fn reload(cfg: &Config, handle: &Handle) -> Result<(), Error> {
     let old = LAST_INSTALLED.lock().unwrap().clone();
     reconcile(&old, &cfg.routes, handle).await?;
     *LAST_INSTALLED.lock().unwrap() = cfg.routes.clone();
+    let old6 = LAST_INSTALLED_V6.lock().unwrap().clone();
+    reconcile6(&old6, &cfg.routes6, handle).await?;
+    *LAST_INSTALLED_V6.lock().unwrap() = cfg.routes6.clone();
     Ok(())
 }
 
@@ -156,6 +165,97 @@ async fn del_route(r: &Route, handle: &Handle) -> Result<(), Error> {
             tracing::debug!(
                 dest = %r.dest, iface = %r.iface,
                 "static route: already absent on del"
+            );
+            Ok(())
+        }
+        Err(e) => Err(Error::Rtnetlink(e)),
+    }
+}
+
+// ── IPv6 variants ───────────────────────────────────────────────
+//
+// Parallel to the v4 path above with `Ipv6Addr` + `Route6`. Kept
+// as separate functions rather than generic-over-address because
+// rtnetlink's RouteMessageBuilder<T> doesn't expose a clean trait
+// bound we can abstract over without more boilerplate than just
+// writing the v6 twins. ~60 LOC of controlled duplication.
+
+async fn reconcile6(old: &[Route6], new: &[Route6], handle: &Handle) -> Result<(), Error> {
+    for r in old {
+        if !new.contains(r) {
+            del_route6(r, handle).await?;
+        }
+    }
+    for r in new {
+        if !old.contains(r) {
+            add_route6(r, handle).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn add_route6(r: &Route6, handle: &Handle) -> Result<(), Error> {
+    let ifindex = resolve_ifindex(&r.iface, handle).await?;
+    let mut b = RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(r.dest, r.prefix)
+        .output_interface(ifindex)
+        .priority(r.metric);
+    if let Some(gw) = r.gateway {
+        b = b.gateway(gw);
+    }
+    let msg = b.build();
+    match handle.route().add(msg).execute().await {
+        Ok(()) => {
+            tracing::info!(
+                dest = %r.dest, prefix = r.prefix,
+                gateway = ?r.gateway, iface = %r.iface, metric = r.metric,
+                "static route6: installed"
+            );
+            Ok(())
+        }
+        Err(e) if is_exists(&e) => {
+            tracing::warn!(
+                dest = %r.dest, prefix = r.prefix, iface = %r.iface,
+                "static route6: already exists, keeping existing"
+            );
+            Ok(())
+        }
+        Err(e) => Err(Error::Rtnetlink(e)),
+    }
+}
+
+async fn del_route6(r: &Route6, handle: &Handle) -> Result<(), Error> {
+    let ifindex = match resolve_ifindex(&r.iface, handle).await {
+        Ok(i) => i,
+        Err(Error::IfaceNotFound(_)) => {
+            tracing::debug!(
+                dest = %r.dest, iface = %r.iface,
+                "static route6: iface gone on del, nothing to do"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let mut b = RouteMessageBuilder::<Ipv6Addr>::new()
+        .destination_prefix(r.dest, r.prefix)
+        .output_interface(ifindex)
+        .priority(r.metric);
+    if let Some(gw) = r.gateway {
+        b = b.gateway(gw);
+    }
+    let msg = b.build();
+    match handle.route().del(msg).execute().await {
+        Ok(()) => {
+            tracing::info!(
+                dest = %r.dest, prefix = r.prefix, iface = %r.iface,
+                "static route6: removed"
+            );
+            Ok(())
+        }
+        Err(e) if is_nosuch(&e) => {
+            tracing::debug!(
+                dest = %r.dest, iface = %r.iface,
+                "static route6: already absent on del"
             );
             Ok(())
         }

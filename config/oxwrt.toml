@@ -335,6 +335,17 @@ action = "accept"
 # iface = "wg0"
 # metric = 200                      # default 1024
 
+# IPv6 variant with the same shape. Reconciled on every reload
+# alongside [[routes]]. Empty = kernel's on-link v6 routes + any
+# RA-installed default are the only ones present.
+#
+# [[routes6]]
+# dest = "2001:db8::"
+# prefix = 32
+# gateway = "fe80::1"               # optional; link-local gw ok
+# iface = "wg0"
+# metric = 200
+
 # ---------------- Blocklists ----------------
 #
 # IP blocklists: periodically-fetched CIDR lists that drop matching

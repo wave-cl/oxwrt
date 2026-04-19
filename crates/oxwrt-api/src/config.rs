@@ -79,6 +79,13 @@ pub struct Config {
     /// the kernel's on-link + DHCP-installed default.
     #[serde(default)]
     pub routes: Vec<Route>,
+    /// Static IPv6 routes. Same shape as [[routes]] but with
+    /// Ipv6Addr dest + gateway; reconciled on every reload
+    /// alongside the v4 table. Empty = kernel's on-link v6
+    /// routes + any RA-installed default are the only ones
+    /// present.
+    #[serde(default)]
+    pub routes6: Vec<Route6>,
     /// IP blocklists: periodically-fetched CIDR lists that drop
     /// matching source addresses at the INPUT chain. One line per
     /// CIDR in the URL body, `#` comments ok. Equivalent to
@@ -192,6 +199,30 @@ pub struct Route {
 
 fn default_route_metric() -> u32 {
     1024
+}
+
+/// Static IPv6 route. Same shape as `Route` with Ipv6Addr fields.
+/// Kept as a separate struct rather than generic-over-address so
+/// TOML sections remain unambiguous (`[[routes]]` = v4,
+/// `[[routes6]]` = v6), which matches how operators think about
+/// the two tables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Route6 {
+    /// Network address. Must align with `prefix`.
+    pub dest: Ipv6Addr,
+    /// Prefix length, 0..=128. `0` = default route (unusual;
+    /// RA normally installs one). `128` = host route.
+    pub prefix: u8,
+    /// Next-hop gateway. `None` = on-link route.
+    #[serde(default)]
+    pub gateway: Option<Ipv6Addr>,
+    /// Output interface. Required — same rationale as the v4
+    /// path.
+    pub iface: String,
+    /// Route metric; lower wins when multiple routes match.
+    /// Default 1024 (same convention as v4).
+    #[serde(default = "default_route_metric")]
+    pub metric: u32,
 }
 
 /// Prometheus `/metrics` endpoint configuration.
@@ -1466,6 +1497,61 @@ prefix = 16
 "#;
         let err = toml::from_str::<Route>(toml).unwrap_err().to_string();
         assert!(err.contains("iface"), "err should mention iface: {err}");
+    }
+
+    #[test]
+    fn route6_minimal_fields_default_metric_and_no_gateway() {
+        let toml = r#"
+dest = "2001:db8::"
+prefix = 32
+iface = "wg0"
+"#;
+        let r: Route6 = toml::from_str(toml).unwrap();
+        assert_eq!(r.dest, "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap());
+        assert_eq!(r.prefix, 32);
+        assert_eq!(r.iface, "wg0");
+        assert_eq!(r.gateway, None);
+        assert_eq!(r.metric, 1024);
+    }
+
+    #[test]
+    fn route6_with_gateway_and_metric_roundtrips() {
+        let toml = r#"
+dest = "fd00:beef::"
+prefix = 48
+gateway = "fe80::1"
+iface = "wg0"
+metric = 200
+"#;
+        let r: Route6 = toml::from_str(toml).unwrap();
+        assert_eq!(r.gateway, Some("fe80::1".parse::<std::net::Ipv6Addr>().unwrap()));
+        assert_eq!(r.metric, 200);
+    }
+
+    #[test]
+    fn route6_list_parses_and_routes_list_independent() {
+        // Mixing [[routes]] + [[routes6]] in one doc must keep them
+        // in separate collections — no cross-contamination from
+        // serde's table-array handling.
+        let toml = r#"
+[[routes]]
+dest = "10.0.0.0"
+prefix = 8
+iface = "wg0"
+
+[[routes6]]
+dest = "2001:db8::"
+prefix = 32
+iface = "wg0"
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            routes: Vec<Route>,
+            routes6: Vec<Route6>,
+        }
+        let w: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(w.routes.len(), 1);
+        assert_eq!(w.routes6.len(), 1);
     }
 
     #[test]

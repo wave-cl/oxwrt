@@ -131,6 +131,7 @@ mod tests {
             ddns: vec![],
             metrics: None,
             routes: vec![],
+            routes6: vec![],
             blocklists: vec![],
             upnp: None,
             control: Control {
