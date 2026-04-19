@@ -764,7 +764,12 @@ async fn attach_netns_async(args: Vec<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    eprintln!("attach-netns: ok pid={pid} peer={peer_name} ip={peer_ip}/{prefix} gw={gateway_ip}");
+    // Success is conveyed by exit 0 — the parent container-spawn
+    // code already logs a structured "host veth paired" line for
+    // operators. Dropping the `attach-netns: ok ...` eprintln
+    // that otherwise shows up on the console / in dmesg once per
+    // service at boot, offering no information the host-side log
+    // doesn't already carry.
     ExitCode::SUCCESS
 }
 

@@ -82,7 +82,21 @@ impl Server {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = this.handle_incoming(incoming).await {
-                    tracing::warn!(error = %e, "control: connection error");
+                    // Client disconnects-without-close (the CLI exits
+                    // as soon as its single RPC finishes) show up here
+                    // as "quinn connection: timed out" from the idle
+                    // timer. That's normal operation, not actionable —
+                    // downgrade to debug so every oxctl call doesn't
+                    // spam a warn into dmesg. Real handler bugs
+                    // (frame parse, rpc dispatch failure) produce
+                    // different error text and still need visibility
+                    // — for those we raise to warn explicitly.
+                    let s = e.to_string();
+                    if s.contains("timed out") || s.contains("connection closed") {
+                        tracing::debug!(error = %e, "control: peer idle-closed connection");
+                    } else {
+                        tracing::warn!(error = %e, "control: connection error");
+                    }
                 }
             });
         }

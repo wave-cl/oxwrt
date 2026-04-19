@@ -19,7 +19,7 @@
 //! elsewhere — rtnetlink doesn't have a first-class API for qdisc
 //! mutation yet.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use oxwrt_api::config::{Config, Network};
 
@@ -36,14 +36,22 @@ pub fn setup_sqm(cfg: &Config) -> Result<(), Error> {
         let Some(sqm) = sqm.as_ref() else {
             // No SQM declared — actively remove any stale qdisc from a
             // previous reload so the iface falls back to the kernel
-            // default (pfifo_fast). Ignore errors — a fresh iface has
-            // no root qdisc to clear.
+            // default (pfifo_fast). Silence stderr — on a fresh boot
+            // there's no root qdisc or ifb iface to clear, and tc/ip
+            // print "Cannot delete qdisc with handle of zero" / "Cannot
+            // find device" to stderr which then shows up in dmesg via
+            // our kmsg writer. The exit status already tells us
+            // success/fail, which we're ignoring anyway.
             let _ = Command::new("tc")
                 .args(["qdisc", "del", "dev", iface, "root"])
+                .stderr(Stdio::null())
+                .stdout(Stdio::null())
                 .status();
             let ifb = ifb_name(iface);
             let _ = Command::new("ip")
                 .args(["link", "del", "dev", &ifb])
+                .stderr(Stdio::null())
+                .stdout(Stdio::null())
                 .status();
             continue;
         };
@@ -76,9 +84,12 @@ fn apply_one(wan_iface: &str, sqm: &oxwrt_api::config::SqmConfig) -> Result<(), 
         tracing::info!(iface = wan_iface, kbps = up, "sqm: egress CAKE installed");
     } else {
         // Explicit up=unset + down=set: remove any stale root qdisc
-        // so the existing shaping doesn't stick around.
+        // so the existing shaping doesn't stick around. Silence
+        // stderr — same rationale as the top-level tear-down path.
         let _ = Command::new("tc")
             .args(["qdisc", "del", "dev", wan_iface, "root"])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
             .status();
     }
 
@@ -99,9 +110,12 @@ fn apply_one(wan_iface: &str, sqm: &oxwrt_api::config::SqmConfig) -> Result<(), 
 
         // Mirror WAN's ingress → IFB egress. Replace the filter
         // parent (the clsact qdisc) so a reload doesn't stack up
-        // N copies of the filter.
+        // N copies of the filter. Silence stderr on del — fresh
+        // iface has no ingress qdisc yet.
         let _ = Command::new("tc")
             .args(["qdisc", "del", "dev", wan_iface, "ingress"])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
             .status();
         run(
             "tc",
@@ -144,12 +158,17 @@ fn apply_one(wan_iface: &str, sqm: &oxwrt_api::config::SqmConfig) -> Result<(), 
         );
     } else {
         // No download shaping requested — tear down any leftover
-        // IFB + ingress filter.
+        // IFB + ingress filter. Silence stderr — fresh config has
+        // nothing to tear down and we'd otherwise pollute dmesg.
         let _ = Command::new("tc")
             .args(["qdisc", "del", "dev", wan_iface, "ingress"])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
             .status();
         let _ = Command::new("ip")
             .args(["link", "del", "dev", &ifb])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
             .status();
     }
 
