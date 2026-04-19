@@ -248,10 +248,58 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                 }
             }
         }
+        // Saturate every tokio worker thread with a blocking sleep
+        // so NO task can run — including the watchdog heartbeat.
+        // After STALL_THRESHOLD (20s) the pet loop withholds the
+        // /dev/watchdog write and the kernel hardware watchdog
+        // fires (31s default on MT7986) → board resets. Used to
+        // verify the watchdog's stall-detection path end-to-end.
+        //
+        // Single-task stalls (blocking one worker) don't wedge a
+        // multi_thread runtime — tokio schedules other tasks on
+        // free workers, the heartbeat keeps ticking, watchdog
+        // keeps feeding. That's the correct behavior; this op
+        // simulates the RARE "all workers deadlocked" failure
+        // mode instead.
+        //
+        // Safety cap 1..=60 seconds so a typo can't brick the
+        // router for a week; 30s default covers the 20 + 31 = 51s
+        // expected time-to-reboot with headroom.
+        "stall" => {
+            let secs: u64 = args
+                .first()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n: &u64| (1..=60).contains(&n))
+                .unwrap_or(30);
+            // Spawn workers+1 blocking tasks: if tokio's default
+            // worker_threads is N, N+1 parallel thread::sleeps
+            // guarantee we hold every worker plus one more in the
+            // queue. Empirically on dual-core MT7986 with tokio's
+            // default N=num_cpus, 4-8 spawns cover every sizing.
+            tracing::warn!(
+                secs,
+                "diag: saturating tokio workers (watchdog should fire if stall > 20s)"
+            );
+            let mut handles = Vec::new();
+            for _ in 0..16 {
+                handles.push(tokio::spawn(async move {
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                }));
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+            Response::Value {
+                value: format!(
+                    "stalled for {secs}s (if you see this, watchdog didn't fire — \
+                     maybe runtime has more than 16 workers)"
+                ),
+            }
+        }
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig)"
+                 modules, dmesg, nft, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig, stall)"
             ),
         },
     }
