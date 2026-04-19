@@ -132,6 +132,7 @@ mod tests {
             metrics: None,
             routes: vec![],
             blocklists: vec![],
+            upnp: None,
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),

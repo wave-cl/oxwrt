@@ -881,6 +881,29 @@ seccomp_allow = []
 user_namespace = false
 landlock = false
 
+# ---------------- UPnP / NAT-PMP ----------------
+#
+# Enables miniupnpd: LAN clients (game consoles, p2p apps, etc.)
+# request transient WAN port mappings without the operator
+# pre-declaring [[port_forwards]]. The daemon installs its own
+# DNAT rules into a dedicated `oxwrt-upnpd` nftables table so its
+# transient mappings never collide with static forwards.
+#
+# The miniupnpd binary is not bundled in oxwrt today — the schema
+# + config rendering land first so operators shipping their own
+# build have a /etc/oxwrt/miniupnpd.conf waiting. Adding the
+# services-upnpd cross-build to the Makefile + a matching
+# [[services]] entry here is tracked as a follow-up.
+#
+# Example (commented):
+#
+# [upnp]
+# wan = "eth1"                    # WAN iface (outside)
+# lan = "br-lan"                  # LAN iface (inside)
+# min_port = 1024                 # smallest port clients may map
+# max_port = 65535                # largest port clients may map
+# enable_natpmp = true            # Apple's pre-PCP protocol
+
 # ---------------- Metrics ----------------
 #
 # Optional Prometheus-format /metrics endpoint. Plain HTTP, no auth —

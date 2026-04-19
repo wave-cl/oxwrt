@@ -87,7 +87,60 @@ pub struct Config {
     /// table, refreshed at `refresh_seconds` cadence.
     #[serde(default)]
     pub blocklists: Vec<Blocklist>,
+    /// Optional UPnP / NAT-PMP / PCP port-mapping daemon. When set,
+    /// a miniupnpd service is configured (config file generated
+    /// from this block) and — assuming the binary is present in
+    /// the image — supervised like any other service. LAN clients
+    /// can then request transient DNATs for gaming/p2p without the
+    /// operator pre-declaring [[port_forwards]]. None = disabled.
+    ///
+    /// The miniupnpd binary itself is not bundled in oxwrt today;
+    /// the schema + config rendering land first so operators can
+    /// wire an external package manager build, and a follow-up
+    /// task adds the services-upnpd cross-build to the Makefile.
+    #[serde(default)]
+    pub upnp: Option<UpnpConfig>,
     pub control: Control,
+}
+
+/// UPnP / NAT-PMP / PCP (miniupnpd) configuration. Renders to a
+/// /etc/oxwrt/miniupnpd.conf that the miniupnpd binary consumes at
+/// service start. The daemon installs its own DNAT rules into a
+/// dedicated `oxwrt-upnpd` nftables table so its transient
+/// mappings never collide with config-driven `[[port_forwards]]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpnpConfig {
+    /// WAN iface miniupnpd advertises (outside). Matches the
+    /// `iface` of the primary `[[networks]] type="wan"` entry in
+    /// typical setups; breaking this out lets PPPoE deployments
+    /// name the ppp0-style iface without wiring a second WAN
+    /// declaration.
+    pub wan: String,
+    /// LAN iface miniupnpd listens on (inside). One iface only —
+    /// multi-LAN is a miniupnpd limitation, not ours.
+    pub lan: String,
+    /// Minimum external port miniupnpd is allowed to map. Lower
+    /// bound prevents clients from grabbing well-known ports.
+    #[serde(default = "default_upnp_port_min")]
+    pub min_port: u16,
+    /// Maximum external port miniupnpd is allowed to map.
+    #[serde(default = "default_upnp_port_max")]
+    pub max_port: u16,
+    /// Enable NAT-PMP (RFC 6886, Apple's legacy pre-PCP protocol)
+    /// alongside UPnP. Both protocols work over the same daemon;
+    /// some older clients only speak NAT-PMP.
+    #[serde(default = "default_upnp_natpmp")]
+    pub enable_natpmp: bool,
+}
+
+fn default_upnp_port_min() -> u16 {
+    1024
+}
+fn default_upnp_port_max() -> u16 {
+    65535
+}
+fn default_upnp_natpmp() -> bool {
+    true
 }
 
 /// A single IP blocklist entry. `name` doubles as the nftables set

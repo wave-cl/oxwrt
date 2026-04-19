@@ -440,6 +440,14 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         tracing::error!(error = %e, "corerad config generation failed");
     }
 
+    // miniupnpd config (no-op when [upnp] absent). The binary
+    // itself isn't bundled today — schema + generator land first
+    // so operators who ship their own miniupnpd build have a
+    // config file waiting for them at /etc/oxwrt/miniupnpd.conf.
+    if let Err(e) = crate::miniupnpd::write_config(&cfg) {
+        tracing::error!(error = %e, "miniupnpd config generation failed");
+    }
+
     // SQM: install CAKE qdiscs on any WAN iface declaring `sqm`.
     // Idempotent + no-op when unconfigured. Needs iproute2 + the
     // kmod-sched-cake kernel module in the image.

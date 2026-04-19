@@ -139,6 +139,13 @@ pub async fn handle_reload_async(state: &ControlState) -> Response {
         tracing::error!(error = %e, "reload: corerad config write failed");
     }
 
+    // Regenerate miniupnpd config from new_cfg.upnp. Same lifecycle
+    // as corerad — the service (when present) picks up the new
+    // config on its next supervisor-driven restart.
+    if let Err(e) = crate::miniupnpd::write_config(&new_cfg) {
+        tracing::error!(error = %e, "reload: miniupnpd config write failed");
+    }
+
     // Reapply SQM — picks up bandwidth/extra_args changes; removes
     // stale qdiscs when sqm goes from Some → None.
     if let Err(e) = crate::sqm::setup_sqm(&new_cfg) {

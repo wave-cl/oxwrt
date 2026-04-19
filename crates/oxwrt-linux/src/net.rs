@@ -1243,6 +1243,7 @@ mod tests {
             metrics: None,
             routes: vec![],
             blocklists: vec![],
+            upnp: None,
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),
