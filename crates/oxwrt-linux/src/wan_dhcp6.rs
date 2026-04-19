@@ -847,10 +847,20 @@ mod tests {
 
     #[test]
     fn subnet_host_address_56() {
-        // 2001:db8:abcd::/56 + subnet_id 1 → 2001:db8:abcd:100::1
+        // /56 delegation leaves bits 56..63 (byte 7) for slicing.
+        // subnet_id=1 sets byte 7 = 0x01, which is the LOW nibble of
+        // hextet 3. Result: 2001:db8:abcd:0001::1 → `2001:db8:abcd:1::1`
+        // (hextet 3 displays its leading zeros stripped).
         let p: Ipv6Addr = "2001:db8:abcd::".parse().unwrap();
         let got = subnet_host_address(p, 56, 1).unwrap();
-        assert_eq!(got, "2001:db8:abcd:100::1".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(got, "2001:db8:abcd:1::1".parse::<Ipv6Addr>().unwrap());
+        // subnet_id=0xab should put 0xab into byte 7 → hextet 3 = 0x00ab
+        // → `2001:db8:abcd:ab::1`.
+        let got = subnet_host_address(p, 56, 0xab).unwrap();
+        assert_eq!(got, "2001:db8:abcd:ab::1".parse::<Ipv6Addr>().unwrap());
+        // subnet_id=0xff fits; 0x100 overflows the 8-bit slicing space.
+        assert!(subnet_host_address(p, 56, 0xff).is_some());
+        assert!(subnet_host_address(p, 56, 0x100).is_none());
     }
 
     #[test]
