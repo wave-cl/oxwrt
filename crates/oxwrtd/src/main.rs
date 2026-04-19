@@ -102,25 +102,145 @@ fn run_print_server_key(args: Vec<String>) -> ExitCode {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::time::Uptime;
-    // Read RUST_LOG; default to info for our own crate and warn elsewhere
-    // so e.g. rtnetlink's internal debug chatter doesn't drown the real
-    // output. Written to stderr so stdout stays clean for subcommands
-    // like --version that pipe values.
+    // Read RUST_LOG; default to info for our own crate and warn
+    // elsewhere so e.g. rtnetlink's internal debug chatter doesn't
+    // drown the real output.
     //
-    // Timer: Uptime (seconds since process start) instead of chrono
-    // wall clock. Wall clock reads 1970-01-01 until NTP syncs,
-    // which pollutes every boot log line oxwrtd emits before the
-    // `ntp` service runs. Uptime is always meaningful, matches the
-    // `[  X.YYY]` format dmesg uses so operators can correlate
-    // oxwrtd and kernel events on the same timeline.
+    // Writer: /dev/kmsg when available, so our logs land in the
+    // kernel ring buffer with matching `[X.YYY]` timestamps and
+    // interleave correctly with dmesg output. Fall back to stderr
+    // when /dev/kmsg isn't writable (non-root dev builds, early
+    // pre-mount window, non-Linux hosts).
+    //
+    // Timer: suppressed in kmsg mode (kernel adds its own); Uptime
+    // in stderr mode so dev builds still see meaningful timestamps
+    // without the wall-clock 1970 problem before NTP sync.
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("oxwrtd=info,warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_timer(Uptime::default())
-        .with_writer(std::io::stderr)
-        .try_init();
+    if let Some(writer) = KmsgMakeWriter::try_new() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .without_time()
+            .with_level(false) // kmsg priority byte carries this
+            .with_writer(writer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_timer(Uptime::default())
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+}
+
+/// `MakeWriter` that emits each event to `/dev/kmsg` with the
+/// syslog-priority byte prefix the kernel expects. One file handle
+/// held for the process lifetime; every event is a `write_all` of
+/// `<N>body\n`. /dev/kmsg guarantees atomic per-write record
+/// boundaries (up to 1024 B) so no locking is needed on the file
+/// itself — the kernel serialises concurrent writers.
+///
+/// Priority mapping matches syslog's RFC 3164 levels:
+///   ERROR → 3 (err)
+///   WARN  → 4 (warning)
+///   INFO  → 6 (info)
+///   DEBUG → 7 (debug)
+///   TRACE → 7 (debug)
+#[derive(Clone)]
+struct KmsgMakeWriter {
+    file: std::sync::Arc<std::fs::File>,
+}
+
+impl KmsgMakeWriter {
+    fn try_new() -> Option<Self> {
+        // O_WRONLY is what the kernel docs for /dev/kmsg say to
+        // use. Missing /dev/kmsg (macOS, containers without
+        // CAP_SYSLOG, early-boot pre-mount) → None, caller falls
+        // back to stderr.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/kmsg")
+            .ok()?;
+        Some(Self {
+            file: std::sync::Arc::new(file),
+        })
+    }
+}
+
+struct KmsgWriter {
+    file: std::sync::Arc<std::fs::File>,
+    priority: u8,
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for KmsgWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // Buffer until the formatter calls flush — tracing_subscriber
+        // writes the formatted event in multiple small writes and
+        // only the flush marks "record complete". If we wrote each
+        // chunk separately, /dev/kmsg's one-record-per-write rule
+        // would shard a single event across N dmesg lines.
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        // Strip a trailing newline so we append exactly one after
+        // the `<N>` prefix — matches the `<N>body\n` format the
+        // kernel parses.
+        let body = if self.buf.ends_with(b"\n") {
+            &self.buf[..self.buf.len() - 1]
+        } else {
+            &self.buf[..]
+        };
+        let mut record = Vec::with_capacity(body.len() + 4);
+        record.extend_from_slice(format!("<{}>", self.priority).as_bytes());
+        record.extend_from_slice(body);
+        record.push(b'\n');
+        // Atomic single write into /dev/kmsg — the kernel splits
+        // into records on write boundaries. Using (&File).write_all
+        // (immutable ref) works because the kernel serialises. Use
+        // the trait via fully-qualified path to avoid a redundant
+        // `use` that the outer macOS build would flag.
+        <&std::fs::File as std::io::Write>::write_all(&mut (&*self.file), &record)?;
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+impl Drop for KmsgWriter {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for KmsgMakeWriter {
+    type Writer = KmsgWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        KmsgWriter {
+            file: self.file.clone(),
+            priority: 6, // INFO default when level is unknown
+            buf: Vec::new(),
+        }
+    }
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let priority = match *meta.level() {
+            tracing::Level::ERROR => 3,
+            tracing::Level::WARN => 4,
+            tracing::Level::INFO => 6,
+            tracing::Level::DEBUG => 7,
+            tracing::Level::TRACE => 7,
+        };
+        KmsgWriter {
+            file: self.file.clone(),
+            priority,
+            buf: Vec::new(),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
