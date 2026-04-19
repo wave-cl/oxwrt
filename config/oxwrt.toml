@@ -513,15 +513,8 @@ target = "/etc/named.toml"
 source = "/etc/ssl/certs"
 target = "/etc/ssl/certs"
 
-# Hardening defaults are safe for hickory — the default retain list
-# (SETUID/SETGID/SETPCAP/NET_BIND_SERVICE) covers its bind(53) +
-# privilege drop to `nobody`. Uncomment to override:
-# [services.security]
-# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE"]
-# no_new_privs = true
-# seccomp = true
-# seccomp_allow = []
-# user_namespace = false   # opt-in; maps container uid 0 -> host uid 65534 (nobody)
+# Hardening defaults are safe for hickory on DoH — the default
+# retain list covers bind(53) + privilege drop to `nobody`.
 # landlock = true
 
 # --- coredhcp: DHCPv4 server for the LAN + guest subnets ---
