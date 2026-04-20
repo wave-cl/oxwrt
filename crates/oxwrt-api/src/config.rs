@@ -1029,6 +1029,16 @@ pub struct Zone {
     pub default_input: ChainPolicy,
     #[serde(default)]
     pub default_forward: ChainPolicy,
+    /// Default policy for packets leaving a member iface as the
+    /// *output* direction (kernel-originated, e.g. the daemon's
+    /// own outbound DNS lookup). Default `accept` matches what
+    /// every operator expects for a LAN zone; set to `drop` on a
+    /// zone whose member ifaces must NOT be used by local
+    /// processes (rare — typical use is a containment zone where
+    /// a hijacked daemon shouldn't be able to reach). Applies to
+    /// the shared `inet oxwrt` OUTPUT chain.
+    #[serde(default = "default_output_accept")]
+    pub default_output: ChainPolicy,
     #[serde(default)]
     pub masquerade: bool,
     /// When true, traffic forwarded FROM this zone routes through
@@ -1063,21 +1073,102 @@ pub enum ChainPolicy {
     Drop,
 }
 
+fn default_output_accept() -> ChainPolicy {
+    ChainPolicy::Accept
+}
+
+/// Address family for firewall rules. Defaults to `any` — the rule
+/// applies to both IPv4 and IPv6 traffic (via the `inet` table). Set
+/// explicitly to restrict to one family — useful when `src_ip` /
+/// `dest_ip` carries a CIDR of a specific family and you want the
+/// rule ignored on the other.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Family {
+    #[default]
+    Any,
+    Ipv4,
+    Ipv6,
+}
+
 /// A single firewall rule. Every firewall behavior is explicit — no
 /// `allow_dns = true` magic.
+///
+/// Rules with any of [`src_ip`, `dest_ip`, `src_mac`, `src_port`,
+/// `icmp_type`, `limit`, `log`, `family != any`] are "advanced" and
+/// render via the nft-text path (alongside scheduled + raw_nft
+/// rules). Rules with only the basic primitives (src/dest zones,
+/// proto, dest_port, ct_state, action) keep using the rustables
+/// batch path for speed + type safety.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub name: String,
+    /// Cheap on/off toggle. Defaults to true. Set false to leave
+    /// a rule around for documentation/reference without emitting
+    /// it — saves commenting out + restoring. The validator still
+    /// checks zone references even on disabled rules so a typo
+    /// trips at reload time, not at re-enable time.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub src: Option<String>,
     #[serde(default)]
     pub dest: Option<String>,
+    /// Address-family restriction. `any` (default) matches both
+    /// v4 and v6 (the `inet oxwrt` table is dual-family). Set
+    /// `ipv4` or `ipv6` to restrict, or to pair a CIDR in
+    /// `src_ip`/`dest_ip` with the correct family.
+    #[serde(default)]
+    pub family: Family,
+    /// Source IP / CIDR match. Accepts v4 (`192.168.50.0/24`),
+    /// v6 (`fd00:dead:beef::/64`), or a bare address (auto-masked
+    /// to /32 or /128). Empty vec = no source-address match.
+    /// Multiple entries render as an anonymous nft set.
+    #[serde(default)]
+    pub src_ip: Vec<String>,
+    /// Destination IP / CIDR match. Same syntax as `src_ip`.
+    #[serde(default)]
+    pub dest_ip: Vec<String>,
+    /// Source MAC address match (Ethernet layer). Accepts standard
+    /// `aa:bb:cc:dd:ee:ff` form. Useful for "this specific printer
+    /// gets a bypass" rules. Multiple entries render as a set.
+    #[serde(default)]
+    pub src_mac: Vec<String>,
+    /// Source port match (by contrast `dest_port` matches the
+    /// destination port). Rare but needed for rules like "accept
+    /// DHCP replies (sport 67)". Same PortSpec shape as dest_port.
+    #[serde(default)]
+    pub src_port: Option<PortSpec>,
     #[serde(default)]
     pub proto: Option<Proto>,
     #[serde(default)]
     pub dest_port: Option<PortSpec>,
+    /// ICMP type match — when set, applies only to packets of
+    /// the named ICMP type. Accepted names mirror nft's own
+    /// parser: `echo-request`, `echo-reply`, `destination-
+    /// unreachable`, `time-exceeded`, etc. For ICMPv6 use the
+    /// v6 names (e.g. `nd-neighbor-solicit`) — `family = "ipv6"`
+    /// is implied when an ICMPv6-only type is given. Only applies
+    /// when `proto = "icmp"` (or family=ipv6 + icmpv6 equivalent).
+    #[serde(default)]
+    pub icmp_type: Option<String>,
     #[serde(default)]
     pub ct_state: Vec<String>,
+    /// Optional per-rule rate limit. `"N/second"`, `"N/minute"`,
+    /// `"N/hour"`, `"N/day"`. When set, the rule only matches
+    /// packets that fit under the bucket — overflow packets fall
+    /// through to the next rule. Combine with `action = "drop"`
+    /// for "rate limit then drop the rest" semantics (the
+    /// operator usually wants a trailing drop-all rule).
+    #[serde(default)]
+    pub limit: Option<String>,
+    /// Optional per-rule logging. `"prefix"` emits `log prefix
+    /// "<prefix>"` before the verdict. Combine with `limit` to
+    /// rate-limit the log output. Empty string = log with no
+    /// prefix. Prefix is capped at 128 chars in rendering
+    /// (nftables silently truncates longer ones).
+    #[serde(default)]
+    pub log: Option<String>,
     pub action: Action,
     #[serde(default)]
     pub dnat_target: Option<String>,
@@ -1129,6 +1220,22 @@ pub struct PortForward {
     /// a host sits on multiple overlapping subnets.
     #[serde(default)]
     pub dest: Option<String>,
+    /// Enable hairpin NAT (aka reflection): when a LAN client
+    /// connects to the router's WAN IP on `external_port`, the
+    /// kernel DNATs it to `internal` AND SNATs the return path
+    /// back to the router so the LAN client sees a consistent
+    /// source IP. Without this, LAN clients have to special-case
+    /// "use the LAN IP when at home, the DDNS name when away"
+    /// — an ergonomic footgun.
+    ///
+    /// Implementation: a second DNAT rule on the `output` chain
+    /// (covers the router-originated case) + a MASQUERADE on
+    /// postrouting when the packet egresses back to the LAN.
+    /// Default true — the common case wants it. Set false when
+    /// the internal target is on the same broadcast domain as
+    /// the external IP and double-NAT causes issues.
+    #[serde(default = "default_true")]
+    pub reflection: bool,
 }
 
 fn default_wan_src() -> String {

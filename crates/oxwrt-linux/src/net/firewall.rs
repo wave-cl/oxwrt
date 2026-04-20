@@ -16,7 +16,25 @@
 // pre-split shape) handle rustables imports to minimise churn.
 use std::net::{IpAddr, Ipv4Addr};
 
-use oxwrt_api::config::{Action, Config, Network, PortSpec, Proto, Service, WanConfig};
+use oxwrt_api::config::{Action, ChainPolicy, Config, Network, PortSpec, Proto, Service, WanConfig};
+
+/// A rule needs the nft-text path (instead of rustables) when it
+/// uses any primitive that rustables' builder doesn't expose
+/// cleanly: IP/MAC/port matching, family restriction, rate limit,
+/// logging, ICMP-type matching, or a schedule. Basic rules (zone+
+/// proto+dport+ct_state) stay on the fast rustables path.
+pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
+    use oxwrt_api::config::Family;
+    !r.src_ip.is_empty()
+        || !r.dest_ip.is_empty()
+        || !r.src_mac.is_empty()
+        || r.src_port.is_some()
+        || r.icmp_type.is_some()
+        || r.limit.is_some()
+        || r.log.is_some()
+        || r.schedule.is_some()
+        || r.family != Family::Any
+}
 
 use super::Error;
 
@@ -47,11 +65,63 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .with_hook(Hook::new(HookClass::Forward, 0))
         .with_policy(NfChainPolicy::Drop)
         .add_to_batch(&mut batch);
-    let _output = Chain::new(&table)
+    // OUTPUT policy: default accept unless at least one zone
+    // has default_output=drop, in which case policy-drop + we
+    // install per-zone oifname-accept rules for the zones that
+    // chose accept. This mirrors how INPUT/FORWARD work: policy
+    // plus zone-specific overrides.
+    let any_output_drop = cfg
+        .firewall
+        .zones
+        .iter()
+        .any(|z| z.default_output == ChainPolicy::Drop);
+    let output_policy = if any_output_drop {
+        NfChainPolicy::Drop
+    } else {
+        NfChainPolicy::Accept
+    };
+    let output = Chain::new(&table)
         .with_name("output")
         .with_hook(Hook::new(HookClass::Out, 0))
-        .with_policy(NfChainPolicy::Accept)
+        .with_policy(output_policy)
         .add_to_batch(&mut batch);
+
+    // OUTPUT: always accept loopback (the daemon's own
+    // inter-component comms run here — control plane on [::1]).
+    Rule::new(&output)
+        .map_err(|e| Error::Firewall(e.to_string()))?
+        .oiface("lo")
+        .map_err(|e| Error::Firewall(e.to_string()))?
+        .accept()
+        .add_to_batch(&mut batch);
+    // Accept established+related on OUTPUT so reply traffic from
+    // the router's own connections isn't cut by the default-drop
+    // policy.
+    if any_output_drop {
+        Rule::new(&output)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .established()
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .accept()
+            .add_to_batch(&mut batch);
+    }
+    // Per-zone OUTPUT accept: for every zone whose default_output
+    // is accept (the non-drop case), emit oifname-accept so its
+    // member ifaces aren't caught by the policy drop.
+    if any_output_drop {
+        for zone in &cfg.firewall.zones {
+            if zone.default_output == ChainPolicy::Accept {
+                for zif in zone_ifaces(cfg, &zone.name) {
+                    Rule::new(&output)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .oiface(&zif)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .accept()
+                        .add_to_batch(&mut batch);
+                }
+            }
+        }
+    }
 
     // INPUT/FORWARD: loopback accept (always).
     Rule::new(&input)
@@ -110,6 +180,18 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
 
     // Emit each config rule into the right chain.
     for rule in &cfg.firewall.rules {
+        // Skip disabled rules entirely — no text, no rustables emit.
+        // The validator still ran against them, so a typo surfaces
+        // at reload time (not at re-enable time).
+        if !rule.enabled {
+            continue;
+        }
+        // Skip rules that take the text path (ip/mac/port match,
+        // limit, log, icmp_type, family, schedule). They're emitted
+        // below by build_text_rules_script through `nft -f -`.
+        if rule_needs_text_path(rule) {
+            continue;
+        }
         // ct_state rules go into both input + forward.
         if !rule.ct_state.is_empty() {
             // Only established/related is supported by rustables' `.established()`.
@@ -673,35 +755,77 @@ pub(crate) fn build_scheduled_rules_script(cfg: &Config) -> String {
     use oxwrt_api::firewall_schedule::{parse_schedule, render_nft_predicate};
     let mut out = String::new();
     for rule in &cfg.firewall.rules {
-        let Some(sched_str) = rule.schedule.as_deref() else {
+        if !rule.enabled {
             continue;
+        }
+        // We cover every rule that needs the text path here, not
+        // just `schedule`. Rules with `src_ip` / `dest_ip` /
+        // `src_mac` / `src_port` / `icmp_type` / `limit` / `log`
+        // / `family != any` all render as text too — they share
+        // the same nft syntax machinery as scheduled rules.
+        if !rule_needs_text_path(rule) {
+            continue;
+        }
+
+        // Target chain: FORWARD when both src + dest zones set,
+        // INPUT when only src, OUTPUT when only dest (i.e.
+        // router-originated traffic to a zone), both when
+        // neither. Mirrors the rustables-path logic.
+        let target_chains: &[&str] = if rule.src.is_some() && rule.dest.is_some() {
+            &["forward"]
+        } else if rule.src.is_some() {
+            &["input"]
+        } else if rule.dest.is_some() {
+            &["output"]
+        } else {
+            &["input", "forward"]
         };
-        let sched = match parse_schedule(sched_str) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    rule = %rule.name,
-                    schedule = %sched_str,
-                    error = %e,
-                    "scheduled rule: schedule parse failed; skipping rule"
-                );
-                continue;
+
+        // Optional schedule prefix (when the rule also has a
+        // time window). Parsed once; we only emit for the
+        // chains we target above.
+        let sched_frag: Option<String> = rule.schedule.as_deref().and_then(|s| {
+            match parse_schedule(s) {
+                Ok(sc) => Some(render_nft_predicate(&sc)),
+                Err(e) => {
+                    tracing::warn!(
+                        rule = %rule.name,
+                        schedule = %s,
+                        error = %e,
+                        "rule: schedule parse failed; skipping rule"
+                    );
+                    None
+                }
             }
-        };
-        out.push_str("add rule inet oxwrt forward ");
-        out.push_str(&render_nft_predicate(&sched));
-        render_rule_body(&mut out, rule, cfg);
-        out.push('\n');
+        });
+        // Parse failure on a scheduled rule: skip entirely so we
+        // don't emit a rule missing its time gate.
+        if rule.schedule.is_some() && sched_frag.is_none() {
+            continue;
+        }
+
+        for chain in target_chains {
+            out.push_str(&format!("add rule inet oxwrt {chain} "));
+            if let Some(sf) = sched_frag.as_deref() {
+                out.push_str(sf);
+            }
+            render_rule_body(&mut out, rule, cfg);
+            out.push('\n');
+        }
     }
     out
 }
 
-/// Append the nft predicate + action for a rule's non-schedule
-/// fields. Kept narrow for v1: src/dest iifname + proto + dport
-/// + ct_state + action. Unscheduled rules still go through
-/// rustables; this text renderer only sees scheduled ones.
+/// Append the nft predicate + action for a rule's fields. Shared
+/// by the scheduled-rule renderer AND the advanced-primitive
+/// renderer — any rule that `rule_needs_text_path` picks up goes
+/// through here.
+///
+/// Emission order follows nft's parser expectations: iifname →
+/// oifname → family-specific address matches → mac → ct state →
+/// l4proto+ports → icmp type → limit → log → verdict.
 fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Config) {
-    use oxwrt_api::config::Action;
+    use oxwrt_api::config::{Action, Family};
     // iifname / oifname from zone → first matching iface. Multi-
     // iface zones emit an "iifname { a, b, c }" set.
     if let Some(src) = rule.src.as_deref() {
@@ -718,32 +842,151 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
             out.push(' ');
         }
     }
+    // src_ip / dest_ip. Family is auto-detected per entry; we
+    // emit `ip saddr` for v4 entries and `ip6 saddr` for v6.
+    // When `family` is explicitly set, we still match that
+    // family's addresses — a mismatch (e.g. v6 CIDRs with
+    // family=ipv4) is caught by the validator.
+    emit_addr_match(out, &rule.src_ip, /*is_src=*/ true, rule.family);
+    emit_addr_match(out, &rule.dest_ip, /*is_src=*/ false, rule.family);
+    if !rule.src_mac.is_empty() {
+        if rule.src_mac.len() == 1 {
+            out.push_str(&format!("ether saddr {} ", rule.src_mac[0]));
+        } else {
+            let list = rule.src_mac.join(", ");
+            out.push_str(&format!("ether saddr {{ {list} }} "));
+        }
+    }
     // ct state must precede proto for nft's parser to be happy.
     if !rule.ct_state.is_empty() {
         out.push_str("ct state { ");
         out.push_str(&rule.ct_state.join(", "));
         out.push_str(" } ");
     }
+    // Family restriction without addresses: emit `meta nfproto`
+    // when the rule asked for a specific family but has no
+    // src_ip/dest_ip to carry it. Without this, family=ipv6
+    // would match v4 traffic too.
+    if rule.src_ip.is_empty() && rule.dest_ip.is_empty() {
+        match rule.family {
+            Family::Ipv4 => out.push_str("meta nfproto ipv4 "),
+            Family::Ipv6 => out.push_str("meta nfproto ipv6 "),
+            Family::Any => {}
+        }
+    }
+    render_proto_port(out, rule);
+    if let Some(icmp_t) = rule.icmp_type.as_deref() {
+        // Heuristic: ICMPv6 type names start with "nd-" or "mld" or
+        // contain "router-" / "packet-too-big". Use icmpv6 keyword
+        // for those, icmp for the rest.
+        let is_v6 = icmp_t.starts_with("nd-")
+            || icmp_t.starts_with("mld")
+            || icmp_t == "packet-too-big"
+            || icmp_t == "router-solicit"
+            || icmp_t == "router-advertisement"
+            || rule.family == Family::Ipv6;
+        let kw = if is_v6 { "icmpv6" } else { "icmp" };
+        out.push_str(&format!("{kw} type {icmp_t} "));
+    }
+    // src port: after proto+dport so nft's parser sees the base
+    // proto first. Emitted as `<proto> sport <ports>` or
+    // `meta l4proto { tcp, udp } th sport ...` for Both.
+    if let Some(sport) = &rule.src_port {
+        let proto = rule.proto.unwrap_or(oxwrt_api::config::Proto::Tcp);
+        let port_fragment = match sport {
+            PortSpec::Single(p) => format!("{p}"),
+            PortSpec::List(ps) => format!(
+                "{{ {} }}",
+                ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+            ),
+        };
+        match proto {
+            Proto::Tcp => out.push_str(&format!("tcp sport {port_fragment} ")),
+            Proto::Udp => out.push_str(&format!("udp sport {port_fragment} ")),
+            Proto::Both => out.push_str(&format!("th sport {port_fragment} ")),
+            Proto::Icmp => {} // icmp has no sport
+        }
+    }
+    if let Some(limit_str) = rule.limit.as_deref() {
+        // nft accepts the same "N/second" etc. syntax literally,
+        // so we pass through verbatim (stripped of whitespace).
+        // `limit rate 10/second` becomes `limit rate 10/second ` here.
+        let clean = limit_str.trim();
+        out.push_str(&format!("limit rate {clean} "));
+    }
+    if let Some(log_prefix) = rule.log.as_deref() {
+        // Cap prefix at 128 chars — nft silently truncates, but
+        // we want the log to match what the operator typed.
+        let p = if log_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("prefix \"{}\" ", log_prefix.chars().take(128).collect::<String>())
+        };
+        out.push_str(&format!("log {p}"));
+    }
+    match rule.action {
+        Action::Accept => out.push_str("accept"),
+        Action::Drop => out.push_str("drop"),
+        Action::Reject => out.push_str("reject"),
+        Action::Dnat => out.push_str("# dnat via text path unsupported — use [[port_forwards]]"),
+    }
+}
+
+/// Emit `ip saddr` / `ip6 daddr` / etc. for a list of CIDR strings.
+/// v4 + v6 entries in the same list are split into two predicates
+/// (nft needs the family prefix). Single entry → bare match; multiple
+/// of the same family → anonymous set.
+fn emit_addr_match(
+    out: &mut String,
+    addrs: &[String],
+    is_src: bool,
+    family: oxwrt_api::config::Family,
+) {
+    use oxwrt_api::config::Family;
+    if addrs.is_empty() {
+        return;
+    }
+    let dir = if is_src { "saddr" } else { "daddr" };
+    let (v4, v6): (Vec<&String>, Vec<&String>) =
+        addrs.iter().partition(|a| !a.contains(':'));
+    // Filter by declared family restriction, if any.
+    let emit_v4 = family != Family::Ipv6 && !v4.is_empty();
+    let emit_v6 = family != Family::Ipv4 && !v6.is_empty();
+    if emit_v4 {
+        if v4.len() == 1 {
+            out.push_str(&format!("ip {dir} {} ", v4[0]));
+        } else {
+            let list = v4.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            out.push_str(&format!("ip {dir} {{ {list} }} "));
+        }
+    }
+    if emit_v6 {
+        if v6.len() == 1 {
+            out.push_str(&format!("ip6 {dir} {} ", v6[0]));
+        } else {
+            let list = v6.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            out.push_str(&format!("ip6 {dir} {{ {list} }} "));
+        }
+    }
+}
+
+/// Render just the `<proto> dport <port>` (or Both / ICMP) fragment.
+/// Split out so render_rule_body stays readable.
+fn render_proto_port(out: &mut String, rule: &oxwrt_api::config::Rule) {
     if let Some(proto) = rule.proto {
         let proto_s = match proto {
-            oxwrt_api::config::Proto::Tcp => "tcp",
-            oxwrt_api::config::Proto::Udp => "udp",
-            oxwrt_api::config::Proto::Icmp => "icmp",
-            // `Both` = tcp+udp pair. Emit a tcp+udp meta set; nft
-            // doesn't let us say `meta l4proto { tcp, udp } dport N`
-            // without a set helper, so we inline.
-            oxwrt_api::config::Proto::Both => "meta-both",
+            Proto::Tcp => "tcp",
+            Proto::Udp => "udp",
+            Proto::Icmp => "icmp",
+            Proto::Both => "meta-both",
         };
         if proto_s == "meta-both" {
             if let Some(port) = &rule.dest_port {
                 let port_fragment = match port {
-                    oxwrt_api::config::PortSpec::Single(p) => format!("{p}"),
-                    oxwrt_api::config::PortSpec::List(ps) => format!(
+                    PortSpec::Single(p) => format!("{p}"),
+                    PortSpec::List(ps) => format!(
                         "{{ {} }}",
-                        ps.iter()
-                            .map(|p| p.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
                     ),
                 };
                 out.push_str(&format!("meta l4proto {{ tcp, udp }} th dport {port_fragment} "));
@@ -752,25 +995,18 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
             }
         } else if let Some(port) = &rule.dest_port {
             let port_fragment = match port {
-                oxwrt_api::config::PortSpec::Single(p) => format!("{p}"),
-                oxwrt_api::config::PortSpec::List(ps) => format!(
+                PortSpec::Single(p) => format!("{p}"),
+                PortSpec::List(ps) => format!(
                     "{{ {} }}",
-                    ps.iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
                 ),
             };
             out.push_str(&format!("{proto_s} dport {port_fragment} "));
-        } else {
+        } else if proto != Proto::Icmp {
+            // ICMP doesn't need the meta prefix — icmp type match
+            // handles it. Emit meta l4proto only for tcp/udp.
             out.push_str(&format!("meta l4proto {proto_s} "));
         }
-    }
-    match rule.action {
-        Action::Accept => out.push_str("accept"),
-        Action::Drop => out.push_str("drop"),
-        Action::Reject => out.push_str("reject"),
-        Action::Dnat => out.push_str("# dnat+schedule unsupported"),
     }
 }
 
@@ -1147,6 +1383,119 @@ mod tests {
     fn raw_nft_script_empty_on_no_entries() {
         assert!(build_raw_nft_script(&[]).is_empty());
     }
+
+    fn basic_rule(name: &str) -> oxwrt_api::config::Rule {
+        oxwrt_api::config::Rule {
+            name: name.into(),
+            enabled: true,
+            family: oxwrt_api::config::Family::Any,
+            src: None,
+            dest: None,
+            src_ip: vec![],
+            dest_ip: vec![],
+            src_mac: vec![],
+            src_port: None,
+            proto: None,
+            dest_port: None,
+            icmp_type: None,
+            ct_state: vec![],
+            limit: None,
+            log: None,
+            action: oxwrt_api::config::Action::Accept,
+            dnat_target: None,
+            schedule: None,
+        }
+    }
+
+    #[test]
+    fn rule_needs_text_path_detects_advanced_primitives() {
+        let mut r = basic_rule("t");
+        assert!(!rule_needs_text_path(&r));
+        r.src_ip = vec!["192.168.1.1".into()];
+        assert!(rule_needs_text_path(&r));
+        r = basic_rule("t");
+        r.limit = Some("10/second".into());
+        assert!(rule_needs_text_path(&r));
+        r = basic_rule("t");
+        r.icmp_type = Some("echo-request".into());
+        assert!(rule_needs_text_path(&r));
+        r = basic_rule("t");
+        r.family = oxwrt_api::config::Family::Ipv6;
+        assert!(rule_needs_text_path(&r));
+    }
+
+    #[test]
+    fn disabled_rules_emit_nothing() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("disabled");
+        r.enabled = false;
+        r.src_ip = vec!["10.0.0.0/8".into()]; // would take text path if enabled
+        r.action = oxwrt_api::config::Action::Drop;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.is_empty(), "disabled rule leaked into script: {s}");
+    }
+
+    #[test]
+    fn render_src_ip_v4_cidr_accept() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("allow-mgmt");
+        r.src_ip = vec!["192.168.50.10/32".into()];
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(22));
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        // Global rule (no src/dest zone) renders into both input + forward.
+        assert!(s.contains("add rule inet oxwrt input ip saddr 192.168.50.10/32 tcp dport 22 accept"));
+        assert!(s.contains("add rule inet oxwrt forward ip saddr 192.168.50.10/32 tcp dport 22 accept"));
+    }
+
+    #[test]
+    fn render_v6_family_only_nfproto_prefix() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("icmpv6-ndp");
+        r.family = oxwrt_api::config::Family::Ipv6;
+        r.proto = Some(oxwrt_api::config::Proto::Icmp);
+        r.icmp_type = Some("nd-neighbor-solicit".into());
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        // meta nfproto ipv6 prefix present + icmpv6 type selector.
+        assert!(s.contains("meta nfproto ipv6"), "expected v6 family prefix: {s}");
+        assert!(s.contains("icmpv6 type nd-neighbor-solicit"), "expected icmpv6 type: {s}");
+    }
+
+    #[test]
+    fn render_limit_and_log_prefix() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("rate-ssh");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(22));
+        r.limit = Some("3/minute".into());
+        r.log = Some("ssh-flood ".into());
+        r.action = oxwrt_api::config::Action::Drop;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("limit rate 3/minute"), "missing limit: {s}");
+        assert!(s.contains("log prefix \"ssh-flood \""), "missing log prefix: {s}");
+        // Emission order: limit before log before verdict.
+        let li = s.find("limit rate").unwrap();
+        let lo = s.find("log prefix").unwrap();
+        let dr = s.find(" drop").unwrap();
+        assert!(li < lo && lo < dr, "expected limit < log < drop order: {s}");
+    }
+
+    #[test]
+    fn render_src_mac_set() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("printer-bypass");
+        r.src_mac = vec!["aa:bb:cc:dd:ee:ff".into(), "11:22:33:44:55:66".into()];
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("ether saddr { aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66 }"), "{s}");
+    }
     use oxwrt_api::config::{Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone};
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;
@@ -1189,6 +1538,7 @@ mod tests {
                     networks: vec!["lan".to_string(), "guest".to_string()],
                     default_input: oxwrt_api::config::ChainPolicy::Accept,
                     default_forward: oxwrt_api::config::ChainPolicy::Drop,
+                    default_output: ChainPolicy::Accept,
                     masquerade: false,
                     via_vpn: false,
                     wan: None,
