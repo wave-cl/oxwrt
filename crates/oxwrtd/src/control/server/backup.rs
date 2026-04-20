@@ -49,7 +49,7 @@ pub(super) fn handle_backup() -> Response {
     Response::Value { value: b64 }
 }
 
-fn build_tarball() -> Result<Vec<u8>, String> {
+pub fn build_tarball() -> Result<Vec<u8>, String> {
     let gz = GzEncoder::new(Vec::new(), Compression::default());
     let mut tar = tar::Builder::new(gz);
 

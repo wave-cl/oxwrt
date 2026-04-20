@@ -30,6 +30,7 @@
 #   upnp           miniupnpd renderer (iptables binary staged;
 #                  nftables source-build pending)
 #   metrics        Prometheus /metrics endpoint
+#   backup_sftp    scheduled off-router config backups via SSH
 #   control        sQUIC control-plane listen addrs + authorized keys
 
 hostname = "flint2"
@@ -1200,6 +1201,34 @@ landlock = false
 #
 [metrics]
 listen = "192.168.50.1:9100"
+
+# ---------------- Off-router config backup (SFTP) ----------------
+#
+# When set, oxwrtd spawns a tokio task that every interval_hours
+# builds the same in-memory tarball `oxctl backup` returns (all
+# of /etc/oxwrt/* except vpn/ private keys, plus /etc/oxwrt.toml)
+# and streams it over SSH to a remote host. Uses the system `ssh`
+# binary (OpenSSH or dropbear's dbclient). Older backups past
+# `keep` are pruned after each successful push.
+#
+# Prerequisites:
+#   - ed25519 keypair on the router at key_path (0600 perms).
+#     Generate with `dropbearkey -t ed25519 -f /etc/oxwrt/backup.key`
+#     and add the pubkey to the remote's ~/.ssh/authorized_keys.
+#   - Known-hosts at /etc/oxwrt/known_hosts — one `ssh-keyscan
+#     host` line. Strict host-key checking is ON, so an unseeded
+#     known_hosts will refuse to connect.
+#
+# Example (commented):
+#
+# [backup_sftp]
+# host = "backup.example.com"
+# port = 22
+# username = "oxwrt-backup"
+# key_path = "/etc/oxwrt/backup.key"
+# remote_dir = "/home/oxwrt-backup/snapshots"
+# interval_hours = 24
+# keep = 30
 
 # ---------------- Control plane ----------------
 #

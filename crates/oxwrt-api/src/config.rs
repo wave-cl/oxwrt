@@ -139,7 +139,57 @@ pub struct Config {
     /// lose internet rather than leak out the WAN.
     #[serde(default)]
     pub vpn_client: Vec<VpnClient>,
+    /// Scheduled off-router config backups via SSH. When set,
+    /// oxwrtd builds an in-memory tarball (same content as the
+    /// `oxctl backup` RPC returns) every `interval_hours` and
+    /// streams it to a remote SSH host with `cat > <path>`. Uses
+    /// the system `ssh`/dbclient binary — no russh-level Rust
+    /// dep. Rotation: keep only the most recent `keep` backups
+    /// on the remote side.
+    #[serde(default)]
+    pub backup_sftp: Option<SftpBackup>,
     pub control: Control,
+}
+
+/// Remote off-router backup target for scheduled config snapshots.
+/// See Config.backup_sftp for the runtime behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SftpBackup {
+    /// Hostname or IP of the remote SSH server.
+    pub host: String,
+    /// SSH port. Default 22.
+    #[serde(default = "default_sftp_port")]
+    pub port: u16,
+    /// Remote username.
+    pub username: String,
+    /// Path to the SSH private key on the ROUTER. Typically
+    /// /etc/oxwrt/backup.key (preserved across sysupgrade via
+    /// the /etc/oxwrt/ keeplist). Operator generates the keypair
+    /// on first install + authorizes the pubkey on the remote.
+    pub key_path: String,
+    /// Remote directory. Created on first push if missing
+    /// (`mkdir -p` over ssh). Filenames are
+    /// "oxwrt-YYYYMMDD-HHMMSS.tar.gz".
+    pub remote_dir: String,
+    /// Push cadence in hours. Minimum effective value is 1 (task
+    /// won't tick faster even if set to 0).
+    #[serde(default = "default_sftp_interval")]
+    pub interval_hours: u32,
+    /// Keep the last N backups on the remote; older ones are
+    /// deleted after each successful push. 0 means keep all
+    /// (unbounded growth — not recommended).
+    #[serde(default = "default_sftp_keep")]
+    pub keep: u32,
+}
+
+fn default_sftp_port() -> u16 {
+    22
+}
+fn default_sftp_interval() -> u32 {
+    24
+}
+fn default_sftp_keep() -> u32 {
+    30
 }
 
 /// UPnP / NAT-PMP / PCP (miniupnpd) configuration. Renders to a

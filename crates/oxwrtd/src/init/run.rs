@@ -1026,6 +1026,14 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
     crate::wifi_rotate::spawn_all(&cfg, rotate_cfg_path);
 
+    // Scheduled off-router config backup. Runs every
+    // cfg.backup_sftp.interval_hours (default 24), shells out to
+    // ssh(1) to push /etc/oxwrt/* tarball to a remote host. No-op
+    // when cfg.backup_sftp is None.
+    crate::backup_sftp::spawn(&cfg, || {
+        crate::control::server::backup::build_tarball()
+    });
+
     if !cfg.vpn_client.is_empty() {
         if let Some(net_handle) = &net {
             let probes =

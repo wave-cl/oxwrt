@@ -276,7 +276,7 @@ impl Server {
 
 // Submodules split out of this file during step 7 of the
 // workspace refactor. See each file's header for scope.
-mod backup;
+pub mod backup;
 mod crud;
 mod diag;
 mod logs;

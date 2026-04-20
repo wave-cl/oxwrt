@@ -20,6 +20,8 @@ mod init;
 mod metrics;
 #[cfg(target_os = "linux")]
 mod wifi_rotate;
+#[cfg(target_os = "linux")]
+mod backup_sftp;
 
 use std::process::ExitCode;
 
