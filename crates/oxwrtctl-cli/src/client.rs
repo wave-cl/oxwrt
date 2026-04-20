@@ -381,6 +381,56 @@ async fn handle_vpn_profile_import(
     Ok(())
 }
 
+/// Dispatch `diag ping-many <ips...>` on the router, parse the
+/// response into the same (ip, latency_ms) tuples the client-side
+/// race_pings produces so downstream selection is uniform. Failed
+/// pings (router emits "ip ERR") are dropped here — we only want
+/// sortable latency values.
+async fn diag_ping_many_via_router(
+    addr: SocketAddr,
+    ips: &[String],
+) -> Result<Vec<(String, f64)>, String> {
+    let server_key_hex = std::env::var("SQUIC_SERVER_KEY")
+        .map_err(|_| "missing SQUIC_SERVER_KEY".to_string())?;
+    let server_key = parse_pubkey(&server_key_hex).map_err(|e| e.to_string())?;
+    let mut cfg = squic::Config::default();
+    if let Ok(client_key) = std::env::var("SQUIC_CLIENT_KEY") {
+        cfg.client_key = Some(client_key);
+    }
+    let conn = squic::dial(addr, &server_key, cfg).await.map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let req = Request::Diag {
+        name: "ping-many".to_string(),
+        args: ips.to_vec(),
+    };
+    write_frame(&mut send, &req).await.map_err(|e| e.to_string())?;
+    send.finish().map_err(|e| e.to_string())?;
+    let resp = read_frame::<_, Response>(&mut recv).await.map_err(|e| e.to_string())?;
+    conn.close(0u32.into(), b"bye");
+    let value = match resp {
+        Response::Value { value } => value,
+        Response::Err { message } => return Err(format!("router: {message}")),
+        other => return Err(format!("unexpected: {other:?}")),
+    };
+    // Parse stdout: "ip <space> latency_ms" or "ip ERR".
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for line in value.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(ip) = parts.next() else { continue };
+        let Some(second) = parts.next() else { continue };
+        if second == "ERR" {
+            continue;
+        }
+        if let Ok(ms) = second.parse::<f64>() {
+            out.push((ip.to_string(), ms));
+        }
+    }
+    // Already sorted by the router, but re-sort in case of
+    // parse order surprises. Cheap on N≤32.
+    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out)
+}
+
 /// Scan an oxwrt.toml text for an existing `[[vpn_client]]` block
 /// with the given name; return its zero-based index among all
 /// `[[vpn_client]]` entries, or None. Matches what `merge_vpn_block`
@@ -466,19 +516,20 @@ async fn handle_mullvad_relays(rest: &[String]) -> Result<(), Error> {
 }
 
 /// Handle `oxctl <remote> vpn-auto-switch <profile>
-///     [--country=XX] [--city=XX] [--candidates=N]`.
+///     [--country=XX] [--city=XX] [--candidates=N] [--via-router]`.
 ///
 /// Fetches Mullvad relay list → filters by country/city → takes
 /// top N candidates (default 10) sorted by Mullvad's own weight
-/// → parallel ICMP pings → picks the lowest-latency winner →
-/// calls the same path as `vpn-switch-relay` to rewrite the
-/// profile. Operator still runs `reload` to activate.
+/// → ICMP pings (default client-side; --via-router dispatches to
+/// `diag ping-many` on the router) → picks the lowest-latency
+/// winner → calls the same path as `vpn-switch-relay` to rewrite
+/// the profile. Operator still runs `reload` to activate.
 ///
-/// Client-side ping race rather than router-side because the
-/// latency signal from the operator's network is usually within
-/// tens of ms of the router's (same ISP, same geography). For a
-/// precise router-side measurement we'd need a new diag RPC;
-/// that's a v2 if anyone asks.
+/// --via-router is useful when the operator's machine is on a
+/// different network than the router (e.g. WFH box on a separate
+/// ISP, measuring relays for a remote router). Also more
+/// accurate for split-horizon ISPs where the router's route to
+/// a relay differs from the laptop's.
 async fn handle_vpn_auto_switch(
     addr: SocketAddr,
     profile: String,
@@ -491,6 +542,7 @@ async fn handle_vpn_auto_switch(
     let candidates: usize = pull_flag(flags, "candidates")
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
+    let via_router = has_flag(flags, "via-router");
 
     eprintln!("vpn-auto-switch: fetching Mullvad relay list...");
     let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
@@ -517,11 +569,21 @@ async fn handle_vpn_auto_switch(
         .filter_map(|r| r.ipv4_addr_in.clone())
         .collect();
     eprintln!(
-        "vpn-auto-switch: pinging {} candidate(s) in parallel...",
-        ips.len()
+        "vpn-auto-switch: pinging {} candidate(s) in parallel{}...",
+        ips.len(),
+        if via_router { " (via router)" } else { "" }
     );
 
-    let ranked = mullvad::race_pings(ips).await;
+    let ranked: Vec<(String, f64)> = if via_router {
+        // Dispatch diag ping-many on the router, parse stdout
+        // back into the same (ip, ms) shape as mullvad::race_pings.
+        match diag_ping_many_via_router(addr, &ips).await {
+            Ok(v) => v,
+            Err(e) => return Err(Error::Rpc(format!("via-router ping: {e}"))),
+        }
+    } else {
+        mullvad::race_pings(ips).await
+    };
     if ranked.is_empty() {
         return Err(Error::Rpc(
             "vpn-auto-switch: all candidates timed out or failed to ping".into(),

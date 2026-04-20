@@ -3,7 +3,6 @@
 use super::*;
 
 pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String]) -> Response {
-    let _ = args; // reserved for future ops with parameters
     match name {
         "links" => match diag_links().await {
             Ok(text) => Response::Value { value: text },
@@ -183,6 +182,45 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             }
             Response::Value { value: out }
         }
+        "ping-many" => {
+            // Parallel ICMP to a list of IPs FROM the router's
+            // vantage. Complements `vpn-auto-switch`'s client-
+            // side ping-race for when "which Mullvad relay is
+            // actually fastest from the router" matters — the
+            // operator's laptop is usually close in latency, but
+            // not for split-horizon ISPs or asymmetric routing.
+            //
+            // Arg format: each IP as its own positional, e.g.
+            //   oxctl … diag ping-many 1.1.1.1 8.8.8.8 9.9.9.9
+            // Returns lines of "ip <space> latency_ms" sorted
+            // ascending. Failed pings emit "ip ERR" instead of
+            // being silently dropped so the operator can tell a
+            // "timeout" from "not tried" downstream.
+            use std::fmt::Write as _;
+            if args.is_empty() {
+                return Response::Err {
+                    message: "diag ping-many: expected one or more IP args".into(),
+                };
+            }
+            // Cap at 32 to avoid a thundering-herd if someone
+            // pipes the full 550-Mullvad-relay list in.
+            const MAX: usize = 32;
+            if args.len() > MAX {
+                return Response::Err {
+                    message: format!("diag ping-many: at most {MAX} IPs per call"),
+                };
+            }
+            let targets: Vec<String> = args.iter().cloned().collect();
+            let results = ping_many(targets).await;
+            let mut out = String::new();
+            for (ip, res) in &results {
+                match res {
+                    Some(ms) => writeln!(out, "{} {:.2}", ip, ms).ok(),
+                    None => writeln!(out, "{} ERR", ip).ok(),
+                };
+            }
+            Response::Value { value: out }
+        }
         "wg" => {
             use std::process::Command;
             let iface = args.first().map(|s| s.as_str()).unwrap_or("wg0");
@@ -336,7 +374,8 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
-                 modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, traceroute, dig, stall)"
+                 modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, ping-many, \
+                 traceroute, dig, stall)"
             ),
         },
     }
@@ -1130,4 +1169,64 @@ table ip oxwrt-bl {
         assert!(out.contains("set blk type=ipv4_addr elements=2"), "got: {out}");
         assert!(out.contains("sample=[10.0.0.1, 10.0.0.2]"), "got: {out}");
     }
+}
+
+/// Parallel-ping a list of targets, return (ip, latency_ms) in
+/// ascending-latency order with None for failures (sorted to the
+/// end). Uses the system `ping` binary: `-c 1 -W 1 <ip>` — single
+/// echo, 1-second per-reply timeout. Kept crude because this is a
+/// coarse "is this relay faster than that one" signal, not a
+/// precision measurement.
+///
+/// Caps concurrency implicitly by the caller's arg count (diag
+/// handler gates at MAX=32).
+async fn ping_many(targets: Vec<String>) -> Vec<(String, Option<f64>)> {
+    use futures_util::future::join_all;
+    let futs = targets.into_iter().map(|ip| async move {
+        let latency = one_ping(&ip).await;
+        (ip, latency)
+    });
+    let mut results: Vec<(String, Option<f64>)> = join_all(futs).await;
+    results.sort_by(|a, b| match (a.1, b.1) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    results
+}
+
+async fn one_ping(ip: &str) -> Option<f64> {
+    let out = tokio::process::Command::new("ping")
+        .args(["-c", "1", "-W", "1", "-q", ip])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // BusyBox ping summary: "round-trip min/avg/max = 12.3/12.3/12.3 ms"
+    // (or "rtt min/avg/max/mdev = ..." on iputils). Pull the
+    // first number after "min/avg".
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(after) = line.split_once("min/avg") {
+            // after = "max = 12.3/12.3/12.3 ms" or "max/mdev = 12.3/12.3/..."
+            if let Some(eq) = after.1.split_once('=') {
+                let nums = eq.1.trim();
+                if let Some(first) = nums.split('/').next() {
+                    return first.trim().parse::<f64>().ok();
+                }
+            }
+        }
+        // iputils-style per-reply line: "64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=12.3 ms"
+        if let Some((_, rest)) = line.split_once("time=") {
+            if let Some(ms_str) = rest.split_whitespace().next() {
+                if let Ok(ms) = ms_str.parse::<f64>() {
+                    return Some(ms);
+                }
+            }
+        }
+    }
+    None
 }
