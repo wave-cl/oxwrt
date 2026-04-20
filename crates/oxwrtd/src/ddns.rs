@@ -156,6 +156,108 @@ async fn push(client: &reqwest::Client, entry: &Ddns, ip: Ipv4Addr) -> Result<()
             }
             Ok(())
         }
+        Ddns::Namecheap {
+            host,
+            domain,
+            password,
+            ..
+        } => {
+            // Namecheap Dynamic DNS endpoint. Response is XML
+            // with an <ErrCount> element; anything non-zero
+            // means auth/host mismatch. HTTP status is usually
+            // 200 even on error.
+            let url = format!(
+                "https://dynamicdns.park-your-domain.com/update?host={}&domain={}&password={}&ip={}",
+                urlencode(host),
+                urlencode(domain),
+                urlencode(password),
+                ip
+            );
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("namecheap send: {e}"))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("namecheap body: {e}"))?;
+            // Parse-light: trust the ErrCount>0 signal. A proper
+            // XML parser would be over-engineering; the response
+            // always contains either "<ErrCount>0</ErrCount>" on
+            // success or "<ErrCount>N</ErrCount>" (N>0) + Errors
+            // block on failure.
+            if body.contains("<ErrCount>0</ErrCount>") {
+                Ok(())
+            } else {
+                Err(format!("namecheap: body={body:?}"))
+            }
+        }
+        Ddns::Dynv6 {
+            hostname, token, ..
+        } => {
+            // dynv6's HTTP API. Response body is literally "addresses
+            // updated" on success or an error message on failure —
+            // no structured format. Match against the known-good
+            // substring.
+            let url = format!(
+                "https://ipv4.dynv6.com/api/update?hostname={}&ipv4={}&token={}",
+                urlencode(hostname),
+                ip,
+                urlencode(token)
+            );
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("dynv6 send: {e}"))?;
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("dynv6 body: {e}"))?;
+            // "addresses updated" is the success body. "addresses
+            // already set to …" is ALSO success — a no-op update
+            // when we push the same IP twice in a row. Both match
+            // the substring "address" so we pattern on that +
+            // HTTP 200.
+            if status.is_success() && body.to_lowercase().contains("address") {
+                Ok(())
+            } else {
+                Err(format!("dynv6: status={status} body={body:?}"))
+            }
+        }
+        Ddns::HurricaneElectric { hostname, key, .. } => {
+            // HE.net's dyn.dns.he.net speaks the classic DynDNS2
+            // protocol: Basic auth (hostname as username, DDNS
+            // key as password), GET /nic/update?hostname=&myip=.
+            // Response codes are "good <ip>" on change and
+            // "nochg <ip>" on duplicate — both success.
+            let url = format!(
+                "https://dyn.dns.he.net/nic/update?hostname={}&myip={}",
+                urlencode(hostname),
+                ip
+            );
+            let resp = client
+                .get(&url)
+                .basic_auth(hostname, Some(key))
+                .send()
+                .await
+                .map_err(|e| format!("he.net send: {e}"))?;
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("he.net body: {e}"))?;
+            let trimmed = body.trim();
+            if status.is_success()
+                && (trimmed.starts_with("good ") || trimmed.starts_with("nochg "))
+            {
+                Ok(())
+            } else {
+                Err(format!("he.net: status={status} body={body:?}"))
+            }
+        }
     }
 }
 
@@ -228,5 +330,48 @@ api_token = "tok"
             }
             _ => panic!("expected Cloudflare variant"),
         }
+    }
+
+    #[test]
+    fn ddns_namecheap_serde() {
+        let toml_text = r#"
+provider = "namecheap"
+name = "home"
+host = "router"
+domain = "example.com"
+password = "per-host-ddns-key"
+"#;
+        let d: Ddns = toml::from_str(toml_text).unwrap();
+        match d {
+            Ddns::Namecheap { host, domain, .. } => {
+                assert_eq!(host, "router");
+                assert_eq!(domain, "example.com");
+            }
+            _ => panic!("expected Namecheap variant"),
+        }
+    }
+
+    #[test]
+    fn ddns_dynv6_serde() {
+        let toml_text = r#"
+provider = "dynv6"
+name = "home"
+hostname = "myrouter.dynv6.net"
+token = "zone-token"
+"#;
+        let d: Ddns = toml::from_str(toml_text).unwrap();
+        assert!(matches!(d, Ddns::Dynv6 { .. }));
+    }
+
+    #[test]
+    fn ddns_he_net_serde() {
+        let toml_text = r#"
+provider = "he"
+name = "home"
+hostname = "router.example.com"
+key = "ddns-key"
+"#;
+        let d: Ddns = toml::from_str(toml_text).unwrap();
+        assert!(matches!(d, Ddns::HurricaneElectric { .. }));
     }
 }

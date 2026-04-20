@@ -1294,6 +1294,49 @@ pub enum Ddns {
         #[serde(default = "default_cf_ttl")]
         ttl: u32,
     },
+    /// Namecheap — "Dynamic DNS" protocol. HTTP GET to
+    /// dynamicdns.park-your-domain.com/update with query params
+    /// for host, domain, password. Free tier included on any
+    /// Namecheap-registered domain; operator enables "Dynamic
+    /// DNS" in the domain's advanced DNS settings to get a
+    /// password per host.
+    Namecheap {
+        name: String,
+        /// Host record, e.g. "router" for router.example.com
+        /// or "@" for the bare apex.
+        host: String,
+        /// Registered domain, e.g. "example.com".
+        domain: String,
+        /// Per-host DDNS password from the Namecheap dashboard
+        /// (NOT the account password).
+        password: String,
+    },
+    /// dynv6 — free IPv4+IPv6 dynamic DNS with optional IPv6
+    /// prefix-delegation support. HTTP GET to
+    /// ipv4.dynv6.com/api/update?hostname={h}&ipv4={ip}&token={t}.
+    /// v4-only here; the v6 endpoint is the same API under
+    /// `ipv6.dynv6.com` and can land in a follow-up.
+    Dynv6 {
+        name: String,
+        /// Full hostname, e.g. "myrouter.dynv6.net" or a custom
+        /// domain pointed at dynv6.
+        hostname: String,
+        /// Per-zone token from the dynv6 dashboard (NOT the
+        /// account password; dynv6 tokens are per-zone).
+        token: String,
+    },
+    /// Hurricane Electric Free DNS — `dyn.dns.he.net/nic/update`
+    /// with HTTP Basic auth. The "password" here is a DDNS key
+    /// generated per-record in the he.net DNS dashboard
+    /// (different from the tunnel-broker account password).
+    #[serde(rename = "he")]
+    HurricaneElectric {
+        name: String,
+        /// FQDN of the A record, e.g. "router.example.com".
+        hostname: String,
+        /// DDNS key from the HE.net DNS dashboard.
+        key: String,
+    },
 }
 
 fn default_cf_ttl() -> u32 {
@@ -1304,7 +1347,11 @@ impl Ddns {
     /// Name tag — used in logs + CRUD. All variants carry it.
     pub fn name(&self) -> &str {
         match self {
-            Ddns::Duckdns { name, .. } | Ddns::Cloudflare { name, .. } => name,
+            Ddns::Duckdns { name, .. }
+            | Ddns::Cloudflare { name, .. }
+            | Ddns::Namecheap { name, .. }
+            | Ddns::Dynv6 { name, .. }
+            | Ddns::HurricaneElectric { name, .. } => name,
         }
     }
 }

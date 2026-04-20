@@ -14,7 +14,7 @@
 #   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
 #                  failover via priority/probe_target
 #   firewall       zones + explicit rules (no magic booleans)
-#   ddns           DuckDNS + Cloudflare
+#   ddns           DuckDNS + Cloudflare + Namecheap + dynv6 + HE.net
 #   port_forwards  external WAN port → internal host:port
 #   routes         static IPv4 routes
 #   routes6        static IPv6 routes
@@ -354,7 +354,8 @@ action = "accept"
 # the updater polls every 5 minutes and only fires when the IP
 # actually changed. Zero entries → feature off.
 #
-# Providers supported today: duckdns, cloudflare.
+# Providers supported: duckdns, cloudflare, namecheap, dynv6, he
+# (Hurricane Electric).
 #
 # Example (commented — fill in + uncomment to enable):
 #
@@ -372,6 +373,25 @@ action = "accept"
 # domain = "vpn.example.com"       # FQDN of the A record
 # api_token = "REDACTED-TOKEN"
 # ttl = 60
+#
+# [[ddns]]
+# provider = "namecheap"
+# name = "nc-home"
+# host = "router"                  # router.example.com
+# domain = "example.com"
+# password = "PER-HOST-DDNS-KEY"   # from Namecheap dashboard
+#
+# [[ddns]]
+# provider = "dynv6"
+# name = "dynv6-home"
+# hostname = "myrouter.dynv6.net"
+# token = "PER-ZONE-TOKEN"
+#
+# [[ddns]]                         # Hurricane Electric Free DNS
+# provider = "he"
+# name = "he-home"
+# hostname = "router.example.com"
+# key = "DDNS-KEY"                 # from HE.net DNS dashboard
 
 # ---------------- Port Forwards ----------------
 #
