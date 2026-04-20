@@ -77,6 +77,22 @@ fn main() -> ExitCode {
                     }
                 };
             }
+            // `diff` — same shape as watch (second positional),
+            // also needs to spin its own runtime since it reads
+            // a local file AND dials sQUIC.
+            if args.get(1).map(|s| s.as_str()) == Some("diff") {
+                let mut diff_args = Vec::with_capacity(args.len() - 1);
+                diff_args.push(args.remove(0)); // remote
+                args.remove(0); // "diff"
+                diff_args.extend(args);
+                return match oxwrtctl_cli::diff::run(diff_args) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("oxctl diff: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             oxwrtctl_cli::run_client_sync(args)
         }
     }
@@ -98,6 +114,7 @@ fn print_usage() {
     eprintln!(
         "usage: oxctl <remote> <cmd> [args...]\n\
                 oxctl <remote> watch [--interval N] [cmd args...]\n\
+                oxctl <remote> diff <local.toml>\n\
                 oxctl wizard [--out <path>]\n\
                 oxctl dump-config [--public PATH] [--secrets PATH]\n\
                 oxctl --print-server-key [path]\n\

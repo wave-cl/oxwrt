@@ -56,6 +56,10 @@ sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
+# `oxctl diff` renders a unified diff between a local TOML and
+# the router's live config. `similar` is the standard Myers-
+# diff crate for Rust — small + ergonomic + no heavy deps.
+similar = "2"
 base64 = { version = "0.22", default-features = false, features = ["std"] }
 # HTTP client for the DDNS updater. rustls-tls shares the already-
 # pulled-in rustls+ring stack from quinn (no openssl libcrypto drag-

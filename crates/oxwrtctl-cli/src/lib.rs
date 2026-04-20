@@ -13,6 +13,7 @@
 //! Linux-glibc, Linux-musl — without cross toolchains.
 
 pub mod client;
+pub mod diff;
 pub mod dump_config;
 pub mod mullvad;
 pub mod qr;

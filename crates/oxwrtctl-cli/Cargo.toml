@@ -62,6 +62,9 @@ futures-util.workspace = true
 # Using libc::signal directly instead of pulling the `ctrlc` crate
 # for one-line wiring.
 libc.workspace = true
+# `oxctl diff` renders a unified diff between a local TOML and
+# the router's live config-dump.
+similar.workspace = true
 
 [dev-dependencies]
 # `wizard` tests round-trip generated TOML through a tmpdir +
