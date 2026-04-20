@@ -175,20 +175,33 @@ Clients sign with `oxctl --sign <image>`, keyed off
 Dev-mode images without a baked pubkey fall through to SHA-only
 with a warning log, so self-built flows keep working.
 
-### Known — control-plane connection cap, but no per-RPC rate limit
+### P10 — control plane rate-limits at two layers
 
 sQUIC's accept loop gates on a `tokio::sync::Semaphore` sized to
 `cfg.control.max_connections` (default 32). Surplus connections
 are refused immediately — a WAN scan can't exhaust the
-per-connection task state. But an authenticated client *inside*
-that cap can still hammer RPCs on its held connection.
+per-connection task state.
 
-Mitigation today: tight `[[control.clients]]` ACL, short-lived
-connections (the CLI opens one per RPC and exits), the
-connection cap bounds the concurrent damage.
+Inside an accepted connection, each RPC pulls a token from a
+per-connection bucket (capacity = 2× `max_rpcs_per_sec`, refills
+at `max_rpcs_per_sec` tokens/sec; default rate 20). An authenticated
+client trying to hammer its held connection gets backpressured —
+`acquire` sleeps until a token refills rather than failing the
+request, so a legitimate caller sees latency instead of an error.
+See `RateBucket` in `control/server/mod.rs`.
 
-**TODO.** Per-pubkey token-bucket rate limit + global
-connection-count cap.
+Mitigation stack: tight `[[control.clients]]` ACL, short-lived
+connections (CLI opens one per RPC), connection cap bounds
+concurrent clients, per-connection bucket bounds their
+in-connection throughput.
+
+**TODO** (deferred). Per-pubkey (not just per-connection) rate
+limit. Requires upstream sQUIC to surface the peer's ed25519
+pubkey on the accepted `quinn::Connection`; today the pubkey is
+consumed by the MAC-layer whitelist check and not propagated.
+Without it, a peer could reconnect to refresh its bucket — but
+they'd pay the full handshake cost each time and still sit under
+`max_connections`, so the ceiling holds in aggregate.
 
 ### Known — DDNS + blocklist fetch trust system CAs
 

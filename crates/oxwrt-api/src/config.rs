@@ -1667,6 +1667,19 @@ pub struct Control {
     /// more than a handful.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// Per-connection RPC rate ceiling, in requests per second.
+    /// Implemented as a token bucket (capacity = 2× rate, refills
+    /// at `rate` tokens per wall second). Once a connection exhausts
+    /// its bucket it blocks until the next refill — no error, no
+    /// drop, just backpressure onto the caller.
+    ///
+    /// Protects against an authenticated client (inside the
+    /// `max_connections` cap) hammering RPCs on a long-held
+    /// connection. The CLI opens a new connection per RPC so it
+    /// never feels the cap; `oxctl watch` reissues periodically
+    /// and stays well under any sane ceiling. Default 20.
+    #[serde(default = "default_max_rpcs_per_sec")]
+    pub max_rpcs_per_sec: u32,
     /// Path to a legacy plain-text file holding hex-encoded client
     /// ed25519 pubkeys (one per line, `#` comments skipped). Loaded
     /// alongside [`Control::clients`] and merged — keys from both
@@ -1786,6 +1799,10 @@ pub enum Ddns {
 
 fn default_max_connections() -> u32 {
     32
+}
+
+fn default_max_rpcs_per_sec() -> u32 {
+    20
 }
 
 fn default_cf_ttl() -> u32 {

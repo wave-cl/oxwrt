@@ -880,6 +880,31 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	else \
 	    echo "No provisioning/key.ed25519 — device will generate on first boot"; \
 	fi
+	# Release-signing pubkey. When this 32-byte ed25519 pubkey is
+	# present at /etc/oxwrt/release-pubkey.ed25519 on the router,
+	# the FwUpdate RPC requires every incoming image to carry an
+	# ed25519 signature over sha256(image) — verified against this
+	# pubkey (see sysupgrade.rs::verify_release_signature + SECURITY.md P9).
+	# Generate the matching signing key off-device once:
+	#   cargo run --release -p oxwrtctl-cli -- --print-pubkey \
+	#       > provisioning/release-pubkey.ed25519.hex
+	#   # (or: keep the raw 32 bytes — sign.rs emits hex to stdout)
+	# Then write the 32 raw bytes to provisioning/release-pubkey.ed25519.
+	# With the pubkey absent from the image, the daemon falls back
+	# to SHA-only update with a warning — self-built dev flows keep
+	# working unchanged.
+	if [ -f provisioning/release-pubkey.ed25519 ]; then \
+	    if [ "$$(wc -c < provisioning/release-pubkey.ed25519)" != "32" ]; then \
+	        echo "WARN: provisioning/release-pubkey.ed25519 is not 32 bytes — skipping bake" >&2; \
+	    else \
+	        mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt; \
+	        cp provisioning/release-pubkey.ed25519 $(IMAGEBUILDER_DIR)/files/etc/oxwrt/release-pubkey.ed25519; \
+	        chmod 0644 $(IMAGEBUILDER_DIR)/files/etc/oxwrt/release-pubkey.ed25519; \
+	        echo "Baked provisioning/release-pubkey.ed25519 → /etc/oxwrt/ (FwUpdate will require signed images)"; \
+	    fi; \
+	else \
+	    echo "No provisioning/release-pubkey.ed25519 — FwUpdate falls back to SHA-only (dev-mode)"; \
+	fi
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
 

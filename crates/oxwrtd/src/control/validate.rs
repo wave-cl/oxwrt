@@ -461,6 +461,7 @@ mod tests {
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
                 clients: vec![],
                 max_connections: 32,
+            max_rpcs_per_sec: 20,
             },
         }
     }

@@ -648,6 +648,7 @@ mod tests {
             authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
             clients: vec![],
                 max_connections: 32,
+        max_rpcs_per_sec: 20,
         };
         let text = default_config_text(&control);
         let cfg: Config = toml::from_str(&text).expect("default config must parse");
@@ -667,6 +668,7 @@ mod tests {
             authorized_keys: PathBuf::from("/etc/oxwrt/keys"),
             clients: vec![],
                 max_connections: 32,
+        max_rpcs_per_sec: 20,
         };
         let text = default_config_text(&control);
         let n = text.matches("\"10.0.0.1:51820\"").count();

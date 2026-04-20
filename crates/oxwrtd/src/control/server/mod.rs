@@ -30,6 +30,69 @@ pub struct Server {
     /// fails immediately — in which case we close the incoming
     /// without handshake.
     pub connection_slots: Arc<tokio::sync::Semaphore>,
+    /// Per-connection RPC rate ceiling (requests/sec). Each
+    /// `handle_incoming` task instantiates a fresh bucket seeded
+    /// from this value — no shared state across connections, so
+    /// one aggressive peer can't starve another.
+    pub rpc_rate_per_sec: u32,
+}
+
+/// Per-connection token bucket. Starts full (capacity = 2× rate,
+/// so a small burst is fine), refills at `rate` tokens per wall
+/// second, and `acquire` waits until at least one token is
+/// available before returning. No shared state — each
+/// `handle_incoming` owns its own bucket.
+struct RateBucket {
+    tokens: f64,
+    capacity: f64,
+    rate: f64,
+    last_refill: std::time::Instant,
+}
+
+impl RateBucket {
+    fn new(rate_per_sec: u32) -> Self {
+        let rate = rate_per_sec.max(1) as f64;
+        let capacity = (rate * 2.0).max(2.0);
+        Self {
+            tokens: capacity,
+            capacity,
+            rate,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+            self.last_refill = now;
+        }
+    }
+
+    /// Await until a token is available, then consume it. Logs
+    /// at `debug` when the caller had to wait — operator-visible
+    /// signal that a connection is pushing the ceiling.
+    async fn acquire(&mut self) {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            return;
+        }
+        // Need to wait for `(1 - tokens) / rate` seconds of refill.
+        let shortfall = 1.0 - self.tokens;
+        let wait_secs = shortfall / self.rate;
+        let wait = std::time::Duration::from_secs_f64(wait_secs.min(5.0));
+        tracing::debug!(
+            wait_ms = wait.as_millis() as u64,
+            "control: rpc rate ceiling hit — backpressuring peer"
+        );
+        tokio::time::sleep(wait).await;
+        self.refill();
+        // After the sleep we should have ≥ 1 token; defensively
+        // floor at 0 so a clock jump doesn't panic.
+        self.tokens = (self.tokens - 1.0).max(0.0);
+    }
 }
 
 impl Server {
@@ -55,15 +118,18 @@ impl Server {
         let authorized_keys = load_merged_authorized_keys(control)?;
         let slots = control.max_connections.max(1) as usize;
         let connection_slots = Arc::new(tokio::sync::Semaphore::new(slots));
+        let rpc_rate_per_sec = control.max_rpcs_per_sec.max(1);
         tracing::debug!(
             max_connections = slots,
-            "control: sQUIC concurrent-connection cap"
+            max_rpcs_per_sec = rpc_rate_per_sec,
+            "control: sQUIC caps"
         );
         Ok(Self {
             signing_key,
             authorized_keys,
             state,
             connection_slots,
+            rpc_rate_per_sec,
         })
     }
 
@@ -143,6 +209,11 @@ impl Server {
         let conn = incoming
             .await
             .map_err(|e| Error::Squic(squic::Error::from(e)))?;
+        // Per-connection token bucket. Created on handshake, dies
+        // when the task returns. Tokens don't migrate across
+        // reconnects — a peer wanting burst headroom pays the
+        // connection cost.
+        let mut bucket = RateBucket::new(self.rpc_rate_per_sec);
         loop {
             let (mut send, mut recv) = match conn.accept_bi().await {
                 Ok(s) => s,
@@ -150,6 +221,12 @@ impl Server {
                 | Err(quinn::ConnectionError::ConnectionClosed(_)) => return Ok(()),
                 Err(e) => return Err(Error::Squic(squic::Error::from(e))),
             };
+            // Gate each RPC on a token. `acquire` sleeps until one
+            // is available — the client sees latency, not an error.
+            // Deliberately BEFORE read_frame so a flood of pre-
+            // serialised requests queued on the bi-stream still
+            // gets paced.
+            bucket.acquire().await;
             let request: Request = read_frame(&mut recv).await?;
 
             // Streaming logs take a different path — they hold the bi
@@ -1163,12 +1240,53 @@ mod tests {
     use super::*;
     use crate::config::{AuthorizedClient, Control};
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_bucket_drains_then_waits() {
+        // rate=50 → capacity=100. Drain 100 (no wait), then the
+        // 101st acquire has to sleep for one refill slot at
+        // 50/sec = 20 ms. We allow a generous lower bound (10 ms)
+        // to avoid timing flakes on busy CI runners while still
+        // proving that the acquire blocked.
+        let mut b = RateBucket::new(50);
+        for _ in 0..100 {
+            b.acquire().await;
+        }
+        let before = std::time::Instant::now();
+        b.acquire().await;
+        let waited = before.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(10),
+            "expected ≥10ms wait, got {:?}",
+            waited
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_bucket_refills_over_time() {
+        // rate=200 → capacity=400. Drain, sleep 50 ms, verify the
+        // next acquire returns without any user-visible wait — the
+        // bucket has recovered at least 10 tokens (200/sec × 0.05s).
+        let mut b = RateBucket::new(200);
+        for _ in 0..400 {
+            b.acquire().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let start = std::time::Instant::now();
+        b.acquire().await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(3),
+            "expected no wait after refill, got {:?}",
+            start.elapsed()
+        );
+    }
+
     fn control_with(clients: Vec<AuthorizedClient>, file_path: &str) -> Control {
         Control {
             listen: vec![],
             authorized_keys: std::path::PathBuf::from(file_path),
             clients,
             max_connections: 32,
+            max_rpcs_per_sec: 20,
         }
     }
 
@@ -1225,6 +1343,7 @@ mod tests {
                 key: key.clone(),
             }],
             max_connections: 32,
+            max_rpcs_per_sec: 20,
         };
         let keys = load_merged_authorized_keys(&ctrl).unwrap();
         assert_eq!(keys.len(), 1);
@@ -1245,6 +1364,7 @@ mod tests {
                 key: inline_key,
             }],
             max_connections: 32,
+            max_rpcs_per_sec: 20,
         };
         let keys = load_merged_authorized_keys(&ctrl).unwrap();
         assert_eq!(keys.len(), 2);
