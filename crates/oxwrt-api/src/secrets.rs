@@ -474,6 +474,33 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// Audit: the shipped `config/oxwrt.toml` example has zero
+    /// secret leaves present after split. Acts as a regression
+    /// guard on SECURITY.md's P1 invariant — if a future commit
+    /// adds a live `passphrase = "..."` back into the example,
+    /// this test fails loudly. Also picks up any brand-new secret
+    /// field that someone added to the example without extending
+    /// SECRET_FIELDS (because the split would no-op on it).
+    #[test]
+    fn public_example_is_free_of_secrets() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let mut doc: DocumentMut = text
+            .parse()
+            .unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let secret_doc = split_document(&mut doc);
+        // If split produced any entries, the public file had
+        // secret leaves. Emit them for the operator to fix.
+        let count = count_entries(&secret_doc);
+        assert_eq!(
+            count, 0,
+            "public example config contains {count} live secret leaf(s); \
+             move them to oxwrt.secrets.toml.example. \
+             Secret doc dump:\n{secret_doc}"
+        );
+    }
+
     #[test]
     fn split_moves_wifi_passphrase() {
         let mut pub_doc = parse(
