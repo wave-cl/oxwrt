@@ -459,6 +459,7 @@ mod tests {
             firewall: Firewall {
                 zones: vec![],
                 rules: vec![],
+                raw_nft: vec![],
             },
             radios: vec![],
             wifi: vec![],

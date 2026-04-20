@@ -389,6 +389,7 @@ mod tests {
                     action: Action::Accept,
                     dnat_target: None,
                 }],
+                raw_nft: vec![],
             },
             radios: vec![Radio {
                 phy: "phy0".to_string(),

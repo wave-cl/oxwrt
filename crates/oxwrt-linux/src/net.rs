@@ -1277,7 +1277,77 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         );
     }
 
+    // Raw-nft escape hatch: pipe every [[firewall.raw_nft]] entry
+    // through `nft -f -` once the structured batches have all
+    // landed. Non-fatal if nft is missing or a rule fails to
+    // parse — we log and continue, because a bad raw-rule line
+    // shouldn't prevent the rest of the firewall from coming up.
+    // The operator's fix is an oxwrt.toml edit + reload.
+    if !cfg.firewall.raw_nft.is_empty() {
+        apply_raw_nft(&cfg.firewall.raw_nft);
+    }
+
     Ok(())
+}
+
+/// Render the `nft -f -` script for a slice of raw entries. Split
+/// out for testability — `apply_raw_nft` handles the actual
+/// subprocess glue.
+pub(crate) fn build_raw_nft_script(entries: &[oxwrt_api::config::RawNft]) -> String {
+    let mut s = String::new();
+    for e in entries {
+        s.push_str(&format!("add rule {} {} {}\n", e.table, e.chain, e.rule));
+    }
+    s
+}
+
+fn apply_raw_nft(entries: &[oxwrt_api::config::RawNft]) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let script = build_raw_nft_script(entries);
+
+    let mut child = match Command::new("nft")
+        .arg("-f")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                entries = entries.len(),
+                "raw_nft: couldn't invoke `nft` binary; skipping"
+            );
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(script.as_bytes()) {
+            tracing::error!(error = %e, "raw_nft: stdin write failed");
+            return;
+        }
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(error = %e, "raw_nft: wait failed");
+            return;
+        }
+    };
+    if !out.status.success() {
+        tracing::error!(
+            status = ?out.status.code(),
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            entries = entries.len(),
+            "raw_nft: `nft -f -` exited non-zero; one or more rules rejected"
+        );
+    } else {
+        tracing::info!(count = entries.len(), "raw_nft: installed");
+    }
 }
 
 /// Build a human-readable dump of the firewall rules `install_firewall`
@@ -1592,6 +1662,31 @@ mod tests {
         assert!(parse_mac("aa:bb:cc:dd:ee:gg").is_err());
         assert!(parse_mac("aa:bb:cc:dd:ee:f").is_err()); // single-char octet
     }
+
+    #[test]
+    fn raw_nft_script_renders_one_line_per_entry() {
+        let entries = vec![
+            oxwrt_api::config::RawNft {
+                table: "inet oxwrt".into(),
+                chain: "forward".into(),
+                rule: "ct state new tcp dport 22 accept".into(),
+            },
+            oxwrt_api::config::RawNft {
+                table: "ip oxwrt-nat".into(),
+                chain: "postrouting".into(),
+                rule: "oifname \"wg0\" masquerade".into(),
+            },
+        ];
+        let script = build_raw_nft_script(&entries);
+        assert_eq!(script.lines().count(), 2);
+        assert!(script.contains("add rule inet oxwrt forward ct state new tcp dport 22 accept"));
+        assert!(script.contains("add rule ip oxwrt-nat postrouting"));
+    }
+
+    #[test]
+    fn raw_nft_script_empty_on_no_entries() {
+        assert!(build_raw_nft_script(&[]).is_empty());
+    }
     use oxwrt_api::config::{Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone};
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;
@@ -1639,6 +1734,7 @@ mod tests {
                     wan: None,
                 }],
                 rules: vec![],
+                raw_nft: vec![],
             },
             radios: vec![],
             wifi: vec![],

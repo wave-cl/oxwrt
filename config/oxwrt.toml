@@ -54,7 +54,8 @@
 # Section index:
 #   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
 #                  failover via priority/probe_target
-#   firewall       zones + explicit rules (no magic booleans)
+#   firewall       zones + explicit rules (no magic booleans) +
+#                  raw_nft escape hatch for unusual rule shapes
 #   ddns           DuckDNS + Cloudflare + Namecheap + dynv6 + HE.net
 #   port_forwards  external WAN port → internal host:port
 #   routes         static IPv4 routes
@@ -412,6 +413,24 @@ name = "lan-ping"
 src = "lan"
 proto = "icmp"
 action = "accept"
+
+# ── Raw-nft escape hatch ──
+# For rules the zone/rule abstraction can't express (rate limits,
+# custom hook priorities, third-party modules, experimental
+# expressions). Each entry is piped through `nft -f -` at the end
+# of the firewall install, so the oxwrt-managed tables (`inet
+# oxwrt`, `ip oxwrt-nat`, `ip6 oxwrt-nat6`, `inet oxwrt-dnat`)
+# are already created by then — you can target them without
+# `add table`. Malformed rules are logged and skipped, not fatal.
+#
+# [[firewall.raw_nft]]
+# table = "inet oxwrt"            # default
+# chain = "input"
+# rule  = "ct state new tcp dport 22 limit rate 5/minute accept"
+#
+# [[firewall.raw_nft]]
+# chain = "forward"
+# rule  = "iifname \"br-iot\" oifname \"br-guest\" drop  comment \"no iot→guest\""
 
 # ---------------- Dynamic DNS ----------------
 #

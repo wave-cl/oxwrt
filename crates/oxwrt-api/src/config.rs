@@ -978,6 +978,49 @@ pub struct Firewall {
     pub zones: Vec<Zone>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Escape hatch for nft rules that the zone/rule abstraction
+    /// can't express: exotic rate-limits, custom chains, hook
+    /// priorities, third-party modules. Each entry is piped
+    /// through `nft -f -` at the end of `install_firewall` —
+    /// after the structured batches have landed — so the raw
+    /// rules sit on top of the generated base. The oxwrt-managed
+    /// tables (`inet oxwrt`, `ip oxwrt-nat`, `ip6 oxwrt-nat6`,
+    /// `inet oxwrt-dnat`) are already created by that point, so
+    /// operators can target them without `add table …`.
+    ///
+    /// Reload behaviour: raw rules are re-applied on every
+    /// `install_firewall` call, so they follow the same
+    /// "regenerate-from-config" lifecycle as the rest of the
+    /// firewall — editing oxwrt.toml + `oxctl reload` is the
+    /// source of truth. Rules survive zone / service changes but
+    /// NOT a reboot if they depend on tables outside the
+    /// oxwrt-managed set.
+    #[serde(default)]
+    pub raw_nft: Vec<RawNft>,
+}
+
+/// One operator-supplied raw nft rule. `table` + `chain` name
+/// where the rule lives; `rule` is the everything-after-`add rule
+/// <table> <chain>` text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RawNft {
+    /// Fully-qualified table name, e.g. `"inet oxwrt"` or
+    /// `"ip6 oxwrt-nat6"`. Default `"inet oxwrt"` — the main
+    /// filter table where most custom rules land.
+    #[serde(default = "default_raw_nft_table")]
+    pub table: String,
+    /// Chain name inside `table`. Standard oxwrt chains:
+    /// `"input"`, `"forward"`, `"output"` (in `inet oxwrt`).
+    /// Custom chains must be added via a separate entry first.
+    pub chain: String,
+    /// The rule body — everything that would follow `add rule
+    /// <table> <chain>` in nft syntax. Example:
+    /// `"ct state new tcp dport 22 limit rate 5/minute accept"`.
+    pub rule: String,
+}
+
+fn default_raw_nft_table() -> String {
+    "inet oxwrt".to_string()
 }
 
 /// A firewall zone: names a set of networks and declares default chain
