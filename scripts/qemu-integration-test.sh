@@ -515,6 +515,10 @@ R=$(run_cmd diag conntrack); check "diag conntrack (runs)" "" "$R"
 # validator path only.
 R=$(run_cmd diag wol); check_err "diag wol without mac rejected" "missing" "$R"
 R=$(run_cmd diag wol "zzz"); check_err "diag wol invalid mac rejected" "hex" "$R"
+# diag devices: ARP-cache-based snapshot of LAN peers. The QEMU
+# harness doesn't model real LAN clients so the ARP table is
+# usually empty — assert the "no devices" fallback string.
+R=$(run_cmd diag devices); check "diag devices (runs)" "LAN" "$R"
 
 echo "-- reload dry-run --"
 # Clean config — dry-run must pass before the reload runs it for

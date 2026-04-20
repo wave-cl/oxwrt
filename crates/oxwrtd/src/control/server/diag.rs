@@ -377,11 +377,17 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                 message: format!("diag wol: {e}"),
             },
         },
+        "devices" => match diag_devices(state).await {
+            Ok(text) => Response::Value { value: text },
+            Err(e) => Response::Err {
+                message: format!("diag devices: {e}"),
+            },
+        },
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
                  modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, ping-many, \
-                 traceroute, dig, stall, wol)"
+                 traceroute, dig, stall, wol, devices)"
             ),
         },
     }
@@ -437,6 +443,130 @@ async fn diag_wol(state: &ControlState, args: &[String]) -> Result<String, Strin
     Ok(format!(
         "sent WoL magic packet to {mac_str} via {broadcast}:9 (from {lan_addr})\n"
     ))
+}
+
+/// "Who's on my LAN?" — parse `/proc/net/arp` into a table of
+/// (iface, ip, mac, state) filtered to the LAN-side bridges that
+/// this device serves.
+///
+/// The ARP cache is transient — entries only appear for hosts the
+/// kernel has recently needed to address, and get pruned after a
+/// few minutes of silence. So this is a "currently active or
+/// recently active" list, not an inventory of every device that
+/// ever joined. For a lease-authoritative view once a device's
+/// hostname matters, pair with `oxctl diag dhcp` (follow-up:
+/// merging both into one view requires parsing the coredhcp
+/// SQLite lease DB, which needs an rusqlite dep).
+///
+/// Filtered to LAN/Simple ifaces so WAN-side noise (the upstream
+/// router, any DMZ peers) doesn't clutter the view.
+async fn diag_devices(state: &ControlState) -> Result<String, String> {
+    use oxwrt_api::config::Network;
+    use std::fmt::Write;
+
+    let cfg = state.config_snapshot();
+    let lan_ifaces: std::collections::HashSet<String> = cfg
+        .networks
+        .iter()
+        .filter_map(|n| match n {
+            Network::Lan { bridge, .. } => Some(bridge.clone()),
+            Network::Simple { iface, .. } => Some(iface.clone()),
+            Network::Wan { .. } => None,
+        })
+        .collect();
+
+    let text = std::fs::read_to_string("/proc/net/arp")
+        .map_err(|e| format!("read /proc/net/arp: {e}"))?;
+
+    // First line is the column header; skip it.
+    let mut rows: Vec<Row> = text
+        .lines()
+        .skip(1)
+        .filter_map(parse_arp_row)
+        .filter(|r| lan_ifaces.contains(&r.iface))
+        .collect();
+
+    // Stable order: iface, then numeric-aware IP sort (so
+    // 192.168.50.9 < 192.168.50.10).
+    rows.sort_by(|a, b| {
+        a.iface
+            .cmp(&b.iface)
+            .then_with(|| a.ip_key().cmp(&b.ip_key()))
+    });
+
+    if rows.is_empty() {
+        return Ok(format!(
+            "no LAN-side devices in ARP cache (LAN ifaces: {})\n",
+            lan_ifaces.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    let mut out = String::new();
+    writeln!(out, "{:<16}  {:<17}  {:<10}  {}", "IP", "MAC", "STATE", "IFACE")
+        .unwrap();
+    for r in &rows {
+        writeln!(out, "{:<16}  {:<17}  {:<10}  {}", r.ip, r.mac, r.state, r.iface)
+            .unwrap();
+    }
+    writeln!(out, "\n{} device(s) on LAN", rows.len()).unwrap();
+    Ok(out)
+}
+
+#[derive(Debug)]
+struct Row {
+    ip: String,
+    mac: String,
+    state: String,
+    iface: String,
+}
+
+impl Row {
+    /// Numeric IPv4 for sort; non-IPv4 strings sort as u32::MAX
+    /// (clumped at the end).
+    fn ip_key(&self) -> u32 {
+        self.ip
+            .parse::<std::net::Ipv4Addr>()
+            .map(u32::from)
+            .unwrap_or(u32::MAX)
+    }
+}
+
+/// Parse one line of `/proc/net/arp`:
+/// `IP  HW-type  Flags  HW-address       Mask  Device`
+/// Skip incomplete entries (flag=0x0, HW=00:00:00:00:00:00 —
+/// "failed to resolve" noise).
+fn parse_arp_row(line: &str) -> Option<Row> {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 6 {
+        return None;
+    }
+    let ip = cols[0].to_string();
+    let flags = u32::from_str_radix(cols[2].trim_start_matches("0x"), 16).ok()?;
+    let mac = cols[3].to_string();
+    let iface = cols[5].to_string();
+
+    // Flag 0x2 = ATF_COM (entry resolved). Anything else is
+    // "cache still pending" — skip to avoid listing ghost IPs.
+    let state = match flags {
+        0x2 => "reachable",
+        0x4 => "permanent",
+        0x0 => return None, // incomplete
+        _ => "other",
+    }
+    .to_string();
+
+    // Filter out the 00:00:00:00:00:00 sentinel some kernels
+    // emit for incomplete entries even with flags=0x2.
+    if mac == "00:00:00:00:00:00" {
+        return None;
+    }
+
+    Some(Row {
+        ip,
+        mac,
+        state,
+        iface,
+    })
 }
 
 /// Directed-broadcast address for a /prefix network containing
@@ -1199,6 +1329,53 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
         out.push_str("(no tables)\n");
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod devices_tests {
+    use super::parse_arp_row;
+
+    #[test]
+    fn reachable_entry_parsed() {
+        let line = "192.168.50.100   0x1         0x2         aa:bb:cc:dd:ee:ff     *        br-lan";
+        let r = parse_arp_row(line).expect("reachable entry");
+        assert_eq!(r.ip, "192.168.50.100");
+        assert_eq!(r.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(r.state, "reachable");
+        assert_eq!(r.iface, "br-lan");
+    }
+
+    #[test]
+    fn permanent_entry_parsed() {
+        let line = "192.168.50.1     0x1         0x4         02:11:22:33:44:55     *        br-lan";
+        let r = parse_arp_row(line).expect("permanent entry");
+        assert_eq!(r.state, "permanent");
+    }
+
+    #[test]
+    fn incomplete_entry_skipped() {
+        // Flags = 0x0 = incomplete resolution.
+        let line = "192.168.50.99    0x1         0x0         00:00:00:00:00:00     *        br-lan";
+        assert!(parse_arp_row(line).is_none());
+    }
+
+    #[test]
+    fn zero_mac_skipped_even_with_reachable_flag() {
+        // Some kernels emit flag=0x2 with an all-zero MAC during
+        // the half-resolved window — treat as noise.
+        let line = "192.168.50.99    0x1         0x2         00:00:00:00:00:00     *        br-lan";
+        assert!(parse_arp_row(line).is_none());
+    }
+
+    #[test]
+    fn header_row_skipped_by_column_count_check() {
+        // The /proc/net/arp header has 8 columns and parses, but
+        // trimming to its first column "IP" fails at the flags
+        // hex-parse step → returns None.
+        let line =
+            "IP address       HW type     Flags       HW address            Mask     Device";
+        assert!(parse_arp_row(line).is_none());
+    }
 }
 
 #[cfg(test)]
