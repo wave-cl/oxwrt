@@ -1094,7 +1094,7 @@ verity-test:
 # as production), but requires a ~30s VM boot per run. Prefer the
 # Docker one while developing; run QEMU before flashing.
 
-.PHONY: test-docker test-qemu
+.PHONY: test-docker test-qemu ci-check ci-check-image
 
 test-docker: rust-oxwrtd
 	cargo build --release -p oxwrtctl-cli
@@ -1104,6 +1104,77 @@ test-docker: rust-oxwrtd
 test-qemu: rust-oxwrtd
 	cargo build --release -p oxwrtctl-cli
 	./scripts/qemu-integration-test.sh
+
+# ── ci-check: mirror the three fast CI jobs (fmt, clippy, test) ────
+#
+# Why this exists: oxwrt-linux and oxwrtd are both gated on
+# `#![cfg(target_os = "linux")]`, so a macOS `cargo clippy` sees
+# them as empty crates and silently skips all their lints. On
+# 2026-04-20 this let ~40 commits of clippy-1.95 warnings (and
+# one genuine test flake) pile up between CI runs we actually
+# looked at. This target runs the exact CI-equivalent checks
+# inside a Linux container so mac devs catch the same lints
+# pre-push.
+#
+# First run is slow (~5 min — pulls rust:X image, apt-gets libclang
+# + linux-libc-dev for rustables' bindgen, fetches crates). Cached
+# subsequently via Docker-named volumes for ~/.cargo/registry and a
+# separate target dir under target/ci-check so we don't clobber the
+# host's macOS target cache.
+#
+# Scope: fmt + clippy + cargo test — same as CI minus QEMU. QEMU
+# gets its own `make test-qemu` target; it wants nested virt and
+# is a 5-8 min separate beast. The `rust-toolchain.toml` at repo
+# root pins the channel so this container's rustc matches CI's.
+#
+# Usage:
+#   make ci-check                # full run
+#   make ci-check CI_TEST_ARGS="--no-run"    # fmt+clippy only
+#
+# Requires Docker running on the host.
+
+CI_BASE_IMAGE    ?= rust:1.95
+CI_IMAGE_TAG     ?= oxwrt-ci:local
+CI_TARGET_DIR    ?= target/ci-check
+CI_CARGO_VOLUME  ?= oxwrt-ci-cargo
+
+# Build the CI-check image once: base rust + apt deps + clippy/rustfmt
+# components. Rebuilt only when the base image changes.
+# Outputs to a named tag so `docker run` below can reuse the layer
+# cache. Image is ~1.5 GB on disk; `docker rmi $(CI_IMAGE_TAG)` to
+# drop.
+.ci-check-image: ; @echo "no-op guard — use ci-check-image"
+ci-check-image:
+	@echo "=== building $(CI_IMAGE_TAG) (one-time, ~5 min first run) ==="
+	@printf 'FROM %s\n\
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \\\n\
+        clang libclang-dev linux-libc-dev pkg-config \\\n\
+    && rm -rf /var/lib/apt/lists/*\n\
+RUN rustup component add rustfmt clippy\n' "$(CI_BASE_IMAGE)" \
+		| docker build -t $(CI_IMAGE_TAG) -
+
+ci-check: ci-check-image
+	@mkdir -p $(CI_TARGET_DIR)
+	@echo "=== ci-check: fmt + clippy + test inside $(CI_IMAGE_TAG) ==="
+	docker run --rm \
+		-v $(CURDIR):/oxwrt \
+		-v $(CURDIR)/../squic-rust:/squic-rust \
+		-v $(CI_CARGO_VOLUME):/usr/local/cargo/registry \
+		-w /oxwrt \
+		-e CARGO_TERM_COLOR=always \
+		-e CARGO_TARGET_DIR=/oxwrt/$(CI_TARGET_DIR) \
+		$(CI_IMAGE_TAG) \
+		sh -c '\
+			set -eu; \
+			echo "--- [1/3] cargo fmt --check ---"; \
+			cargo fmt -p oxwrt-api -p oxwrt-linux -p oxwrt-proto -p oxwrtctl-cli -p oxwrtd -- --check; \
+			echo "--- [2/3] cargo clippy -D warnings ---"; \
+			cargo clippy -p oxwrt-api -p oxwrt-linux -p oxwrt-proto -p oxwrtctl-cli -p oxwrtd \
+				--all-targets -- -D warnings; \
+			echo "--- [3/3] cargo test ---"; \
+			cargo test --workspace --all-targets $(CI_TEST_ARGS); \
+			echo "--- ci-check: all green ---"; \
+		'
 
 # ── Clean ────────────────────────────────────────────────────────────
 

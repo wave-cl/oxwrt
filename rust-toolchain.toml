@@ -1,0 +1,16 @@
+[toolchain]
+# Pin stable to a specific minor version so new clippy lints don't
+# surprise CI between commits. CI (dtolnay/rust-toolchain@stable)
+# and `make ci-check` both honor this file.
+#
+# Bump procedure: update the channel, run `make ci-check` locally to
+# pick up any new lints, fix them in the same PR as the bump. Treat
+# as a normal dependency update — deliberate, not automatic.
+#
+# Related: the linux-only crates (`oxwrt-linux`, `oxwrtd`) compile
+# to no-op on macOS via `#![cfg(target_os = "linux")]`, so `cargo
+# clippy` on a mac misses their lints entirely. `make ci-check`
+# runs the same clippy invocation inside a Linux container to
+# catch those pre-push.
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
