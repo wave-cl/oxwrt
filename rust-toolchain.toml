@@ -14,3 +14,9 @@
 # catch those pre-push.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
+# aarch64-unknown-linux-musl is required for `cargo zigbuild` cross-
+# compiling oxwrtd for the router (MT6000). Listed here so a fresh
+# clone + first `cargo` invocation auto-installs the target std lib
+# via rustup — otherwise the QEMU CI job fails with E0463 "can't
+# find crate for std".
+targets = ["aarch64-unknown-linux-musl"]
