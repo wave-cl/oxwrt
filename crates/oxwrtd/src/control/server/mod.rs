@@ -1115,24 +1115,6 @@ fn persist_and_swap(state: &ControlState, new_cfg: crate::config::Config, desc: 
     if let Err(e) = atomic_write_config(&toml_text) {
         return Response::Err { message: e };
     }
-    // Forensic: log size of /etc/oxwrt.toml AND /overlay/upper/etc/oxwrt.toml
-    // right after the write. If only the former matches, the overlay
-    // upper layer isn't receiving the write (would explain the revert
-    // on reboot).
-    {
-        let live_size = std::fs::metadata("/etc/oxwrt.toml")
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let upper_size = std::fs::metadata("/overlay/upper/etc/oxwrt.toml")
-            .map(|m| m.len())
-            .ok();
-        tracing::warn!(
-            expected = toml_text.len(),
-            live = live_size,
-            upper = ?upper_size,
-            "forensic: post-write oxwrt.toml sizes"
-        );
-    }
     if let Ok(mut cfg_lock) = state.config.write() {
         *cfg_lock = std::sync::Arc::new(new_cfg);
     }

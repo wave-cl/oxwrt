@@ -1,8 +1,8 @@
 //! Daemon entry points + async orchestration.
 //!
-//! Split out of init.rs in step 6 of the workspace refactor.
-
-#![allow(clippy::too_many_lines)]
+//! Split out of init.rs in step 6 of the workspace refactor; the
+//! per-mode `*_main` async bodies subsequently moved out to
+//! `main_loop.rs` leaving this file thin.
 
 use super::modules::load_modules;
 use super::netdev::{create_wifi_ap_interfaces, rename_netdevs_from_dts};
@@ -11,26 +11,6 @@ use super::*;
 
 pub fn run() -> Result<(), Error> {
     early_mounts()?;
-
-    // Temporary diagnostic: log /dev contents and /proc/mounts after
-    // early_mounts. Helps pinpoint why /dev/mmcblk0pN isn't available
-    // when mount_root tries to open it on the standalone pid1 path.
-    {
-        let mut dev_entries: Vec<String> = std::fs::read_dir("/dev")
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        dev_entries.sort();
-        tracing::info!(count = dev_entries.len(), sample = ?dev_entries.iter().take(20).collect::<Vec<_>>(), "diag: /dev entries after early_mounts");
-        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-            for line in mounts.lines().take(15) {
-                tracing::info!(line, "diag: /proc/mounts");
-            }
-        }
-    }
 
     // Stage 1 of the procd-init takeover: kernel module loading.
     // Walk /etc/modules-boot.d/ then /etc/modules.d/ and finit_module
@@ -95,39 +75,6 @@ pub fn run() -> Result<(), Error> {
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
-
-    // Forensics: log the on-disk config size + the WAN count so
-    // we can correlate "pushed config lost on reboot" with what
-    // oxwrtd actually read from disk at pid-1 time. Written to
-    // /dev/kmsg directly (bypassing the tracing layer) so an
-    // early-boot tracing-writer hiccup can't hide it.
-    {
-        use std::io::Write;
-        let live_size = std::fs::metadata(&config_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let rom_path = std::path::PathBuf::from(format!("/rom{}", config_path.display()));
-        let rom_size = std::fs::metadata(&rom_path).map(|m| m.len()).unwrap_or(0);
-        let live_body = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let wan_count = live_body.matches("type = \"wan\"").count();
-        let probes = live_body.matches("probe_target").count();
-        let backups = live_body.matches("wan-backup").count();
-        let upper_new = std::fs::metadata("/overlay/upper/etc/oxwrt/oxwrt.toml")
-            .map(|m| m.len())
-            .ok();
-        let upper_legacy = std::fs::metadata("/overlay/upper/etc/oxwrt.toml")
-            .map(|m| m.len())
-            .ok();
-        let sysupgrade_tgz = std::fs::metadata("/sysupgrade.tgz").is_ok()
-            || std::fs::metadata("/overlay/upper/sysupgrade.tgz").is_ok();
-        let msg = format!(
-            "<4>forensic: path={} live={} rom={} upper_new={:?} upper_legacy={:?} wan_count={} probe_target={} wan_backup={} sysupgrade_tgz={}\n",
-            config_path.display(), live_size, rom_size, upper_new, upper_legacy, wan_count, probes, backups, sysupgrade_tgz
-        );
-        if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-            let _ = kmsg.write_all(msg.as_bytes());
-        }
-    }
 
     run_secrets_migration(&config_path);
     tighten_secrets_file_mode(&config_path);
