@@ -16,6 +16,7 @@ pub mod client;
 pub mod mullvad;
 pub mod qr;
 pub mod vpn_import;
+pub mod wizard;
 
 pub use client::{Error, run};
 

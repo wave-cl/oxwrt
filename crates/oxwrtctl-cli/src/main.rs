@@ -34,6 +34,15 @@ fn main() -> ExitCode {
         Some("--print-server-key") => {
             oxwrtctl_cli::print_server_key(args.into_iter().skip(1).collect())
         }
+        // `wizard`: client-local, no sQUIC. Prompts stdin, emits
+        // a starter oxwrt.toml. Takes [--out <path>] optionally.
+        Some("wizard") => match oxwrtctl_cli::wizard::run(args.into_iter().skip(1).collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("oxctl wizard: {e}");
+                ExitCode::FAILURE
+            }
+        },
         // Anything else: treat args as `<remote> <cmd> [args...]`.
         _ => oxwrtctl_cli::run_client_sync(args),
     }
@@ -54,6 +63,7 @@ fn init_tracing() {
 fn print_usage() {
     eprintln!(
         "usage: oxctl <remote> <cmd> [args...]\n\
+                oxctl wizard [--out <path>]\n\
                 oxctl --print-server-key [path]\n\
                 oxctl --version\n\
                 oxctl --help\n\

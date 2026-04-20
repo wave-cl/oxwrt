@@ -46,6 +46,10 @@ qrcodegen = "1"
 # profile into an operator's hand-written oxwrt.toml doesn't wipe
 # their inline notes.
 toml_edit.workspace = true
+# wizard tests round-trip the generated TOML through the parser
+# to prove validity. Pull plain `toml` since toml_edit's Value
+# tree is awkward for test assertions.
+toml.workspace = true
 # Mullvad relay list API for `mullvad-relays` / `vpn-switch-relay`.
 # reqwest is already a workspace dep (rustls-tls-native-roots);
 # serde_json + serde for the response shape.
