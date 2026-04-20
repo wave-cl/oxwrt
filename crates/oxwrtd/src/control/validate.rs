@@ -444,6 +444,7 @@ mod tests {
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
+                clients: vec![],
             },
         }
     }

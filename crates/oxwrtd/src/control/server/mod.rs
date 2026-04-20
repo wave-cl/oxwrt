@@ -28,7 +28,7 @@ pub struct Server {
 impl Server {
     pub fn load(
         key_path: &Path,
-        authorized_keys_path: &Path,
+        control: &crate::config::Control,
         state: Arc<ControlState>,
     ) -> Result<Self, Error> {
         let signing_key = load_or_create_signing_key(key_path)?;
@@ -45,7 +45,7 @@ impl Server {
             server_pubkey = %hex::encode(verifying.to_bytes()),
             "control: server signing keypair loaded"
         );
-        let authorized_keys = load_authorized_keys(authorized_keys_path)?;
+        let authorized_keys = load_merged_authorized_keys(control)?;
         Ok(Self {
             signing_key,
             authorized_keys,
@@ -873,6 +873,56 @@ fn load_or_create_signing_key(path: &Path) -> Result<SigningKey, Error> {
     Ok(key)
 }
 
+/// Merge the legacy file-backed ACL (at `control.authorized_keys`)
+/// with the inline `[[control.clients]]` entries. Deduplicates by
+/// raw 32-byte key so listing the same key in both sources doesn't
+/// inflate the allowed_keys Vec.
+///
+/// Inline entries whose `key` doesn't parse as 64 hex chars are
+/// logged at `warn` and skipped — the daemon should boot even with
+/// a malformed ACL entry, because the legacy file path may still
+/// admit the operator.
+fn load_merged_authorized_keys(
+    control: &crate::config::Control,
+) -> Result<Vec<[u8; 32]>, Error> {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    for key in load_authorized_keys(&control.authorized_keys)? {
+        if seen.insert(key) {
+            out.push(key);
+        }
+    }
+    for client in &control.clients {
+        let Ok(bytes) = hex::decode(&client.key) else {
+            tracing::warn!(
+                name = %client.name,
+                key = %client.key,
+                "control.clients: skipping entry with non-hex key"
+            );
+            continue;
+        };
+        let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            tracing::warn!(
+                name = %client.name,
+                key_len = bytes.len(),
+                "control.clients: skipping entry whose decoded key isn't 32 bytes"
+            );
+            continue;
+        };
+        if seen.insert(arr) {
+            out.push(arr);
+        }
+    }
+    tracing::info!(
+        file_path = %control.authorized_keys.display(),
+        inline_count = control.clients.len(),
+        total_unique = out.len(),
+        "control: authorized-key ACL loaded"
+    );
+    Ok(out)
+}
+
 fn load_authorized_keys(path: &Path) -> Result<Vec<[u8; 32]>, Error> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -1058,4 +1108,94 @@ fn persist_and_swap(state: &ControlState, new_cfg: crate::config::Config, desc: 
     }
     tracing::info!("{desc} (pending reload)");
     Response::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthorizedClient, Control};
+
+    fn control_with(clients: Vec<AuthorizedClient>, file_path: &str) -> Control {
+        Control {
+            listen: vec![],
+            authorized_keys: std::path::PathBuf::from(file_path),
+            clients,
+        }
+    }
+
+    #[test]
+    fn load_merged_uses_inline_when_file_missing() {
+        let ctrl = control_with(
+            vec![AuthorizedClient {
+                name: "laptop".into(),
+                key: "a".repeat(64),
+            }],
+            "/nonexistent/authorized_keys",
+        );
+        let keys = load_merged_authorized_keys(&ctrl).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0][0], 0xaa);
+    }
+
+    #[test]
+    fn load_merged_skips_malformed_inline() {
+        let ctrl = control_with(
+            vec![
+                AuthorizedClient {
+                    name: "good".into(),
+                    key: "b".repeat(64),
+                },
+                AuthorizedClient {
+                    name: "bad-hex".into(),
+                    key: "zzz".into(),
+                },
+                AuthorizedClient {
+                    name: "bad-len".into(),
+                    key: "ab".into(),
+                },
+            ],
+            "/nonexistent",
+        );
+        let keys = load_merged_authorized_keys(&ctrl).unwrap();
+        assert_eq!(keys.len(), 1, "only the well-formed entry survives");
+    }
+
+    #[test]
+    fn load_merged_dedupes_file_and_inline() {
+        // Write a temp file with one hex key, then set the same key
+        // inline under a different label — merged list must have 1.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("authorized_keys");
+        let key = "c".repeat(64);
+        std::fs::write(&path, format!("{key}\n")).unwrap();
+        let ctrl = Control {
+            listen: vec![],
+            authorized_keys: path.clone(),
+            clients: vec![AuthorizedClient {
+                name: "same-key-new-label".into(),
+                key: key.clone(),
+            }],
+        };
+        let keys = load_merged_authorized_keys(&ctrl).unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn load_merged_file_plus_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("authorized_keys");
+        let file_key = "1".repeat(64);
+        std::fs::write(&path, format!("# comment\n{file_key}\n\n")).unwrap();
+        let inline_key = "2".repeat(64);
+        let ctrl = Control {
+            listen: vec![],
+            authorized_keys: path,
+            clients: vec![AuthorizedClient {
+                name: "inline-only".into(),
+                key: inline_key,
+            }],
+        };
+        let keys = load_merged_authorized_keys(&ctrl).unwrap();
+        assert_eq!(keys.len(), 2);
+    }
 }

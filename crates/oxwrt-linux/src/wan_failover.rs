@@ -475,6 +475,7 @@ mod tests {
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),
+                clients: vec![],
             },
         }
     }

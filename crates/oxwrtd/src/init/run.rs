@@ -281,7 +281,7 @@ async fn services_only_main(cfg: Config) -> Result<(), Error> {
 
     let server = Arc::new(Server::load(
         Path::new(SIGNING_KEY_PATH),
-        &cfg.control.authorized_keys,
+        &cfg.control,
         state.clone(),
     )?);
     let server_task = {
@@ -357,7 +357,7 @@ async fn control_only_main(cfg: Config) -> Result<(), Error> {
 
     let server = Arc::new(Server::load(
         Path::new(SIGNING_KEY_PATH),
-        &cfg.control.authorized_keys,
+        &cfg.control,
         state.clone(),
     )?);
     let server_task = {
@@ -1074,7 +1074,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     let listen_addrs = parse_listen_addrs(&cfg.control.listen);
     let server = Arc::new(Server::load(
         Path::new(SIGNING_KEY_PATH),
-        &cfg.control.authorized_keys,
+        &cfg.control,
         state.clone(),
     )?);
     let server_task = {

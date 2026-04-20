@@ -563,6 +563,7 @@ mod tests {
         let control = Control {
             listen: vec!["192.168.8.1:51820".to_string(), "[::1]:51820".to_string()],
             authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
+            clients: vec![],
         };
         let text = default_config_text(&control);
         let cfg: Config = toml::from_str(&text).expect("default config must parse");
@@ -580,6 +581,7 @@ mod tests {
         let control = Control {
             listen: vec!["10.0.0.1:51820".to_string()],
             authorized_keys: PathBuf::from("/etc/oxwrt/keys"),
+            clients: vec![],
         };
         let text = default_config_text(&control);
         let n = text.matches("\"10.0.0.1:51820\"").count();

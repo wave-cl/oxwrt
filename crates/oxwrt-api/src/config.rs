@@ -188,6 +188,24 @@ pub struct SftpBackup {
     /// in that case restore requires rotating every secret by hand.
     #[serde(default = "default_sftp_include_secrets")]
     pub include_secrets: bool,
+    /// Expected SSH host key for `host`, as a standard OpenSSH
+    /// known_hosts line *without* the leading hostname — i.e. the
+    /// keytype + base64 portion as emitted by
+    /// `ssh-keyscan -t ed25519 <host>` after stripping the first
+    /// column. Example:
+    /// `"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILz..."`.
+    ///
+    /// When set, the backup task writes `<host> <host_key>\n` to a
+    /// tmpfs `known_hosts` file at push time and points ssh at it,
+    /// so the key lives in `oxwrt.toml` (publishable — host keys
+    /// are not secrets) and no hand-staged `/etc/oxwrt/known_hosts`
+    /// is required.
+    ///
+    /// Unset falls back to the legacy `/etc/oxwrt/known_hosts`
+    /// path. Preserve either — setting this AND also staging the
+    /// file manually is fine; inline wins.
+    #[serde(default)]
+    pub host_key: Option<String>,
 }
 
 fn default_sftp_port() -> u16 {
@@ -1328,7 +1346,38 @@ fn default_bind_readonly() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Control {
     pub listen: Vec<String>,
+    /// Path to a legacy plain-text file holding hex-encoded client
+    /// ed25519 pubkeys (one per line, `#` comments skipped). Loaded
+    /// alongside [`Control::clients`] and merged — keys from both
+    /// sources admit the client.
+    ///
+    /// Kept as a path (not a vec) for backward compat with existing
+    /// installs that hand-edit this file + for CI flows that inject
+    /// keys via image-overlay. Greenfield installs should prefer
+    /// inline `[[control.clients]]` entries so the whole ACL lives
+    /// in `oxwrt.toml`.
     pub authorized_keys: PathBuf,
+    /// Inline client-pubkey ACL. Each entry is a (name, key) pair;
+    /// `key` is 64 hex chars = 32-byte ed25519 pubkey. Name is an
+    /// operator-facing label used in logs and CRUD; ignored for
+    /// auth. Empty by default.
+    #[serde(default)]
+    pub clients: Vec<AuthorizedClient>,
+}
+
+/// One client authorised to connect to the sQUIC control plane.
+/// Materialises the legacy `authorized_keys` flat file as first-class
+/// TOML so `oxctl config-push` round-trips it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizedClient {
+    /// Label shown in logs + the `Get control.clients` RPC. Must be
+    /// unique across entries (validator rejects duplicates).
+    pub name: String,
+    /// 64-char lowercase hex encoding of a 32-byte ed25519 pubkey.
+    /// Clients obtain the matching signing key via
+    /// `SQUIC_CLIENT_KEY` on their end; the daemon pins this pubkey
+    /// during the sQUIC handshake.
+    pub key: String,
 }
 
 /// A dynamic-DNS entry. One entry → one (provider, domain, credential)

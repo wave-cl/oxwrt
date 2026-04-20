@@ -157,22 +157,55 @@ where
 
 /// Build an ssh Command with the shared flags. Caller adds the
 /// remote command as a final positional.
+///
+/// Host-key verification: if `s.host_key` is set, the daemon
+/// materialises a per-push `known_hosts` under /run (tmpfs,
+/// cleared on reboot) containing `<host> <host_key>` and points
+/// ssh at that. This keeps the ACL in the TOML. When unset we
+/// fall back to the legacy `/etc/oxwrt/known_hosts` so installs
+/// that already staged that file keep working unchanged.
 fn ssh_cmd(s: &SftpBackup) -> std::process::Command {
+    let known_hosts = match derive_known_hosts_file(s) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "backup_sftp: failed to materialise known_hosts from config; falling back to /etc/oxwrt/known_hosts");
+            std::path::PathBuf::from("/etc/oxwrt/known_hosts")
+        }
+    };
     let mut c = std::process::Command::new("ssh");
     c.arg("-i").arg(&s.key_path);
     c.arg("-p").arg(s.port.to_string());
     // Harden against the first-contact prompt and MITM on the
-    // "trust on first use" flow: operator MUST pre-populate
-    // /etc/oxwrt/known_hosts. StrictHostKeyChecking=yes rejects
-    // unknown hosts; the known_hosts file is bind-mounted under
-    // a fixed path so a rogue server can't smuggle its key in
-    // via the HOME-dir default.
+    // "trust on first use" flow. StrictHostKeyChecking=yes rejects
+    // unknown hosts; the known_hosts file is either derived from
+    // `backup_sftp.host_key` above or the legacy hand-staged path.
     c.arg("-o").arg("StrictHostKeyChecking=yes");
-    c.arg("-o").arg("UserKnownHostsFile=/etc/oxwrt/known_hosts");
+    c.arg("-o")
+        .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
     c.arg("-o").arg("BatchMode=yes"); // never prompt interactively
     c.arg("-o").arg("ConnectTimeout=10");
     c.arg(format!("{}@{}", s.username, s.host));
     c
+}
+
+/// If `s.host_key` is set, write `<host> <host_key>\n` to
+/// `/run/oxwrt/backup-known-hosts` and return that path. Else
+/// return the legacy `/etc/oxwrt/known_hosts`. Caller's choice
+/// what to do on the I/O error path.
+fn derive_known_hosts_file(s: &SftpBackup) -> Result<std::path::PathBuf, String> {
+    let Some(host_key) = s.host_key.as_deref() else {
+        return Ok(std::path::PathBuf::from("/etc/oxwrt/known_hosts"));
+    };
+    let host_key = host_key.trim();
+    if host_key.is_empty() {
+        return Ok(std::path::PathBuf::from("/etc/oxwrt/known_hosts"));
+    }
+    let dir = std::path::PathBuf::from("/run/oxwrt");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join("backup-known-hosts");
+    let line = format!("{} {}\n", s.host, host_key);
+    std::fs::write(&path, line).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// Run a one-shot remote shell command + capture stdout/stderr.
@@ -247,6 +280,40 @@ mod tests {
         // 2024-02-29 12:34:56 UTC (leap day) = 1_709_210_096
         assert_eq!(unix_to_utc_stamp(1_709_210_096), "20240229-123456");
     }
+
+    fn sftp_fixture(host_key: Option<String>) -> SftpBackup {
+        SftpBackup {
+            host: "backup.example.com".into(),
+            port: 22,
+            username: "user".into(),
+            key_path: "/etc/oxwrt/backup.key".into(),
+            remote_dir: "/snap".into(),
+            interval_hours: 24,
+            keep: 30,
+            include_secrets: true,
+            host_key,
+        }
+    }
+
+    #[test]
+    fn derive_known_hosts_legacy_when_unset() {
+        let s = sftp_fixture(None);
+        let p = derive_known_hosts_file(&s).unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/etc/oxwrt/known_hosts"));
+    }
+
+    #[test]
+    fn derive_known_hosts_empty_string_is_legacy() {
+        let s = sftp_fixture(Some("   ".into()));
+        let p = derive_known_hosts_file(&s).unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/etc/oxwrt/known_hosts"));
+    }
+
+    // The inline host_key path writes under /run/oxwrt — tested only
+    // in the integration layer where /run is writable. On dev macs
+    // /run doesn't exist, so we don't exercise the file-write here;
+    // the logic is straight-line and the error branch is covered by
+    // the legacy-fallback behaviour at call sites.
 
     #[test]
     fn shell_quote_simple() {
