@@ -10,6 +10,23 @@
 # this file at `cargo test` time, so any schema change that breaks the
 # example also breaks the build — forces both to stay in sync.
 #
+# ── Secrets ──
+# This file is the PUBLIC half of a two-file config. Short inline
+# secrets (WiFi passphrases, DDNS tokens, WG peer PSKs, PPPoE
+# passwords) live in a sibling `oxwrt.secrets.toml` (mode 0600) and
+# are deep-merged on load by identity key. `oxctl dump-config`
+# prints the merged view with every secret leaf replaced by
+# `<redacted>` — safe to paste into an issue.
+#
+# See `oxwrt.secrets.toml.example` next to this file for the overlay
+# shape. An `OXWRT_SECRET__<section>__<id>__<field>` env var wins
+# over both files — useful for CI or systemd-creds style injection.
+#
+# The daemon migrates a pre-split `oxwrt.toml` automatically on
+# first boot after the upgrade: any inline secret leaf is moved
+# into a newly-created `oxwrt.secrets.toml`, leaving this public
+# file genuinely publishable.
+#
 # Section index:
 #   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
 #                  failover via priority/probe_target
@@ -760,14 +777,14 @@ channel = 36
 radio = "phy1"
 ssid = "oxwrt"
 security = "wpa2"
-passphrase = "oxwrt-bringup-passphrase"
+# passphrase lives in oxwrt.secrets.toml (keyed by ssid).
 network = "lan"
 
 [[wifi]]
 radio = "phy0"
 ssid = "oxwrt-2g"
 security = "wpa2"
-passphrase = "oxwrt-bringup-passphrase"
+# passphrase lives in oxwrt.secrets.toml (keyed by ssid).
 network = "lan"
 
 # ── Passphrase auto-rotation ──

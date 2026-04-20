@@ -134,6 +134,7 @@ pub fn run() -> Result<(), Error> {
     }
 
     run_secrets_migration(&config_path);
+    tighten_secrets_file_mode(&config_path);
     let cfg = Config::load(&config_path)?;
 
     // Sanity-truncate coredhcp's persisted lease file if any lease falls
@@ -189,6 +190,7 @@ pub fn run_control_only() -> Result<(), Error> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
     run_secrets_migration(&config_path);
+    tighten_secrets_file_mode(&config_path);
     let cfg = Config::load(&config_path)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -219,6 +221,7 @@ pub fn run_services_only() -> Result<(), Error> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
     run_secrets_migration(&config_path);
+    tighten_secrets_file_mode(&config_path);
     let cfg = Config::load(&config_path)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1210,6 +1213,40 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     }
     server_task.abort();
     Ok(())
+}
+
+/// Ensure `oxwrt.secrets.toml` is mode 0600 on every boot.
+/// Defence-in-depth: an operator hand-edit might copy the file
+/// with default umask, exposing the secrets to local non-root
+/// processes. Called right after the migration shim, before
+/// Config::load, so the permission is tight before anyone reads
+/// the file. No-op if the file doesn't exist.
+fn tighten_secrets_file_mode(public_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let secrets = public_path.with_file_name("oxwrt.secrets.toml");
+    let Ok(meta) = std::fs::metadata(&secrets) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        if let Err(e) = std::fs::set_permissions(
+            &secrets,
+            std::fs::Permissions::from_mode(0o600),
+        ) {
+            tracing::error!(
+                error = %e,
+                path = %secrets.display(),
+                prev_mode = format!("{mode:o}"),
+                "failed to tighten oxwrt.secrets.toml mode to 0600"
+            );
+        } else {
+            tracing::warn!(
+                path = %secrets.display(),
+                prev_mode = format!("{mode:o}"),
+                "tightened oxwrt.secrets.toml mode to 0600 (was looser)"
+            );
+        }
+    }
 }
 
 /// One-shot migration from the old single-file `oxwrt.toml` (inline

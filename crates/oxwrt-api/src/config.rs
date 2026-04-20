@@ -1949,9 +1949,20 @@ mod tests {
     /// so this works regardless of where `cargo test` is invoked from.
     #[test]
     fn example_config_parses() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
-        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        // The public example has had its inline secrets stripped
+        // (they're all in the companion `.secrets.toml.example`);
+        // load via Config::load_with_secrets so the example
+        // exercise the same path the daemon uses on boot.
+        let public = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
+        let secrets = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/oxwrt.secrets.toml.example"
+        );
+        let cfg = Config::load_with_secrets(
+            std::path::Path::new(public),
+            std::path::Path::new(secrets),
+        )
+        .unwrap_or_else(|e| panic!("load {public} + {secrets}: {e}"));
 
         // A handful of spot checks that double as documentation:
         // future field additions can extend the example TOML AND the
