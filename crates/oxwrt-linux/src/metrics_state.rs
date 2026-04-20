@@ -132,10 +132,17 @@ pub fn snapshot() -> MetricsState {
 mod tests {
     use super::*;
 
+    /// Serialise these tests — they all share the same `METRICS`
+    /// global via `record_*` + `snapshot` and will flake under
+    /// parallel runners (cargo test defaults to one thread per
+    /// CPU). Each test grabs this before touching METRICS.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Two OK acquires on the same iface bump the counter to 2;
     /// the latest latency gauge reflects the second call.
     #[test]
     fn dhcp_acquire_counter_and_latency_gauge() {
+        let _g = TEST_LOCK.lock().unwrap();
         // Clear global state from any prior test.
         {
             let mut m = METRICS.lock().unwrap();
@@ -151,6 +158,7 @@ mod tests {
     /// Timeout acquires don't overwrite the success-latency gauge.
     #[test]
     fn dhcp_timeout_keeps_last_ok_latency() {
+        let _g = TEST_LOCK.lock().unwrap();
         {
             let mut m = METRICS.lock().unwrap();
             *m = MetricsState::default();
@@ -168,6 +176,7 @@ mod tests {
 
     #[test]
     fn reload_success_and_failure_tracked() {
+        let _g = TEST_LOCK.lock().unwrap();
         {
             let mut m = METRICS.lock().unwrap();
             *m = MetricsState::default();
@@ -183,6 +192,7 @@ mod tests {
 
     #[test]
     fn blocklist_fetch_ok_updates_entries_and_timestamp() {
+        let _g = TEST_LOCK.lock().unwrap();
         {
             let mut m = METRICS.lock().unwrap();
             *m = MetricsState::default();
@@ -196,6 +206,7 @@ mod tests {
 
     #[test]
     fn blocklist_http_error_doesnt_update_timestamp() {
+        let _g = TEST_LOCK.lock().unwrap();
         {
             let mut m = METRICS.lock().unwrap();
             *m = MetricsState::default();

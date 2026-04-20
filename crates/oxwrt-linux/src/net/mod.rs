@@ -661,14 +661,9 @@ pub fn enable_ipv6_forwarding() -> Result<(), Error> {
     Ok(())
 }
 
-/// Install the complete nftables ruleset: inet filter (input/forward/
-/// output), NAT masquerade for zones with `masquerade = true`, and DNAT
-/// rules for `action = "dnat"` rules. Everything in one function —
-/// replaces the old `install_firewall` + `install_nat_masquerade` +
-/// `install_dnat_rules` trio.
-///
-/// Synchronous: rustables `Batch::send()` does one blocking netlink
-/// round-trip. Safe to call from an async context.
+// (install_firewall and friends moved out to firewall.rs; the doc
+// comment that used to live here got orphaned on the `mod tests`
+// below, which clippy flags as inner+outer-attrs-on-same-item.)
 #[cfg(test)]
 mod tests {
     //! Pure-function unit tests for the helpers at the bottom of this

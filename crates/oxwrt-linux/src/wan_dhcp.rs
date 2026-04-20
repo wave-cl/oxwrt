@@ -105,7 +105,7 @@ pub async fn acquire(
         Err(Error::Timeout(_)) => "timeout",
         Err(_) => "error",
     };
-    let latency = matches!(&result, Ok(_)).then_some(elapsed);
+    let latency = result.is_ok().then_some(elapsed);
     crate::metrics_state::record_dhcp_acquire(iface_name, label, latency);
     result
 }

@@ -315,10 +315,10 @@ mod tests {
     /// silently leaving kernel state stale.
     #[test]
     fn diff_detects_metric_change() {
-        let old = vec![r("10.20.0.0", 16, "wg0")];
+        let old = [r("10.20.0.0", 16, "wg0")];
         let mut changed = old[0].clone();
         changed.metric = 200;
-        let new = vec![changed];
+        let new = [changed];
 
         let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
         let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
@@ -330,7 +330,7 @@ mod tests {
     /// churn on a no-op reload.
     #[test]
     fn diff_noop_on_identical() {
-        let routes = vec![r("10.20.0.0", 16, "wg0"), r("192.168.100.0", 24, "eth0")];
+        let routes = [r("10.20.0.0", 16, "wg0"), r("192.168.100.0", 24, "eth0")];
         let to_del: Vec<&Route> = routes.iter().filter(|x| !routes.contains(x)).collect();
         let to_add: Vec<&Route> = routes.iter().filter(|x| !routes.contains(x)).collect();
         assert!(to_del.is_empty());
@@ -355,10 +355,10 @@ iface = "wg0"
     /// state pointing at the wrong output link.
     #[test]
     fn diff_detects_iface_change() {
-        let old = vec![r("10.20.0.0", 16, "eth0")];
+        let old = [r("10.20.0.0", 16, "eth0")];
         let mut changed = old[0].clone();
         changed.iface = "wg0".into();
-        let new = vec![changed];
+        let new = [changed];
         let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
         let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
         assert_eq!(to_del.len(), 1);
@@ -372,8 +372,8 @@ iface = "wg0"
         let mut via = onlink.clone();
         onlink.gateway = None;
         via.gateway = Some("10.20.0.1".parse().unwrap());
-        let old = vec![onlink];
-        let new = vec![via];
+        let old = [onlink];
+        let new = [via];
         let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
         let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
         assert_eq!(to_del.len(), 1);
@@ -388,8 +388,8 @@ iface = "wg0"
         let keep_a = r("10.20.0.0", 16, "wg0");
         let keep_b = r("192.168.100.0", 24, "eth0");
         let new_c = r("172.16.0.0", 12, "wg0");
-        let old = vec![keep_a.clone(), keep_b.clone()];
-        let new = vec![keep_a, keep_b, new_c.clone()];
+        let old = [keep_a.clone(), keep_b.clone()];
+        let new = [keep_a, keep_b, new_c.clone()];
         let to_del: Vec<&Route> = old.iter().filter(|x| !new.contains(x)).collect();
         let to_add: Vec<&Route> = new.iter().filter(|x| !old.contains(x)).collect();
         assert!(to_del.is_empty());

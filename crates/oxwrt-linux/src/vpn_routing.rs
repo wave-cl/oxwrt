@@ -402,7 +402,7 @@ pub async fn cleanup_stale_endpoint_exemptions(handle: &Handle) -> Result<(), Er
         // numeric value. We match the raw u8 to dodge the enum
         // conversion asymmetry (Other(155) vs some future named
         // variant claiming 155).
-        let proto_raw: u8 = r.header.protocol.clone().into();
+        let proto_raw: u8 = r.header.protocol.into();
         if proto_raw == VPN_ENDPOINT_PROTO {
             stale.push(r);
         }

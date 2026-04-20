@@ -24,11 +24,10 @@
 //!
 //! Save strategy: a tokio task dumps 512 random bytes to
 //! /etc/urandom.seed atomically (write temp + rename) on boot
-//! + every `SAVE_INTERVAL` (30 min). Periodic saves guarantee
-//! that unexpected power-cycles cost at most 30 min of freshness
-//! — operators yanking the plug is the common case on a
-//! residential router and we can't hook graceful shutdown for
-//! that.
+//! and every `SAVE_INTERVAL` (30 min). Periodic saves guarantee
+//! that unexpected power-cycles cost at most 30 min of freshness.
+//! Operators yanking the plug is the common case on a residential
+//! router and we can't hook graceful shutdown for that.
 //!
 //! /etc/urandom.seed is preserved across sysupgrade via
 //! sysupgrade.conf's default keep list; that's why we use that
