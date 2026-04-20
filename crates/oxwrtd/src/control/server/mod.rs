@@ -151,6 +151,12 @@ impl Server {
                 send.finish().ok();
                 continue;
             }
+            if let Request::ReloadDryRun = &request {
+                let resp = handle_reload_dry_run();
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
 
             // Reset delegates to Reload at the tail, so it's also async.
             if let Request::Reset { confirm } = &request {
@@ -302,7 +308,7 @@ mod sysupgrade;
 // test coverage.
 #[cfg(test)]
 pub(crate) use diag::{build_drill_args, build_ping_args, build_ss_args, build_traceroute_args};
-pub use reload::handle_reload_async;
+pub use reload::{handle_reload_async, handle_reload_dry_run};
 
 // Submodule-local handlers used by handle_incoming + sync handle()
 // dispatch. The originals were all `fn` at the top level; these
@@ -445,6 +451,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::Rollback { .. } => vec![Response::Err {
             message: "BUG: Rollback should be handled async upstream".to_string(),
+        }],
+        Request::ReloadDryRun => vec![Response::Err {
+            message: "BUG: ReloadDryRun should be handled upstream".to_string(),
         }],
         Request::ConfigPush { .. } => vec![Response::Err {
             message: "BUG: ConfigPush should be handled upstream".to_string(),

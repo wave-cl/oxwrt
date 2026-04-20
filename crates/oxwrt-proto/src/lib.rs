@@ -83,7 +83,24 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             let value = args.get(1).ok_or("set: missing value")?.clone();
             Ok(Request::Set { key, value })
         }
-        "reload" => Ok(Request::Reload),
+        "reload" => {
+            // `reload --dry-run` maps to ReloadDryRun (validate
+            // only; no side effects). Any other flag is rejected
+            // so muscle-memory typos like `--force` don't silently
+            // promote to a destructive reload.
+            if args.iter().any(|a| a == "--dry-run") {
+                let unknown = args.iter().find(|a| *a != "--dry-run");
+                if let Some(u) = unknown {
+                    return Err(format!("reload: unknown flag {u:?}"));
+                }
+                return Ok(Request::ReloadDryRun);
+            }
+            if let Some(u) = args.first() {
+                return Err(format!("reload: unknown flag {u:?}"));
+            }
+            Ok(Request::Reload)
+        }
+        "reload-dry-run" => Ok(Request::ReloadDryRun),
         "status" => Ok(Request::Status),
         "logs" => {
             let service = args.first().ok_or("logs: missing service")?.clone();

@@ -11,6 +11,18 @@ pub enum Request {
         value: String,
     },
     Reload,
+    /// Validate the on-disk `/etc/oxwrt/oxwrt.toml` (+ secrets
+    /// overlay + env) and run every pre-flight validator WITHOUT
+    /// any reconcile side effects. Returns Ok if the config
+    /// parses and passes all cross-section checks; returns Err
+    /// with the first violation otherwise.
+    ///
+    /// Operator workflow: edit TOML → `oxctl reload-dry-run` →
+    /// only if it passes, `oxctl reload`. Cheaper than watching a
+    /// failed reload auto-restore, and catches typos (bad zone
+    /// refs, duplicate names) that the rollback machinery would
+    /// surface only after flapping the firewall.
+    ReloadDryRun,
     Status,
     Logs {
         service: String,

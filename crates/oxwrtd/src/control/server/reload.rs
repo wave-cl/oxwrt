@@ -3,6 +3,70 @@
 
 use super::*;
 
+/// Validate the on-disk config without any reconcile side
+/// effects. Runs every cross-section / per-item check that
+/// `handle_reload_inner` + the CRUD handlers would run before
+/// touching live state. Returns the FIRST violation — a future
+/// improvement is to collect all of them.
+pub fn handle_reload_dry_run() -> Response {
+    use crate::config::Config;
+    use std::path::Path;
+
+    let path = Path::new(crate::config::DEFAULT_PATH);
+    let cfg = match Config::load(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Response::Err {
+                message: format!("reload-dry-run: parse: {e}"),
+            };
+        }
+    };
+
+    if let Err(e) = crate::control::validate::check_vlan_consistency(&cfg) {
+        return Response::Err {
+            message: format!("reload-dry-run: {e}"),
+        };
+    }
+    for zone in &cfg.firewall.zones {
+        if let Err(e) = crate::control::validate::check_zone_network_refs(zone, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
+    for rule in &cfg.firewall.rules {
+        if let Err(e) = crate::control::validate::check_rule_zone_refs(rule, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
+    for pf in &cfg.port_forwards {
+        if let Err(e) = crate::control::validate::check_port_forward(pf, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
+    for wifi in &cfg.wifi {
+        if let Err(e) = crate::control::validate::check_wifi_refs(wifi, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
+
+    tracing::info!(
+        networks = cfg.networks.len(),
+        zones = cfg.firewall.zones.len(),
+        rules = cfg.firewall.rules.len(),
+        wifi = cfg.wifi.len(),
+        services = cfg.services.len(),
+        "reload-dry-run: all validators passed"
+    );
+    Response::Ok
+}
+
 pub async fn handle_reload_async(state: &std::sync::Arc<ControlState>) -> Response {
     let start = std::time::Instant::now();
     let first = handle_reload_inner(state).await;
