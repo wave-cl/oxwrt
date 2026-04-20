@@ -685,7 +685,18 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .add_to_batch(&mut dnat_batch);
 
         // Collect all router IPs for DNAT matching: every network that
-        // has a local address (LAN + Simple variants).
+        // has a local address (LAN + Simple variants) PLUS every
+        // isolated service's host-veth IP. The latter matters for
+        // DNS — a service in an isolated netns only has a route to
+        // its veth gateway, so when the service resolves a domain it
+        // sends the query to the gateway on port 53. Without the
+        // host-veth IP in listen_addrs, the DNS DNAT rule wouldn't
+        // match that packet and it would drop in the INPUT chain.
+        //
+        // Observed pre-2026-04-20 as silent degradation: ntp's log
+        // spammed "failed to lookup address information" for every
+        // pool.ntp.org resolution attempt because 10.123.0.1 (ntp's
+        // gateway) wasn't in the DNAT listen set.
         let mut listen_addrs: Vec<Ipv4Addr> = Vec::new();
         for net in &cfg.networks {
             match net {
@@ -693,6 +704,14 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                     listen_addrs.push(*address);
                 }
                 Network::Wan { .. } => {}
+            }
+        }
+        for svc in &cfg.services {
+            if svc.net_mode != oxwrt_api::config::NetMode::Isolated {
+                continue;
+            }
+            if let Some(veth) = &svc.veth {
+                listen_addrs.push(veth.host_ip);
             }
         }
 

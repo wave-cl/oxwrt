@@ -607,6 +607,17 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         tracing::error!(error = %e, "reload: ntpd config write failed");
     }
 
+    // Per-service /etc/resolv.conf for isolated-netns services.
+    // Rendered to /etc/oxwrt/svc-resolv/<svc>.conf; container::prepare
+    // bind-mounts it onto the service's /etc/resolv.conf at spawn time.
+    // Without this, services in isolated netns have no working
+    // resolver — the firewall DNAT routes their :53 queries to the
+    // dns container, but libc won't send any queries in the first
+    // place unless /etc/resolv.conf names a nameserver.
+    if let Err(e) = crate::svc_resolv::write_all(&new_cfg) {
+        tracing::error!(error = %e, "reload: svc_resolv write failed");
+    }
+
     // Reapply SQM — picks up bandwidth/extra_args changes; removes
     // stale qdiscs when sqm goes from Some → None.
     if let Err(e) = crate::sqm::setup_sqm(&new_cfg) {

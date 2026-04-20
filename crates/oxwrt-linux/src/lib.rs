@@ -40,6 +40,8 @@ pub mod net;
 pub mod ntpd;
 pub mod sqm;
 pub mod static_routes;
+pub mod svc_resolv;
+
 pub mod sysupgrade;
 pub mod urandom_seed;
 pub mod vpn_client;

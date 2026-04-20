@@ -1395,8 +1395,32 @@ impl PreparedContainer {
         let dev_target = CString::new("/dev").unwrap();
         let devpts_target = CString::new("/dev/pts").unwrap();
 
-        let mut binds = Vec::with_capacity(spec.binds.len());
-        for b in &spec.binds {
+        // Build the effective bind list = explicit binds + implicit
+        // resolv.conf for isolated services. The implicit bind is
+        // synthesised here rather than declared in the schema
+        // because (a) it's mechanical (one file, one target, content
+        // rendered by svc_resolv), (b) every isolated service wants
+        // it, (c) the bind source path is deterministic from the
+        // service name.
+        let mut effective_binds: Vec<oxwrt_api::config::BindMount> =
+            Vec::with_capacity(spec.binds.len() + 1);
+        effective_binds.extend(spec.binds.iter().cloned());
+        if spec.net_mode == NetMode::Isolated && spec.veth.is_some() {
+            let source = crate::svc_resolv::host_path(&spec.name);
+            if source.exists() {
+                effective_binds.push(oxwrt_api::config::BindMount {
+                    source,
+                    target: std::path::PathBuf::from("/etc/resolv.conf"),
+                    readonly: true,
+                });
+            }
+            // Source absent (reload never rendered it) is tolerated
+            // silently — the service will still spawn, it'll just
+            // have no resolver. Better than hard-failing the spawn.
+        }
+
+        let mut binds = Vec::with_capacity(effective_binds.len());
+        for b in &effective_binds {
             if !b.target.is_absolute() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
