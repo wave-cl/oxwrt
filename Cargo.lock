@@ -1351,6 +1351,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "libc",
  "oxwrt-api",
  "oxwrt-proto",
  "qrcodegen",

@@ -57,7 +57,28 @@ fn main() -> ExitCode {
             }
         }
         // Anything else: treat args as `<remote> <cmd> [args...]`.
-        _ => oxwrtctl_cli::run_client_sync(args),
+        _ => {
+            // `watch` intercepts here (second position — it's
+            // `oxctl <remote> watch [inner]`). The watch loop
+            // re-issues the inner command on a timer; doing
+            // that through run_client_sync would spin up + tear
+            // down a tokio runtime every tick, so we handle it
+            // inline with its own runtime.
+            if args.get(1).map(|s| s.as_str()) == Some("watch") {
+                let mut watch_args = Vec::with_capacity(args.len() - 1);
+                watch_args.push(args.remove(0)); // remote
+                args.remove(0); // "watch"
+                watch_args.extend(args);
+                return match oxwrtctl_cli::watch::run(watch_args) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("oxctl watch: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            oxwrtctl_cli::run_client_sync(args)
+        }
     }
 }
 
@@ -76,6 +97,7 @@ fn init_tracing() {
 fn print_usage() {
     eprintln!(
         "usage: oxctl <remote> <cmd> [args...]\n\
+                oxctl <remote> watch [--interval N] [cmd args...]\n\
                 oxctl wizard [--out <path>]\n\
                 oxctl dump-config [--public PATH] [--secrets PATH]\n\
                 oxctl --print-server-key [path]\n\

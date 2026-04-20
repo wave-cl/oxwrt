@@ -58,6 +58,10 @@ serde.workspace = true
 serde_json.workspace = true
 # For parallel-ping the relay list in `vpn-auto-switch`.
 futures-util.workspace = true
+# `oxctl watch` needs a SIGINT handler to exit cleanly on Ctrl-C.
+# Using libc::signal directly instead of pulling the `ctrlc` crate
+# for one-line wiring.
+libc.workspace = true
 
 [dev-dependencies]
 # `wizard` tests round-trip generated TOML through a tmpdir +

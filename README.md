@@ -82,6 +82,10 @@ export SQUIC_SERVER_KEY=a1b2c3…  # 64 hex chars
 oxctl 192.168.50.1:51820 status
 oxctl 192.168.50.1:51820 get hostname
 oxctl 192.168.50.1:51820 wifi list
+
+# Live-updating status (Ctrl-C to quit):
+oxctl 192.168.50.1:51820 watch
+oxctl 192.168.50.1:51820 watch --interval 2 diag links
 ```
 
 Every mutation is TOML. Typical flow:
