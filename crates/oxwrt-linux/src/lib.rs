@@ -31,6 +31,7 @@
 pub mod blocklists;
 pub mod container;
 pub mod corerad;
+pub mod hickory;
 pub mod logd;
 pub mod metrics_state;
 pub mod miniupnpd;

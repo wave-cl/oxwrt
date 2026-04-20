@@ -377,6 +377,7 @@ mod tests {
             ft_over_ds: None,
             sae_pwe: None,
             extra: Vec::new(),
+            rotate_hours: None,
         }
     }
 

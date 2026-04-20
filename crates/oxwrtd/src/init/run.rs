@@ -519,6 +519,14 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     if let Ok(Err(e)) = corerad_res {
         tracing::error!(error = %e, "corerad config generation failed");
     }
+    // Render hickory-dns / coredhcp / ntpd-rs service configs from
+    // their [dns] / [dhcp] / [ntp] sections. Serially — each write
+    // is a few hundred bytes of synchronous I/O, parallelism isn't
+    // worth the pattern complexity. Absent sections → no-op so
+    // existing installs keep their image-shipped binds.
+    if let Err(e) = crate::hickory::write_config(&cfg) {
+        tracing::error!(error = %e, "hickory config generation failed");
+    }
     if let Ok(Err(e)) = upnp_res {
         tracing::error!(error = %e, "miniupnpd config generation failed");
     }

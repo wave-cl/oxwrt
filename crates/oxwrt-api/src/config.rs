@@ -148,7 +148,74 @@ pub struct Config {
     /// on the remote side.
     #[serde(default)]
     pub backup_sftp: Option<SftpBackup>,
+    /// Forwarding-resolver config for the hickory-dns service. When
+    /// set, oxwrtd renders the matching `hickory.toml` into
+    /// `/etc/oxwrt/named.toml` at boot/reload; when unset, the
+    /// service falls back to the image-shipped default.
+    #[serde(default)]
+    pub dns: Option<DnsConfig>,
     pub control: Control,
+}
+
+/// Forwarding-resolver config. Daemon renders a hickory-dns 0.26
+/// named.toml from this section — operators never touch the
+/// underlying service config. v1 covers the minimum the router
+/// needs: where to listen, which DoH/DoQ/DoT upstreams to forward
+/// to. Local zones (split-horizon, LAN PTR) are a follow-up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsConfig {
+    /// IPv4 listen addresses. Default `["0.0.0.0"]` — serve every
+    /// iface; firewall rules gate access by zone.
+    #[serde(default = "default_dns_listen_v4")]
+    pub listen_v4: Vec<Ipv4Addr>,
+    /// Listen port. Default 15353; the firewall DNATs external
+    /// :53 → :15353 on every via-router zone. Unprivileged port
+    /// so the service doesn't need CAP_NET_BIND_SERVICE.
+    #[serde(default = "default_dns_listen_port")]
+    pub listen_port: u16,
+    /// Upstream resolvers. All entries are tried round-robin; if
+    /// empty, queries NXDOMAIN-out (explicit "no upstream" mode).
+    #[serde(default)]
+    pub upstreams: Vec<DnsUpstream>,
+}
+
+/// One upstream DoH/DoQ/DoT resolver. Matches hickory's 0.26
+/// nested `name_server` + `connection` shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsUpstream {
+    /// Upstream IP (v4 or v6 literal; no hostnames — we'd need a
+    /// chicken-and-egg bootstrap resolver otherwise).
+    pub ip: IpAddr,
+    /// Default derived from `protocol`: 443 for https, 853 for
+    /// quic / tls, 53 for udp / tcp.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// One of `"https"`, `"quic"`, `"tls"`, `"udp"`, `"tcp"`. The
+    /// encrypted variants require `server_name`; the plaintext
+    /// ones just ignore it.
+    pub protocol: String,
+    /// TLS SNI / DoH Host header. Required for https/quic/tls.
+    #[serde(default)]
+    pub server_name: Option<String>,
+    /// DoH request path. Required for https; ignored elsewhere.
+    /// Default `/dns-query` (RFC 8484).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Whether to cache negative responses from this upstream.
+    /// hickory default: true. Set false when the upstream is
+    /// known-noisy (flakey NXDOMAIN vs SERVFAIL).
+    #[serde(default = "default_dns_trust_neg")]
+    pub trust_negative_responses: bool,
+}
+
+fn default_dns_listen_v4() -> Vec<Ipv4Addr> {
+    vec![Ipv4Addr::UNSPECIFIED]
+}
+fn default_dns_listen_port() -> u16 {
+    15353
+}
+fn default_dns_trust_neg() -> bool {
+    false
 }
 
 /// Remote off-router backup target for scheduled config snapshots.

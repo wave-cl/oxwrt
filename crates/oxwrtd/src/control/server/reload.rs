@@ -422,6 +422,13 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         tracing::error!(error = %e, "reload: miniupnpd config write failed");
     }
 
+    // Regenerate hickory-dns config from new_cfg.dns (absent → no-op
+    // so legacy installs keep working). Picks up upstream/listen
+    // changes on the service's next restart.
+    if let Err(e) = crate::hickory::write_config(&new_cfg) {
+        tracing::error!(error = %e, "reload: hickory config write failed");
+    }
+
     // Reapply SQM — picks up bandwidth/extra_args changes; removes
     // stale qdiscs when sqm goes from Some → None.
     if let Err(e) = crate::sqm::setup_sqm(&new_cfg) {

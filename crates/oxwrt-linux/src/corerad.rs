@@ -116,6 +116,8 @@ mod tests {
                 name: "lan".into(),
                 bridge: "br-lan".into(),
                 members: vec![],
+                vlan_filtering: false,
+                vlan_ports: vec![],
                 address: Ipv4Addr::new(192, 168, 50, 1),
                 prefix: 24,
                 ipv6_address: Some("fdbe:cafe::1".parse().unwrap()),
@@ -136,6 +138,7 @@ mod tests {
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,
+            dns: None,
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),

@@ -1498,6 +1498,8 @@ mod tests {
                     name: "lan".to_string(),
                     bridge: "br-lan".to_string(),
                     members: vec![],
+                    vlan_filtering: false,
+                    vlan_ports: vec![],
                     address: Ipv4Addr::new(192, 168, 1, 1),
                     prefix: 24,
                     ipv6_address: None,
@@ -1541,6 +1543,7 @@ mod tests {
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,
+            dns: None,
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),

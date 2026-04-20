@@ -472,6 +472,7 @@ mod tests {
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,
+            dns: None,
             control: Control {
                 listen: vec!["[::1]:51820".into()],
                 authorized_keys: PathBuf::from("/x"),

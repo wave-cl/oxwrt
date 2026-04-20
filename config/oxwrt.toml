@@ -43,6 +43,9 @@
 #                  bypass CIDRs, Mullvad API relay picker)
 #   radios         per-phy wifi config
 #   wifi           per-SSID wifi config (multi-BSS capable)
+#   dns            hickory-dns forwarding resolver (listen, DoH/DoQ
+#                  upstreams) — rendered to /etc/oxwrt/named.toml
+#                  and bind-mounted into the dns service
 #   services       containerized services (dns, dhcp, hostapd, …)
 #   upnp           miniupnpd renderer (iptables binary staged;
 #                  nftables source-build pending)
@@ -892,7 +895,12 @@ depends_on = []
 env = { RUST_LOG = "info" }
 
 [[services.binds]]
-source = "/usr/lib/oxwrt/services/dns/named.toml"
+# Daemon-generated from the [dns] section below. If that section is
+# omitted, oxwrtd writes nothing here and the image's fallback file
+# (mounted at /usr/lib/oxwrt/services/dns/named.toml) is what hickory
+# would read — but that fallback isn't bound here, so the service
+# would fail to start without [dns]. Keep them paired.
+source = "/etc/oxwrt/named.toml"
 target = "/etc/named.toml"
 # readonly = true  # default
 
@@ -1218,6 +1226,41 @@ landlock = false
 #
 [metrics]
 listen = "192.168.50.1:9100"
+
+# ---------------- DNS (hickory-dns) ----------------
+#
+# Forwarding resolver for the router + LAN clients. Rendered by
+# oxwrtd into /etc/oxwrt/named.toml; the dns service bind-mounts
+# that file at /etc/named.toml. Every knob here is TOML-driven —
+# switching from Cloudflare to NextDNS is an edit + reload, no
+# service-config file surgery.
+#
+# listen_port is what the service binds internally; operator-facing
+# DNS is :53 via DNAT rules the firewall installs on every zone
+# that wants router-local resolution. An unprivileged port here
+# means the container doesn't need CAP_NET_BIND_SERVICE.
+#
+# upstreams: each entry carries `ip` + `protocol` + provider-
+# specific bits (`server_name` for TLS SNI, `path` for DoH). Omit
+# `port` to take the protocol default (443 https, 853 quic/tls).
+# Order matters: hickory round-robins top-to-bottom across healthy
+# upstreams, so put the preferred resolver first.
+
+[dns]
+listen_v4 = ["0.0.0.0"]
+listen_port = 15353
+
+[[dns.upstreams]]
+ip = "1.1.1.1"
+protocol = "https"
+server_name = "cloudflare-dns.com"
+path = "/dns-query"
+
+[[dns.upstreams]]
+ip = "9.9.9.9"
+protocol = "https"
+server_name = "dns.quad9.net"
+path = "/dns-query"
 
 # ---------------- Off-router config backup (SFTP) ----------------
 #
