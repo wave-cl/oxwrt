@@ -311,6 +311,7 @@ mod tests {
             sqm: None,
             priority: 100,
             probe_target: None,
+            mac_address: None,
         });
         let mut dhcp = default_dhcp();
         dhcp.network = "wan".into();

@@ -445,6 +445,7 @@ mod tests {
             sqm: None,
             priority,
             probe_target: None,
+            mac_address: None,
         }
     }
 

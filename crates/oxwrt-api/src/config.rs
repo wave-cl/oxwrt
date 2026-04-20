@@ -730,6 +730,16 @@ pub enum Network {
         /// lease-state alone decides health.
         #[serde(default)]
         probe_target: Option<std::net::IpAddr>,
+        /// Override the WAN iface's hardware MAC address before
+        /// bring-up. Six hex octets, colon- or hyphen-separated
+        /// (e.g. `"aa:bb:cc:dd:ee:ff"`). Required for DOCSIS cable
+        /// ISPs that pin provisioning to the MAC of the previously-
+        /// registered modem — without this, moving service to a
+        /// new router means a support call. Also useful for
+        /// business circuits whose DHCP server filters by MAC
+        /// allowlist. None = use the iface's factory MAC.
+        #[serde(default)]
+        mac_address: Option<String>,
     },
     Lan {
         name: String,

@@ -348,9 +348,47 @@ impl Net {
     }
 
     async fn setup_wan(&self, net: &Network) -> Result<(), Error> {
-        let Network::Wan { iface, wan, .. } = net else {
+        let Network::Wan {
+            iface,
+            wan,
+            mac_address,
+            ..
+        } = net
+        else {
             return Ok(());
         };
+        // MAC spoofing first, before any up-link. Some kernel link
+        // drivers refuse address changes while admin-up, so we
+        // bounce the link: down → set-address → up. No-op if
+        // mac_address is None — the iface keeps its factory MAC
+        // and we don't touch link state here.
+        if let Some(mac_str) = mac_address.as_deref() {
+            let mac = parse_mac(mac_str)?;
+            let idx = self.link_index(iface).await?;
+            // Ignore errors on down — the iface may already be down,
+            // or the driver may tolerate address changes while up.
+            // We only care that the subsequent address-set succeeds.
+            let _ = self
+                .handle
+                .link()
+                .set(LinkUnspec::new_with_index(idx).down().build())
+                .execute()
+                .await;
+            self.handle
+                .link()
+                .set(
+                    LinkUnspec::new_with_index(idx)
+                        .address(mac.to_vec())
+                        .build(),
+                )
+                .execute()
+                .await?;
+            tracing::info!(
+                iface = %iface,
+                mac = %mac_str,
+                "wan: MAC overridden from config"
+            );
+        }
         self.up_link(iface).await?;
 
         // DHCP: wan_dhcp::acquire handles addressing.
@@ -452,6 +490,40 @@ fn is_exists(err: &rtnetlink::Error) -> bool {
     // rtnetlink 0.20 wraps the kernel's -errno in NetlinkError. EEXIST = 17
     // on Linux (all arches), and the kernel negates it before sending.
     netlink_errno(err) == Some(-17)
+}
+
+/// Parse an operator-supplied MAC string into six bytes. Accepts
+/// colon- or hyphen-separated hex octets (`"aa:bb:cc:dd:ee:ff"` or
+/// `"aa-bb-cc-dd-ee-ff"`, case-insensitive). Rejects multicast
+/// addresses (low bit of first octet set) — DHCP servers ignore
+/// DISCOVERs with a multicast source, so that shape can't work on
+/// a WAN link and is almost certainly a typo.
+pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6], Error> {
+    let normalized = s.replace('-', ":");
+    let parts: Vec<&str> = normalized.split(':').collect();
+    if parts.len() != 6 {
+        return Err(Error::Firewall(format!(
+            "mac_address {s:?}: expected six hex octets (got {})",
+            parts.len()
+        )));
+    }
+    let mut out = [0u8; 6];
+    for (i, p) in parts.iter().enumerate() {
+        if p.len() != 2 {
+            return Err(Error::Firewall(format!(
+                "mac_address {s:?}: octet {p:?} must be two hex chars"
+            )));
+        }
+        out[i] = u8::from_str_radix(p, 16).map_err(|_| {
+            Error::Firewall(format!("mac_address {s:?}: octet {p:?} not hex"))
+        })?;
+    }
+    if out[0] & 0x01 != 0 {
+        return Err(Error::Firewall(format!(
+            "mac_address {s:?}: multicast address rejected (low bit of first octet set)"
+        )));
+    }
+    Ok(out)
 }
 
 fn is_nodev(err: &rtnetlink::Error) -> bool {
@@ -1484,6 +1556,42 @@ mod tests {
     //! inputs, so the tests don't need any mock netlink / cgroup /
     //! seccomp infrastructure.
     use super::*;
+
+    #[test]
+    fn parse_mac_colon_lowercase() {
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_hyphen_uppercase() {
+        assert_eq!(
+            parse_mac("AA-BB-CC-DD-EE-FF").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn parse_mac_rejects_multicast() {
+        // First octet 0x01 has the low bit set → multicast.
+        let err = parse_mac("01:02:03:04:05:06").unwrap_err();
+        assert!(format!("{err:?}").contains("multicast"));
+    }
+
+    #[test]
+    fn parse_mac_rejects_wrong_length() {
+        assert!(parse_mac("aa:bb:cc").is_err());
+        assert!(parse_mac("aa:bb:cc:dd:ee:ff:00").is_err());
+        assert!(parse_mac("").is_err());
+    }
+
+    #[test]
+    fn parse_mac_rejects_non_hex() {
+        assert!(parse_mac("aa:bb:cc:dd:ee:gg").is_err());
+        assert!(parse_mac("aa:bb:cc:dd:ee:f").is_err()); // single-char octet
+    }
     use oxwrt_api::config::{Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone};
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;

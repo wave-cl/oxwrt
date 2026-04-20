@@ -125,6 +125,12 @@ mode = "dhcp"
 # hostname_override = "my-isp-registered-name"
 # vendor_class_id = "MSFT 5.0"
 #
+# Override the WAN iface MAC before bring-up. Required for DOCSIS
+# cable ISPs that pin service to the MAC of the previously-
+# registered modem. Multicast MACs (low bit of first octet set)
+# are rejected.
+# mac_address = "aa:bb:cc:dd:ee:ff"
+#
 # Request a DHCPv6 prefix delegation (IA_PD) from the ISP in
 # parallel with the IPv4 lease. The delegated prefix is sliced
 # into per-subnet /64s via each network's `ipv6_subnet_id`. Set

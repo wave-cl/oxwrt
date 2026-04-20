@@ -330,6 +330,7 @@ mod tests {
                     sqm: None,
                     priority: 100,
                     probe_target: None,
+                    mac_address: None,
                 },
                 Network::Lan {
                     name: "lan".to_string(),
