@@ -1466,42 +1466,467 @@ impl Wireguard {
     }
 }
 
+/// Secrets overlay file path. Lives next to the public config.
+/// Same TOML schema as the public file but sparse — only the
+/// secret leaves are populated (passphrases, tokens, PSKs,
+/// passwords). See `crates/oxwrt-api/src/secrets.rs` for the
+/// authoritative inventory of which fields are secret.
+pub const DEFAULT_SECRETS_PATH: &str = "/etc/oxwrt/oxwrt.secrets.toml";
+
+/// Env-var prefix for the last-resort secret overlay. Vars of the
+/// shape `OXWRT_SECRET__<section>__<identity>__<field>=<value>`
+/// override both the public and the secrets file at load time.
+///
+/// Examples:
+/// ```text
+/// OXWRT_SECRET__wifi__main__passphrase=hunter2
+/// OXWRT_SECRET__ddns__home__token=abc123
+/// OXWRT_SECRET__wireguard__wg0__peers__laptop__preshared_key=...
+/// OXWRT_SECRET__networks__wan__password=pppoe-pw
+/// ```
+pub const SECRET_ENV_PREFIX: &str = "OXWRT_SECRET__";
+
+/// For each array-of-tables in the TOML tree, the field name that
+/// identifies an entry. Consulted by `merge_toml` so an overlay
+/// reordering its entries still merges correctly with the base.
+/// Paths are dot-joined; top-level arrays use their bare key.
+pub(crate) const ARRAY_IDENTITY_KEYS: &[(&str, &str)] = &[
+    ("networks", "name"),
+    ("radios", "phy"),
+    ("wifi", "ssid"),
+    ("services", "name"),
+    ("port_forwards", "name"),
+    ("wireguard", "name"),
+    ("wireguard.peers", "name"),
+    ("ddns", "name"),
+    ("vpn_client", "name"),
+    ("firewall.zones", "name"),
+];
+
+/// Deep-merge `overlay` into `base`. Tables merge key-by-key
+/// (overlay wins at the leaf). Arrays listed in
+/// `ARRAY_IDENTITY_KEYS` merge by identity field; unlisted arrays
+/// and scalars are replaced wholesale.
+///
+/// `path` is the dotted path being merged; the top-level call
+/// passes `""`.
+pub(crate) fn merge_toml(base: &mut toml::Value, overlay: toml::Value, path: &str) {
+    use toml::Value;
+    match overlay {
+        Value::Table(o) => {
+            if let Value::Table(b) = base {
+                for (k, v_o) in o {
+                    let sub_path = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    if let Some(v_b) = b.get_mut(&k) {
+                        merge_toml(v_b, v_o, &sub_path);
+                    } else {
+                        b.insert(k, v_o);
+                    }
+                }
+            } else {
+                *base = Value::Table(o);
+            }
+        }
+        Value::Array(o) => {
+            if let Value::Array(b) = base {
+                let identity = ARRAY_IDENTITY_KEYS
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map(|(_, id)| *id);
+                if let Some(identity) = identity {
+                    for o_entry in o {
+                        let key = o_entry
+                            .as_table()
+                            .and_then(|t| t.get(identity))
+                            .cloned();
+                        match key {
+                            Some(k) => {
+                                let idx = b.iter().position(|b_entry| {
+                                    b_entry.as_table().and_then(|t| t.get(identity))
+                                        == Some(&k)
+                                });
+                                match idx {
+                                    Some(i) => merge_toml(&mut b[i], o_entry, path),
+                                    None => b.push(o_entry),
+                                }
+                            }
+                            // No identity field on overlay entry — append
+                            // so it's at least visible, parse will catch
+                            // any shape mismatch.
+                            None => b.push(o_entry),
+                        }
+                    }
+                } else {
+                    // Array with no declared identity: replace wholesale.
+                    *b = o;
+                }
+            } else {
+                *base = Value::Array(o);
+            }
+        }
+        leaf => {
+            *base = leaf;
+        }
+    }
+}
+
+/// Apply `OXWRT_SECRET__…` env vars on top of `base`. Silent no-op
+/// for malformed / non-matching vars — the load path shouldn't
+/// fail because of environmental noise.
+pub(crate) fn apply_env_overlay(base: &mut toml::Value) {
+    for (k, v) in std::env::vars() {
+        let Some(rest) = k.strip_prefix(SECRET_ENV_PREFIX) else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split("__").collect();
+        apply_env_one(base, &parts, &v);
+    }
+}
+
+fn apply_env_one(base: &mut toml::Value, parts: &[&str], value: &str) {
+    use toml::Value;
+    // Shapes v1 supports:
+    //   [section, id, field]                           (3)
+    //   [section, id, "peers", peer_id, field]         (5; wireguard)
+    let Value::Table(root) = base else {
+        return;
+    };
+    if parts.len() < 3 {
+        return;
+    }
+    let section = parts[0];
+    let id_value = parts[1];
+    let Some(section_val) = root.get_mut(section) else {
+        return;
+    };
+    let Some(arr) = section_val.as_array_mut() else {
+        return;
+    };
+    let identity = ARRAY_IDENTITY_KEYS
+        .iter()
+        .find(|(p, _)| *p == section)
+        .map(|(_, id)| *id)
+        .unwrap_or("name");
+    let Some(entry) = arr.iter_mut().find(|e| {
+        e.as_table()
+            .and_then(|t| t.get(identity))
+            .and_then(|v| v.as_str())
+            == Some(id_value)
+    }) else {
+        return;
+    };
+    match parts.len() {
+        3 => {
+            let field = parts[2];
+            if let Some(t) = entry.as_table_mut() {
+                t.insert(field.to_string(), Value::String(value.to_string()));
+            }
+        }
+        5 if parts[2] == "peers" => {
+            let peer_id = parts[3];
+            let field = parts[4];
+            let Some(peers) = entry
+                .as_table_mut()
+                .and_then(|t| t.get_mut("peers"))
+                .and_then(|v| v.as_array_mut())
+            else {
+                return;
+            };
+            let Some(peer) = peers.iter_mut().find(|p| {
+                p.as_table()
+                    .and_then(|t| t.get("name"))
+                    .and_then(|v| v.as_str())
+                    == Some(peer_id)
+            }) else {
+                return;
+            };
+            if let Some(t) = peer.as_table_mut() {
+                t.insert(field.to_string(), Value::String(value.to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn read_text(path: &Path) -> Result<String, Error> {
+    let bytes = std::fs::read(path).map_err(|source| Error::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    String::from_utf8(bytes).map_err(|e| Error::Read {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })
+}
+
 impl Config {
-    pub fn load(path: &Path) -> Result<Self, Error> {
-        // Resolve: try `path` first, then the legacy /etc/oxwrt.toml
-        // fallback. This lets devices flashed before the DEFAULT_PATH
-        // migration keep reading from /etc/oxwrt.toml while new boots
-        // (or post-config-push writes) land at /etc/oxwrt/oxwrt.toml.
-        let effective: PathBuf = match std::fs::metadata(path) {
-            Ok(_) => path.to_path_buf(),
-            Err(_) if path == Path::new(DEFAULT_PATH) => {
+    /// Load `primary` as the public config, deep-merge `secrets`
+    /// on top if it exists, then overlay `OXWRT_SECRET__…` env
+    /// vars. Missing secrets file is not an error (first boot /
+    /// operator running without secrets / dev). Missing
+    /// `primary` is an error.
+    pub fn load_with_secrets(primary: &Path, secrets: &Path) -> Result<Self, Error> {
+        // Resolve primary: honour the legacy /etc/oxwrt.toml
+        // fallback on fresh-reflash devices, same as `load`.
+        let effective: PathBuf = match std::fs::metadata(primary) {
+            Ok(_) => primary.to_path_buf(),
+            Err(_) if primary == Path::new(DEFAULT_PATH) => {
                 let legacy = Path::new(LEGACY_PATH);
                 if std::fs::metadata(legacy).is_ok() {
                     legacy.to_path_buf()
                 } else {
-                    path.to_path_buf()
+                    primary.to_path_buf()
                 }
             }
-            Err(_) => path.to_path_buf(),
+            Err(_) => primary.to_path_buf(),
         };
-        let bytes = std::fs::read(&effective).map_err(|source| Error::Read {
-            path: effective.clone(),
-            source,
-        })?;
-        let text = String::from_utf8(bytes).map_err(|e| Error::Read {
-            path: effective.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
-        toml::from_str(&text).map_err(|source| Error::Parse {
+        let base_text = read_text(&effective)?;
+        let mut base: toml::Value =
+            toml::from_str(&base_text).map_err(|source| Error::Parse {
+                path: effective.clone(),
+                source,
+            })?;
+        if std::fs::metadata(secrets).is_ok() {
+            let sec_text = read_text(secrets)?;
+            let overlay: toml::Value =
+                toml::from_str(&sec_text).map_err(|source| Error::Parse {
+                    path: secrets.to_path_buf(),
+                    source,
+                })?;
+            merge_toml(&mut base, overlay, "");
+        }
+        apply_env_overlay(&mut base);
+        base.try_into().map_err(|source| Error::Parse {
             path: effective,
             source,
         })
+    }
+
+    /// Convenience: load from `path` treating its sibling
+    /// `oxwrt.secrets.toml` as the secrets overlay. Falls back
+    /// to [`DEFAULT_SECRETS_PATH`] if `path` has no parent.
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let secrets_path = path
+            .parent()
+            .map(|p| p.join("oxwrt.secrets.toml"))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SECRETS_PATH));
+        Self::load_with_secrets(path, &secrets_path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- merge_toml / load_with_secrets ---
+
+    fn merge_roundtrip(base: &str, overlay: &str) -> toml::Value {
+        let mut base: toml::Value = toml::from_str(base).unwrap();
+        let overlay: toml::Value = toml::from_str(overlay).unwrap();
+        merge_toml(&mut base, overlay, "");
+        base
+    }
+
+    #[test]
+    fn merge_leaf_overwrite() {
+        let merged = merge_roundtrip(
+            r#"hostname = "a""#,
+            r#"hostname = "b""#,
+        );
+        assert_eq!(merged["hostname"].as_str(), Some("b"));
+    }
+
+    #[test]
+    fn merge_adds_missing_leaf() {
+        let merged = merge_roundtrip(
+            r#"hostname = "a""#,
+            r#"timezone = "UTC""#,
+        );
+        assert_eq!(merged["hostname"].as_str(), Some("a"));
+        assert_eq!(merged["timezone"].as_str(), Some("UTC"));
+    }
+
+    #[test]
+    fn merge_table_deep() {
+        let merged = merge_roundtrip(
+            "[wan.static]\naddress = \"1.2.3.4\"\n",
+            "[wan.static]\ngateway = \"1.2.3.1\"\n",
+        );
+        assert_eq!(merged["wan"]["static"]["address"].as_str(), Some("1.2.3.4"));
+        assert_eq!(merged["wan"]["static"]["gateway"].as_str(), Some("1.2.3.1"));
+    }
+
+    #[test]
+    fn merge_wifi_by_ssid_not_index() {
+        // Base has two entries [main, guest]; overlay has [guest] only.
+        // Guest's passphrase should merge into the second base entry,
+        // NOT the first — identity-keyed merge.
+        let base = r#"
+            [[wifi]]
+            ssid = "main"
+            passphrase = "main-pw"
+            [[wifi]]
+            ssid = "guest"
+        "#;
+        let overlay = r#"
+            [[wifi]]
+            ssid = "guest"
+            passphrase = "guest-pw"
+        "#;
+        let merged = merge_roundtrip(base, overlay);
+        let wifi = merged["wifi"].as_array().unwrap();
+        assert_eq!(wifi.len(), 2);
+        assert_eq!(wifi[0]["ssid"].as_str(), Some("main"));
+        assert_eq!(wifi[0]["passphrase"].as_str(), Some("main-pw"));
+        assert_eq!(wifi[1]["ssid"].as_str(), Some("guest"));
+        assert_eq!(wifi[1]["passphrase"].as_str(), Some("guest-pw"));
+    }
+
+    #[test]
+    fn merge_wifi_reordered_overlay() {
+        // Overlay lists entries in different order than base.
+        // Identity merge must still pair them correctly.
+        let base = r#"
+            [[wifi]]
+            ssid = "main"
+            [[wifi]]
+            ssid = "guest"
+        "#;
+        let overlay = r#"
+            [[wifi]]
+            ssid = "guest"
+            passphrase = "g"
+            [[wifi]]
+            ssid = "main"
+            passphrase = "m"
+        "#;
+        let merged = merge_roundtrip(base, overlay);
+        let wifi = merged["wifi"].as_array().unwrap();
+        assert_eq!(wifi[0]["ssid"].as_str(), Some("main"));
+        assert_eq!(wifi[0]["passphrase"].as_str(), Some("m"));
+        assert_eq!(wifi[1]["ssid"].as_str(), Some("guest"));
+        assert_eq!(wifi[1]["passphrase"].as_str(), Some("g"));
+    }
+
+    #[test]
+    fn merge_nested_wireguard_peers() {
+        let base = r#"
+            [[wireguard]]
+            name = "wg0"
+            [[wireguard.peers]]
+            name = "laptop"
+            [[wireguard.peers]]
+            name = "phone"
+        "#;
+        let overlay = r#"
+            [[wireguard]]
+            name = "wg0"
+            [[wireguard.peers]]
+            name = "phone"
+            preshared_key = "PHONE-PSK"
+        "#;
+        let merged = merge_roundtrip(base, overlay);
+        let peers = merged["wireguard"][0]["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0]["name"].as_str(), Some("laptop"));
+        assert!(peers[0].as_table().unwrap().get("preshared_key").is_none());
+        assert_eq!(peers[1]["name"].as_str(), Some("phone"));
+        assert_eq!(peers[1]["preshared_key"].as_str(), Some("PHONE-PSK"));
+    }
+
+    /// Piggyback on the repo's example config to build a minimally-valid
+    /// public file in a tmpdir, then verify `load_with_secrets` handles
+    /// the missing-overlay case without complaint.
+    #[test]
+    fn load_with_secrets_missing_overlay_is_ok() {
+        let example = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        std::fs::copy(example, &public).unwrap();
+        let secrets = tmp.path().join("oxwrt.secrets.toml"); // absent
+        let cfg = Config::load_with_secrets(&public, &secrets).unwrap();
+        assert_eq!(cfg.hostname, "flint2");
+    }
+
+    /// Copy the example, then put a secrets overlay next to it that
+    /// rewrites a wifi passphrase. Confirm the merged Config uses the
+    /// overlay value.
+    #[test]
+    fn load_with_secrets_overlay_merges() {
+        let example = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        std::fs::copy(example, &public).unwrap();
+        // Derive an ssid from the real example so the identity merge
+        // matches — assert it exists up front for a legible failure.
+        let before = Config::load_with_secrets(&public, &tmp.path().join("_nope")).unwrap();
+        let first_ssid = before.wifi.first().map(|w| w.ssid.clone()).expect(
+            "example config must have at least one [[wifi]] entry; \
+             adjust this test if the example drops wifi",
+        );
+        let secrets = tmp.path().join("oxwrt.secrets.toml");
+        std::fs::write(
+            &secrets,
+            format!("[[wifi]]\nssid = \"{first_ssid}\"\npassphrase = \"from-secrets-overlay\"\n"),
+        )
+        .unwrap();
+        let after = Config::load_with_secrets(&public, &secrets).unwrap();
+        let w = after.wifi.iter().find(|w| w.ssid == first_ssid).unwrap();
+        assert_eq!(w.passphrase, "from-secrets-overlay");
+    }
+
+    /// Env var overrides both files. Uses a local `merge_toml` path so
+    /// we don't have to `set_var` which races with other tests.
+    #[test]
+    fn env_overlay_walks_identity_keys() {
+        let base_toml = r#"
+            [[wifi]]
+            ssid = "main"
+            phy = "phy0"
+            network = "lan"
+            passphrase = "from-public"
+        "#;
+        let mut base: toml::Value = toml::from_str(base_toml).unwrap();
+        // Simulate env overlay without touching the process env.
+        apply_env_one(
+            &mut base,
+            &["wifi", "main", "passphrase"],
+            "from-env",
+        );
+        assert_eq!(base["wifi"][0]["passphrase"].as_str(), Some("from-env"));
+    }
+
+    #[test]
+    fn env_overlay_nested_peer() {
+        let base_toml = r#"
+            [[wireguard]]
+            name = "wg0"
+            [[wireguard.peers]]
+            name = "phone"
+        "#;
+        let mut base: toml::Value = toml::from_str(base_toml).unwrap();
+        apply_env_one(
+            &mut base,
+            &["wireguard", "wg0", "peers", "phone", "preshared_key"],
+            "PSK",
+        );
+        assert_eq!(
+            base["wireguard"][0]["peers"][0]["preshared_key"].as_str(),
+            Some("PSK")
+        );
+    }
+
+    #[test]
+    fn env_overlay_unknown_section_silent() {
+        let mut base: toml::Value = toml::from_str(r#"hostname = "x""#).unwrap();
+        // No [[wifi]] in base; apply should be a no-op, not an error.
+        apply_env_one(&mut base, &["wifi", "main", "passphrase"], "v");
+        assert_eq!(base["hostname"].as_str(), Some("x"));
+    }
 
     /// The example config at `config/oxwrt.toml` must parse against
     /// the current `Config` schema. Catches any schema change that
