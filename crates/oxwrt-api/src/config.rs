@@ -697,6 +697,20 @@ pub struct Zone {
     /// regardless of tunnel state — no split-tunnel required.
     #[serde(default)]
     pub via_vpn: bool,
+    /// Per-zone WAN assignment for multi-WAN deployments. When
+    /// set to a `[[networks]] type="wan"` name, forwarded traffic
+    /// FROM this zone routes through that specific WAN's default
+    /// regardless of the failover coordinator's active pick. Use
+    /// for static source-based split: "guest zone exits via
+    /// ISP B, main LAN via ISP A."
+    ///
+    /// Mutually exclusive with `via_vpn=true` — if both are set
+    /// via_vpn wins (the VPN's iif rule has priority 1000, the
+    /// per-zone WAN rule sits at 800, so rule-match ordering
+    /// favors the narrower signal). Leave unset for the default
+    /// behavior: zone uses whichever WAN the coordinator picked.
+    #[serde(default)]
+    pub wan: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

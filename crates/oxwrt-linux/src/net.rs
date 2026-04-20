@@ -1524,6 +1524,7 @@ mod tests {
                     default_forward: oxwrt_api::config::ChainPolicy::Drop,
                     masquerade: false,
                     via_vpn: false,
+                    wan: None,
                 }],
                 rules: vec![],
             },

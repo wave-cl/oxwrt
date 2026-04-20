@@ -600,6 +600,20 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             }
         }
     }
+    // Per-zone WAN routing: install ip rule iif <zone_iface> →
+    // per-WAN table 100+ for any zone with `wan=<name>` set.
+    // Per-WAN table defaults are populated by the DHCP lease-
+    // apply code above on acquire; this call just installs the
+    // rules that divert zone traffic into those tables.
+    if let Some(net_handle) = &net {
+        if cfg.firewall.zones.iter().any(|z| z.wan.is_some()) {
+            let handle = net_handle.handle().clone();
+            if let Err(e) = crate::wan_routing::install_zone_wan_rules(&handle, &cfg).await {
+                tracing::error!(error = %e, "wan_routing: zone rules install failed");
+            }
+        }
+    }
+
     // MSS clamp on the WAN iface — separate nft table so rustables
     // batch rebuilds don't wipe it. Gated on "there's at least one
     // vpn_client declared" because the clamp is only useful for
@@ -662,6 +676,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 let name = name.clone();
                 let wan_leases = wan_leases.clone();
                 let sntp_fired = sntp_fired.clone();
+                let cfg_for_wanrt = cfg.clone();
                 tokio::spawn(async move {
                     let mut backoff = Duration::from_secs(10);
                     let lease = loop {
@@ -679,6 +694,25 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                     };
                     if let Err(e) = wan_dhcp::apply_lease(&handle, &iface, &lease).await {
                         tracing::error!(wan = %name, iface = %iface, error = %e, "wan dhcp: apply_lease failed");
+                    }
+                    // Install the WAN's default into its per-WAN
+                    // routing table so any zone that declared
+                    // `wan = "<name>"` routes through it via the
+                    // iif rule at priority 800. No-op when no
+                    // zone references this WAN — the table sits
+                    // populated-but-unused, which costs nothing
+                    // except a few bytes.
+                    if let (Some(table_id), Some(gw)) = (
+                        crate::wan_routing::wan_table_id(&name, &cfg_for_wanrt),
+                        lease.gateway,
+                    ) {
+                        if let Err(e) = crate::wan_routing::set_wan_table_default(
+                            &handle, table_id, &iface, gw,
+                        )
+                        .await
+                        {
+                            tracing::warn!(wan = %name, table_id, error = %e, "wan_routing: per-WAN default install failed");
+                        }
                     }
                     wan_leases
                         .write()

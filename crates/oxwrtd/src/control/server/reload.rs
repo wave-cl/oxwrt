@@ -384,6 +384,19 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         {
             tracing::error!(error = %e, "reload: v6 bypass install failed");
         }
+        // Per-zone WAN routing rules. Reload picks up
+        // additions / removals of `wan` flags on firewall zones.
+        // The per-WAN table defaults themselves are updated by
+        // the DHCP lease-apply paths (not retriggered here) —
+        // acceptable because the table's default route stays
+        // valid across reload.
+        if new_cfg.firewall.zones.iter().any(|z| z.wan.is_some()) {
+            if let Err(e) =
+                oxwrt_linux::wan_routing::install_zone_wan_rules(&handle, &new_cfg).await
+            {
+                tracing::error!(error = %e, "reload: zone WAN rules failed");
+            }
+        }
         conn_task.abort();
         // MSS clamp on WAN. Same gate as boot — no point if no
         // vpn_client profile is declared.

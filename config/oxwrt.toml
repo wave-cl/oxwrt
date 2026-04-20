@@ -214,6 +214,14 @@ name = "guest"
 networks = ["guest"]
 default_input = "drop"
 default_forward = "drop"
+# Per-zone WAN selection (multi-WAN deployments only). When set,
+# forwarded traffic from this zone routes through the named
+# WAN's per-WAN table regardless of the failover coordinator's
+# active pick — static source-based split. Leave unset to
+# follow the coordinator.
+# wan = "wan-backup"
+# Or route through the active VPN tunnel instead:
+# via_vpn = true
 
 [[firewall.zones]]
 name = "wan"

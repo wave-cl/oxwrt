@@ -45,5 +45,6 @@ pub mod vpn_routing;
 pub mod wan_dhcp;
 pub mod wan_dhcp6;
 pub mod wan_failover;
+pub mod wan_routing;
 pub mod wifi;
 pub mod wireguard;
