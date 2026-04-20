@@ -158,9 +158,37 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             }
         }
         "sysctl" => {
-            // Tiny networking-sysctl snapshot for troubleshooting. Reads
-            // a fixed set of flags the router relies on — forwarding,
-            // rp_filter, accept_ra, etc. Returns one line per flag.
+            // With an argument, read that specific sysctl key (dot or
+            // slash form): `diag sysctl net.ipv6.conf.eth1.accept_ra`
+            // translates to reading /proc/sys/net/ipv6/conf/eth1/accept_ra.
+            // Without an argument, emit a curated snapshot of the
+            // networking flags the router relies on.
+            if let Some(key) = args.first() {
+                // Safety: reject anything that could escape /proc/sys —
+                // no absolute paths, no `..`, only alphanumerics +
+                // dots/slashes/underscores/hyphens. sysctl keys in the
+                // wild follow that alphabet; rejecting anything else
+                // keeps this diag RPC out of arbitrary-file-read
+                // territory.
+                let is_safe = key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '_' | '-'));
+                if !is_safe || key.starts_with('/') || key.contains("..") {
+                    return Response::Err {
+                        message: format!("diag sysctl: invalid key {key:?}"),
+                    };
+                }
+                let path = format!("/proc/sys/{}", key.replace('.', "/"));
+                return match std::fs::read_to_string(&path) {
+                    Ok(s) => Response::Value {
+                        value: format!("{path}: {}\n", s.trim()),
+                    },
+                    Err(e) => Response::Err {
+                        message: format!("{path}: {e}"),
+                    },
+                };
+            }
+            // Argument-less default snapshot: the classic flags.
             const ENTRIES: &[&str] = &[
                 "/proc/sys/net/ipv4/ip_forward",
                 "/proc/sys/net/ipv4/conf/all/forwarding",
