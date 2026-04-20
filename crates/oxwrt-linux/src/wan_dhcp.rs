@@ -74,6 +74,19 @@ pub struct DhcpLease {
 /// loop` takes a `SharedLease` without a cross-crate circularity.
 pub type SharedLease = Arc<RwLock<Option<DhcpLease>>>;
 
+/// Identity bits the client sends to the ISP's DHCP server in
+/// DISCOVER + REQUEST. All optional — `None` means omit the
+/// corresponding option entirely. Derived from `WanConfig::Dhcp`
+/// fields at the call site; see init::run for that wiring.
+#[derive(Debug, Clone, Default)]
+pub struct DhcpClientOpts {
+    /// Option 12 (hostname). Some ISPs refuse to lease without it.
+    pub hostname: Option<String>,
+    /// Option 60 (vendor-class-identifier). Business + cable
+    /// circuits sometimes key their DHCP pool on this.
+    pub vendor_class_id: Option<String>,
+}
+
 /// Run one full DHCPv4 handshake on `iface_name`. Returns the lease on
 /// success, or an error on timeout / protocol failure. Does **not** apply
 /// the lease to the interface — that's `apply_lease`'s job, called
@@ -82,9 +95,10 @@ pub async fn acquire(
     handle: &Handle,
     iface_name: &str,
     overall_timeout: Duration,
+    opts: &DhcpClientOpts,
 ) -> Result<DhcpLease, Error> {
     let start = Instant::now();
-    let result = acquire_inner(handle, iface_name, overall_timeout).await;
+    let result = acquire_inner(handle, iface_name, overall_timeout, opts).await;
     let elapsed = start.elapsed();
     let label: &'static str = match &result {
         Ok(_) => "ok",
@@ -100,6 +114,7 @@ async fn acquire_inner(
     handle: &Handle,
     iface_name: &str,
     overall_timeout: Duration,
+    opts: &DhcpClientOpts,
 ) -> Result<DhcpLease, Error> {
     let (iface_idx, hw_addr) = get_iface_mac(handle, iface_name).await?;
 
@@ -130,7 +145,7 @@ async fn acquire_inner(
     let xid: u32 = rand::random();
     tracing::info!(iface = %iface_name, xid, ?hw_addr, "wan dhcp: DISCOVER");
 
-    let discover = build_discover(xid, &hw_addr);
+    let discover = build_discover(xid, &hw_addr, opts);
     let discover_bytes = encode_dhcp(&discover)?;
     let deadline = Instant::now() + overall_timeout;
 
@@ -173,7 +188,7 @@ async fn acquire_inner(
         find_server_id(&offer).ok_or(Error::MissingOption(OptionCode::ServerIdentifier))?;
     tracing::info!(iface = %iface_name, %offered_ip, %server_id, "wan dhcp: OFFER received");
 
-    let request = build_request(xid, &hw_addr, offered_ip, server_id);
+    let request = build_request(xid, &hw_addr, offered_ip, server_id, opts);
     let request_bytes = encode_dhcp(&request)?;
     send_raw_dhcp_broadcast(iface_idx, &hw_addr, &request_bytes)?;
 
@@ -262,6 +277,7 @@ pub fn spawn_renewal_loop(
     iface: String,
     initial_lease: DhcpLease,
     shared_lease: SharedLease,
+    client_opts: DhcpClientOpts,
 ) -> tokio::task::JoinHandle<()> {
     // Shared wake signal from the link-watch task → renewal loop. Fires
     // on link-down→up edges so the renewal doesn't sit asleep for half
@@ -334,7 +350,7 @@ pub fn spawn_renewal_loop(
             tracing::info!(iface = %iface, "wan dhcp: renewing lease");
             let mut backoff = Duration::from_secs(10);
             loop {
-                match acquire(&handle, &iface, Duration::from_secs(15)).await {
+                match acquire(&handle, &iface, Duration::from_secs(15), &client_opts).await {
                     Ok(lease) => {
                         if lease.address != current.address {
                             tracing::warn!(
@@ -424,7 +440,7 @@ async fn get_iface_mac(handle: &Handle, iface: &str) -> Result<(u32, [u8; 6]), E
     Err(Error::NoHwAddr(iface.to_string()))
 }
 
-fn build_discover(xid: u32, hw_addr: &[u8; 6]) -> Message {
+fn build_discover(xid: u32, hw_addr: &[u8; 6], client_opts: &DhcpClientOpts) -> Message {
     let mut msg = Message::default();
     msg.set_htype(HType::Eth)
         .set_xid(xid)
@@ -438,6 +454,7 @@ fn build_discover(xid: u32, hw_addr: &[u8; 6]) -> Message {
         v.extend_from_slice(hw_addr);
         v
     }));
+    insert_client_opts(opts, client_opts);
     opts.insert(DhcpOption::ParameterRequestList(vec![
         OptionCode::SubnetMask,
         OptionCode::Router,
@@ -454,6 +471,7 @@ fn build_request(
     hw_addr: &[u8; 6],
     offered_ip: Ipv4Addr,
     server_id: Ipv4Addr,
+    client_opts: &DhcpClientOpts,
 ) -> Message {
     let mut msg = Message::default();
     msg.set_htype(HType::Eth)
@@ -470,6 +488,7 @@ fn build_request(
         v.extend_from_slice(hw_addr);
         v
     }));
+    insert_client_opts(opts, client_opts);
     opts.insert(DhcpOption::ParameterRequestList(vec![
         OptionCode::SubnetMask,
         OptionCode::Router,
@@ -479,6 +498,25 @@ fn build_request(
         OptionCode::ServerIdentifier,
     ]));
     msg
+}
+
+/// Shared helper: insert the operator-supplied hostname (opt 12)
+/// and vendor-class-id (opt 60) into a DHCP message's option set.
+/// Both are no-ops when their respective config field is None.
+fn insert_client_opts(
+    opts: &mut dhcproto::v4::DhcpOptions,
+    client_opts: &DhcpClientOpts,
+) {
+    if let Some(h) = client_opts.hostname.as_deref() {
+        if !h.is_empty() {
+            opts.insert(DhcpOption::Hostname(h.to_string()));
+        }
+    }
+    if let Some(vci) = client_opts.vendor_class_id.as_deref() {
+        if !vci.is_empty() {
+            opts.insert(DhcpOption::ClassIdentifier(vci.as_bytes().to_vec()));
+        }
+    }
 }
 
 /// RFC 2131 compliant broadcast send: builds the full Ethernet+IP+UDP
@@ -791,4 +829,102 @@ fn is_exists(err: &rtnetlink::Error) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hw() -> [u8; 6] {
+        [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+    }
+
+    /// Default opts (both fields None) → the DISCOVER carries
+    /// neither option 12 nor option 60. Baseline — matches
+    /// pre-feature behaviour.
+    #[test]
+    fn discover_without_opts_omits_both() {
+        let msg = build_discover(0xdead_beef, &hw(), &DhcpClientOpts::default());
+        let opts = msg.opts();
+        assert!(!opts.iter().any(|(c, _)| *c == OptionCode::Hostname));
+        assert!(
+            !opts
+                .iter()
+                .any(|(c, _)| *c == OptionCode::ClassIdentifier)
+        );
+    }
+
+    /// hostname: Some("...") → option 12 present with the value.
+    #[test]
+    fn discover_emits_hostname_when_set() {
+        let opts = DhcpClientOpts {
+            hostname: Some("flint2".into()),
+            vendor_class_id: None,
+        };
+        let msg = build_discover(0, &hw(), &opts);
+        let hostname = msg
+            .opts()
+            .iter()
+            .find_map(|(c, o)| {
+                if *c == OptionCode::Hostname {
+                    match o {
+                        DhcpOption::Hostname(h) => Some(h.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("hostname option must be present");
+        assert_eq!(hostname, "flint2");
+    }
+
+    /// vendor_class_id: Some("...") → option 60 present.
+    #[test]
+    fn request_emits_vendor_class_when_set() {
+        let opts = DhcpClientOpts {
+            hostname: None,
+            vendor_class_id: Some("MSFT 5.0".into()),
+        };
+        let msg = build_request(
+            0,
+            &hw(),
+            std::net::Ipv4Addr::new(10, 0, 0, 5),
+            std::net::Ipv4Addr::new(10, 0, 0, 1),
+            &opts,
+        );
+        let vci = msg
+            .opts()
+            .iter()
+            .find_map(|(c, o)| {
+                if *c == OptionCode::ClassIdentifier {
+                    match o {
+                        DhcpOption::ClassIdentifier(v) => Some(v.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("class-identifier option must be present");
+        assert_eq!(vci, b"MSFT 5.0");
+    }
+
+    /// Empty strings treated as "not set" — operators pasting
+    /// empty TOML values shouldn't silently produce zero-length
+    /// options that some DHCP servers choke on.
+    #[test]
+    fn empty_strings_suppress_emission() {
+        let opts = DhcpClientOpts {
+            hostname: Some(String::new()),
+            vendor_class_id: Some(String::new()),
+        };
+        let msg = build_discover(0, &hw(), &opts);
+        assert!(!msg.opts().iter().any(|(c, _)| *c == OptionCode::Hostname));
+        assert!(
+            !msg.opts()
+                .iter()
+                .any(|(c, _)| *c == OptionCode::ClassIdentifier)
+        );
+    }
 }

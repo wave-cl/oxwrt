@@ -325,7 +325,7 @@ mod tests {
                 Network::Wan {
                     name: "wan".to_string(),
                     iface: "eth1".to_string(),
-                    wan: crate::config::WanConfig::Dhcp,
+                    wan: crate::config::WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None },
                     ipv6_pd: false,
                     sqm: None,
                     priority: 100,

@@ -114,6 +114,17 @@ mode = "dhcp"
 # state health misses. Omit to use lease-state alone.
 # probe_target = "1.1.1.1"
 #
+# DHCPv4 client identity options — sent in DISCOVER + REQUEST to
+# the ISP's DHCP server. Most residential ISPs don't look at
+# these; set them only when your ISP requires them.
+#   send_hostname: Send option 12 (defaults to [hostname]).
+#   hostname_override: Override the value sent (rare).
+#   vendor_class_id: Option 60 — DOCSIS / business circuits key on
+#                    this. Omit for home ISPs.
+# send_hostname = true
+# hostname_override = "my-isp-registered-name"
+# vendor_class_id = "MSFT 5.0"
+#
 # Request a DHCPv6 prefix delegation (IA_PD) from the ISP in
 # parallel with the IPv4 lease. The delegated prefix is sliced
 # into per-subnet /64s via each network's `ipv6_subnet_id`. Set

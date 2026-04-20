@@ -645,7 +645,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // chatter arriving on that iface.
     if let Some(Network::Wan {
         iface: wan_if,
-        wan: WanConfig::Dhcp,
+        wan: WanConfig::Dhcp { .. },
         ..
     }) = cfg.primary_wan()
     {

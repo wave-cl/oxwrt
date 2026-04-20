@@ -306,7 +306,7 @@ mod tests {
         cfg.networks.push(Network::Wan {
             name: "wan".into(),
             iface: "eth1".into(),
-            wan: oxwrt_api::config::WanConfig::Dhcp,
+            wan: oxwrt_api::config::WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None },
             ipv6_pd: false,
             sqm: None,
             priority: 100,

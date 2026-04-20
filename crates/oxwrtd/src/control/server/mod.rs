@@ -539,7 +539,7 @@ fn handle_get(state: &ControlState, key: &str) -> Response {
         "wan.mode" => cfg.primary_wan().map(|n| {
             if let Network::Wan { wan, .. } = n {
                 match wan {
-                    WanConfig::Dhcp => "dhcp",
+                    WanConfig::Dhcp { .. } => "dhcp",
                     WanConfig::Static { .. } => "static",
                     WanConfig::Pppoe { .. } => "pppoe",
                 }

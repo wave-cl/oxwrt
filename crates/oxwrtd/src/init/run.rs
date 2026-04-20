@@ -687,7 +687,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Network::Wan {
                 name,
                 iface,
-                wan: WanConfig::Dhcp,
+                wan: WanConfig::Dhcp { send_hostname, hostname_override, vendor_class_id },
                 ..
             } = w
             {
@@ -697,10 +697,35 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                 let wan_leases = wan_leases.clone();
                 let sntp_fired = sntp_fired.clone();
                 let cfg_for_wanrt = cfg.clone();
+                // Build the DHCP client identity bits from the WAN
+                // config's Dhcp variant fields. Hostname resolves
+                // to the override if set, otherwise the router's
+                // own hostname; suppressed entirely when
+                // send_hostname=false. Empty strings also treated
+                // as suppression (`insert_client_opts` skips them).
+                let client_opts = crate::wan_dhcp::DhcpClientOpts {
+                    hostname: if *send_hostname {
+                        Some(
+                            hostname_override
+                                .clone()
+                                .unwrap_or_else(|| cfg.hostname.clone()),
+                        )
+                    } else {
+                        None
+                    },
+                    vendor_class_id: vendor_class_id.clone(),
+                };
                 tokio::spawn(async move {
                     let mut backoff = Duration::from_secs(10);
                     let lease = loop {
-                        match wan_dhcp::acquire(&handle, &iface, Duration::from_secs(15)).await {
+                        match wan_dhcp::acquire(
+                            &handle,
+                            &iface,
+                            Duration::from_secs(15),
+                            &client_opts,
+                        )
+                        .await
+                        {
                             Ok(l) => break l,
                             Err(e) => {
                                 tracing::warn!(
@@ -757,6 +782,7 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
                         iface.clone(),
                         lease,
                         per_wan_shared.clone(),
+                        client_opts,
                     ));
                     // Mirror per_wan_shared → wan_leases[name]
                     // every 2 s so failover sees renewals.

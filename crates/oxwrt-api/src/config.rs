@@ -1198,7 +1198,29 @@ pub struct SqmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum WanConfig {
-    Dhcp,
+    Dhcp {
+        /// Send the router's `hostname` in DHCPv4 option 12. Some
+        /// ISPs (particularly cable operators with DOCSIS
+        /// provisioning workflows) require this to match an
+        /// account-registered hostname before handing out a lease.
+        /// Default false — RFC 2131 doesn't mandate it and most
+        /// residential ISPs don't care.
+        #[serde(default)]
+        send_hostname: bool,
+        /// Value sent in option 12 when `send_hostname = true`.
+        /// Unset → use `Config.hostname`. Useful when the ISP
+        /// expects a specific subscriber-id string that differs
+        /// from the router's own hostname.
+        #[serde(default)]
+        hostname_override: Option<String>,
+        /// DHCPv4 option 60 (vendor-class-identifier). Business
+        /// circuits and some residential ISPs key their DHCP
+        /// server on this; typical values are the router model
+        /// name or an ISP-provided magic string like
+        /// `"MSFT 5.0"` or `"docsis3.0"`. Unset → option omitted.
+        #[serde(default)]
+        vendor_class_id: Option<String>,
+    },
     Static {
         address: Ipv4Addr,
         prefix: u8,

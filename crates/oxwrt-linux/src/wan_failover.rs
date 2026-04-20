@@ -440,7 +440,7 @@ mod tests {
         Network::Wan {
             name: name.into(),
             iface: iface.into(),
-            wan: oxwrt_api::config::WanConfig::Dhcp,
+            wan: oxwrt_api::config::WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None },
             ipv6_pd: false,
             sqm: None,
             priority,
