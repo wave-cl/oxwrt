@@ -256,6 +256,8 @@ impl Net {
             members,
             address,
             prefix,
+            vlan_filtering,
+            vlan_ports,
             ..
         } = net
         else {
@@ -330,6 +332,17 @@ impl Net {
                 )
                 .execute()
                 .await?;
+        }
+
+        // VLAN-aware bridging. Shell out to `ip` + `bridge` — the
+        // rtnetlink crate's link-kind handling doesn't cover bridge
+        // vlan_filtering or per-port VLAN attributes as of 0.20, and
+        // wrapping libnetlink's AF_BRIDGE raw messages would add
+        // significant complexity for what's effectively a
+        // static-at-boot config. `bridge` ships with iproute2 in
+        // every OpenWrt image; it's on PATH.
+        if *vlan_filtering {
+            apply_bridge_vlan_filtering(bridge, vlan_ports)?;
         }
         Ok(())
     }
@@ -457,6 +470,99 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 /// Enable IPv4 forwarding in the current netns. Idempotent — safe to call
 /// more than once. Required for packets from service netns containers to
 /// egress through the outer netns's upstream interface.
+/// Enable 802.1Q VLAN filtering on `bridge` and apply per-port
+/// VLAN assignments via the `bridge` iproute2 helper.
+///
+/// Idempotent: duplicate `bridge vlan add` calls return
+/// "already exists" which we log + ignore. On a fresh boot the
+/// bridge starts with `vlan_filtering=0` and an implicit "VID 1
+/// PVID untagged" on every port; enabling filtering makes that
+/// default EXPLICIT but doesn't change observable behavior for
+/// ports we don't touch.
+///
+/// Per port:
+///   - `bridge vlan add vid X dev <iface> pvid untagged` →
+///     access port for VID X (default + egress-untag).
+///   - `bridge vlan add vid Y dev <iface>` → trunk-tagged VID Y.
+///   - Both combine on hybrid ports; call the first for the
+///     pvid/untagged VID and the second for each tagged VID.
+///
+/// Note: doesn't DIFF against current kernel state — on reload,
+/// an operator removing a VLAN from config leaves its kernel
+/// entry in place until reboot. Accept as v1 limitation; clean
+/// state on every change requires bridge-vlan enumerate-and-
+/// diff which the iproute2 helper doesn't expose cleanly.
+pub(crate) fn apply_bridge_vlan_filtering(
+    bridge: &str,
+    vlan_ports: &[oxwrt_api::config::VlanPort],
+) -> Result<(), Error> {
+    use std::process::Command;
+
+    // Flip the bridge into vlan-aware mode first. The sysfs knob
+    // is `/sys/class/net/<br>/bridge/vlan_filtering`; writing "1"
+    // is the canonical way (iproute2 does the same under the
+    // hood).
+    let path = format!("/sys/class/net/{bridge}/bridge/vlan_filtering");
+    if let Err(e) = std::fs::write(&path, "1\n") {
+        return Err(Error::Firewall(format!(
+            "bridge vlan_filtering enable ({path}): {e}"
+        )));
+    }
+    tracing::info!(bridge, "bridge vlan_filtering enabled");
+
+    for p in vlan_ports {
+        // PVID (access / hybrid untagged default).
+        if let Some(vid) = p.pvid {
+            let vid_s = vid.to_string();
+            let out = Command::new("bridge")
+                .args(["vlan", "add", "vid", &vid_s, "dev", &p.iface, "pvid", "untagged"])
+                .output()
+                .map_err(|e| Error::Firewall(format!("bridge vlan add pvid: {e}")))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // "already configured" is fine — idempotent re-run
+                // after reload. Any other error logs + continues.
+                if !stderr.contains("exists") && !stderr.contains("already") {
+                    tracing::warn!(
+                        iface = %p.iface, vid, stderr = %stderr.trim(),
+                        "bridge vlan add pvid failed"
+                    );
+                } else {
+                    tracing::debug!(iface = %p.iface, vid, "bridge vlan pvid already present");
+                }
+            } else {
+                tracing::info!(iface = %p.iface, vid, "bridge vlan pvid set");
+            }
+        }
+        // Tagged VIDs (trunk).
+        for vid in &p.tagged {
+            let vid_s = vid.to_string();
+            let out = Command::new("bridge")
+                .args(["vlan", "add", "vid", &vid_s, "dev", &p.iface])
+                .output()
+                .map_err(|e| Error::Firewall(format!("bridge vlan add tagged: {e}")))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.contains("exists") && !stderr.contains("already") {
+                    tracing::warn!(
+                        iface = %p.iface, vid, stderr = %stderr.trim(),
+                        "bridge vlan add tagged failed"
+                    );
+                }
+            } else {
+                tracing::info!(iface = %p.iface, vid, "bridge vlan tagged added");
+            }
+        }
+    }
+    // Bridge itself usually needs vid 1 self-port so it can
+    // originate + receive untagged management frames — left to
+    // operator discretion in v1 (declare via vlan_ports with
+    // iface = bridge name if needed). Most VLAN-aware setups
+    // assign mgmt IP directly on a sub-iface rather than the
+    // bridge itself anyway.
+    Ok(())
+}
+
 pub fn enable_ipv4_forwarding() -> Result<(), Error> {
     std::fs::write("/proc/sys/net/ipv4/ip_forward", "1\n")?;
     Ok(())

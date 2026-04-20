@@ -335,6 +335,8 @@ mod tests {
                     name: "lan".to_string(),
                     bridge: "br-lan".to_string(),
                     members: vec!["lan1".to_string()],
+                    vlan_filtering: false,
+                    vlan_ports: vec![],
                     address: Ipv4Addr::new(192, 168, 1, 1),
                     prefix: 24,
                     ipv6_address: None,

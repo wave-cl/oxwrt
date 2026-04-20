@@ -278,6 +278,23 @@ pub struct VpnClient {
 fn default_vpn_priority() -> u32 {
     100
 }
+
+/// Per-port VLAN configuration for a VLAN-aware bridge
+/// (`[[networks]] type="lan" vlan_filtering=true`). Maps one
+/// bridge member iface to its VLAN behavior. See
+/// `Network::Lan.vlan_ports` for the role semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VlanPort {
+    /// Member iface name (must also appear in `members`).
+    pub iface: String,
+    /// Default VID for untagged ingress / egress-untagged. None =
+    /// trunk-only (tagged mode).
+    #[serde(default)]
+    pub pvid: Option<u16>,
+    /// VIDs this port passes as tagged. Empty = access port only.
+    #[serde(default)]
+    pub tagged: Vec<u16>,
+}
 fn default_vpn_key_path() -> String {
     "/etc/oxwrt/vpn-client.key".to_string()
 }
@@ -470,6 +487,31 @@ pub enum Network {
         bridge: String,
         #[serde(default)]
         members: Vec<String>,
+        /// Enable 802.1Q VLAN-aware bridging on this bridge
+        /// (`ip link set <bridge> type bridge vlan_filtering 1`).
+        /// When true, per-port VLAN configuration in `vlan_ports`
+        /// takes effect; each port declares either a PVID
+        /// (untagged-frame default VID) or a set of tagged VIDs
+        /// (trunk port). Without this flag, `members` ports all
+        /// forward everything as untagged and `vlan_ports` is
+        /// ignored.
+        #[serde(default)]
+        vlan_filtering: bool,
+        /// Per-port VLAN configuration for VLAN-aware bridges.
+        /// Each entry maps a member iface to its VLAN role:
+        ///   - `pvid = Some(X)` + empty `tagged` → access port for
+        ///     VID X; untagged frames ingress as VID X, egress
+        ///     untagged.
+        ///   - `pvid = None` + non-empty `tagged` → trunk port;
+        ///     only tagged frames on the listed VIDs pass.
+        ///   - Both set → hybrid port; untagged = pvid, plus
+        ///     tagged on the listed VIDs.
+        ///
+        /// Ifaces in `members` NOT listed in `vlan_ports` get the
+        /// bridge's default (PVID 1 untagged) when vlan_filtering
+        /// is enabled.
+        #[serde(default)]
+        vlan_ports: Vec<VlanPort>,
         address: Ipv4Addr,
         prefix: u8,
         /// Static IPv6 address to assign to the bridge. Typically a

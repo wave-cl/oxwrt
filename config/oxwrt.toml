@@ -126,6 +126,22 @@ name = "lan"
 type = "lan"
 bridge = "br-lan"
 members = ["lan1", "lan2", "lan3", "lan4", "lan5"]
+# VLAN-aware bridging (802.1Q filtering on br-lan). When true,
+# `vlan_ports` assigns per-port VIDs — access ports declare
+# pvid (default untagged VID), trunk ports declare tagged VIDs,
+# hybrid ports declare both. Without this flag, every member
+# port forwards everything untagged and vlan_ports is ignored.
+# The dot-notation alternative (e.g. `eth0.10` subifaces in a
+# Simple network) is simpler for one-or-two-VLAN setups; turn
+# on vlan_filtering here for managed-switch-style trunking.
+#
+# vlan_filtering = false
+#
+# vlan_ports = [
+#   { iface = "lan4", pvid = 10 },                    # access port VID 10
+#   { iface = "lan5", tagged = [1, 10, 20] },         # trunk: mgmt + 10 + 20
+#   { iface = "lan3", pvid = 1, tagged = [10] },      # hybrid: default + VID 10 tagged
+# ]
 address = "192.168.50.1"
 prefix = 24
 # IPv6 ULA (fd00::/8, RFC 4193). Chosen deterministically rather
