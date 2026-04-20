@@ -62,22 +62,42 @@ pub fn render(cfg: &Config) -> String {
         // not `fd::1/64` (SLAAC is keyed on the network prefix, not
         // the router's host bits).
         let net_prefix = mask_prefix(addr, prefix);
-        // advertise-on iface: bridge for Lan, iface for Simple.
-        let iface = match net {
-            Network::Lan { bridge, .. } => bridge.as_str(),
-            Network::Simple { iface, .. } => iface.as_str(),
+        // advertise-on iface + optional per-net RA override.
+        let (iface, ra) = match net {
+            Network::Lan {
+                bridge,
+                router_advertisements,
+                ..
+            } => (bridge.as_str(), router_advertisements.as_ref()),
+            Network::Simple {
+                iface,
+                router_advertisements,
+                ..
+            } => (iface.as_str(), router_advertisements.as_ref()),
             Network::Wan { .. } => continue,
         };
+        let max_interval = ra
+            .and_then(|r| r.max_interval_s)
+            .map(|n| format!("{n}s"))
+            .unwrap_or_else(|| "180s".to_string());
+        let min_interval = ra
+            .and_then(|r| r.min_interval_s)
+            .map(|n| format!("\"{n}s\""))
+            .unwrap_or_else(|| "\"auto\"".to_string());
+        let default_lifetime = ra
+            .and_then(|r| r.default_lifetime_s)
+            .map(|n| format!("{n}s"))
+            .unwrap_or_else(|| "1800s".to_string());
+        let managed = ra.map(|r| r.managed).unwrap_or(false);
+        let other_config = ra.map(|r| r.other_config).unwrap_or(false);
         writeln!(s, "[[interfaces]]").unwrap();
         writeln!(s, "  names = [\"{iface}\"]").unwrap();
         writeln!(s, "  advertise = true").unwrap();
-        writeln!(s, "  max_interval = \"180s\"").unwrap();
-        writeln!(s, "  min_interval = \"auto\"").unwrap();
-        writeln!(s, "  default_lifetime = \"1800s\"").unwrap();
-        // M=0, O=0 — pure SLAAC. Flip later when/if DHCPv6 stateful
-        // lands. Keep the field explicit so intent is obvious.
-        writeln!(s, "  managed = false").unwrap();
-        writeln!(s, "  other_config = false").unwrap();
+        writeln!(s, "  max_interval = \"{max_interval}\"").unwrap();
+        writeln!(s, "  min_interval = {min_interval}").unwrap();
+        writeln!(s, "  default_lifetime = \"{default_lifetime}\"").unwrap();
+        writeln!(s, "  managed = {managed}").unwrap();
+        writeln!(s, "  other_config = {other_config}").unwrap();
         writeln!(s).unwrap();
         writeln!(s, "  [[interfaces.prefix]]").unwrap();
         writeln!(s, "    prefix = \"{net_prefix}/{prefix}\"").unwrap();
@@ -123,6 +143,7 @@ mod tests {
                 ipv6_address: Some("fdbe:cafe::1".parse().unwrap()),
                 ipv6_prefix: Some(64),
                 ipv6_subnet_id: None,
+                router_advertisements: None,
             }],
             firewall: Firewall::default(),
             radios: vec![],
@@ -157,6 +178,42 @@ mod tests {
         assert!(out.contains(r#"names = ["br-lan"]"#));
         assert!(out.contains(r#"prefix = "fdbe:cafe::/64""#), "got:\n{out}");
         assert!(out.contains("advertise = true"));
+    }
+
+    #[test]
+    fn default_timers_when_no_override() {
+        let cfg = cfg_with_v6_lan();
+        let out = render(&cfg);
+        assert!(out.contains("max_interval = \"180s\""));
+        assert!(out.contains("min_interval = \"auto\""));
+        assert!(out.contains("default_lifetime = \"1800s\""));
+        assert!(out.contains("managed = false"));
+        assert!(out.contains("other_config = false"));
+    }
+
+    #[test]
+    fn ra_overrides_emitted() {
+        use oxwrt_api::config::RaConfig;
+        let mut cfg = cfg_with_v6_lan();
+        if let Network::Lan {
+            router_advertisements,
+            ..
+        } = &mut cfg.networks[0]
+        {
+            *router_advertisements = Some(RaConfig {
+                max_interval_s: Some(30),
+                min_interval_s: Some(10),
+                default_lifetime_s: Some(0),
+                managed: true,
+                other_config: true,
+            });
+        }
+        let out = render(&cfg);
+        assert!(out.contains("max_interval = \"30s\""));
+        assert!(out.contains("min_interval = \"10s\""));
+        assert!(out.contains("default_lifetime = \"0s\""));
+        assert!(out.contains("managed = true"));
+        assert!(out.contains("other_config = true"));
     }
 
     #[test]

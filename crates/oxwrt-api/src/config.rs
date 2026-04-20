@@ -781,6 +781,14 @@ pub enum Network {
         /// delegation that's up to 256 networks (8 bits of room).
         #[serde(default)]
         ipv6_subnet_id: Option<u16>,
+        /// Per-network IPv6 router-advertisement overrides. When
+        /// omitted, corerad gets oxwrt's defaults (180s max, auto
+        /// min, 1800s default lifetime, M=O=false). Operators who
+        /// need shorter intervals for RFC7084-strict CPE behind
+        /// this box, or M=1/O=1 to hand off addressing to a DHCPv6
+        /// server, set them here.
+        #[serde(default)]
+        router_advertisements: Option<RaConfig>,
     },
     Simple {
         name: String,
@@ -809,7 +817,44 @@ pub enum Network {
         /// anything they want.
         #[serde(default)]
         vlan_parent: Option<String>,
+        /// See `Lan.router_advertisements` — same semantics on
+        /// Simple networks (guest, IoT, VLAN sub-ifaces).
+        #[serde(default)]
+        router_advertisements: Option<RaConfig>,
     },
+}
+
+/// Per-network IPv6 router-advertisement overrides. All fields
+/// optional — missing knobs fall back to the daemon's defaults,
+/// which match corerad's defaults for the common SLAAC-only case.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RaConfig {
+    /// Max seconds between unsolicited RAs. corerad default 180.
+    /// Lower = faster prefix propagation on churn, more broadcast
+    /// traffic. Upper limit per RFC 4861 is 1800.
+    #[serde(default)]
+    pub max_interval_s: Option<u64>,
+    /// Min seconds between RAs. `None` = corerad "auto" mode
+    /// (derived as 0.33 * max_interval). Explicit value lets
+    /// operators tighten the jitter envelope.
+    #[serde(default)]
+    pub min_interval_s: Option<u64>,
+    /// Default router lifetime in seconds advertised to clients.
+    /// corerad default 1800. Zero advertises "not a default
+    /// router" — useful when this box serves RA-DNS/PD but
+    /// another device is the actual gateway.
+    #[serde(default)]
+    pub default_lifetime_s: Option<u64>,
+    /// Managed-address-configuration (M) flag. Default false
+    /// (SLAAC). Set true when a DHCPv6 server on the LAN is
+    /// handing out addresses.
+    #[serde(default)]
+    pub managed: bool,
+    /// Other-configuration (O) flag. Default false. Set true to
+    /// tell clients to fetch DNS etc. via stateless DHCPv6 even
+    /// though addresses are SLAAC-derived.
+    #[serde(default)]
+    pub other_config: bool,
 }
 
 impl Network {

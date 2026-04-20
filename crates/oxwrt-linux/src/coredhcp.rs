@@ -198,6 +198,7 @@ mod tests {
                 ipv6_address: None,
                 ipv6_prefix: None,
                 ipv6_subnet_id: None,
+                router_advertisements: None,
             }],
             firewall: Firewall::default(),
             radios: vec![],
