@@ -504,7 +504,7 @@ fn is_exists(err: &rtnetlink::Error) -> bool {
 /// addresses (low bit of first octet set) — DHCP servers ignore
 /// DISCOVERs with a multicast source, so that shape can't work on
 /// a WAN link and is almost certainly a typo.
-pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6], Error> {
+pub fn parse_mac(s: &str) -> Result<[u8; 6], Error> {
     let normalized = s.replace('-', ":");
     let parts: Vec<&str> = normalized.split(':').collect();
     if parts.len() != 6 {

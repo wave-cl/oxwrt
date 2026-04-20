@@ -371,14 +371,87 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                 ),
             }
         }
+        "wol" => match diag_wol(state, args).await {
+            Ok(text) => Response::Value { value: text },
+            Err(e) => Response::Err {
+                message: format!("diag wol: {e}"),
+            },
+        },
         other => Response::Err {
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
                  modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, ping-many, \
-                 traceroute, dig, stall)"
+                 traceroute, dig, stall, wol)"
             ),
         },
     }
+}
+
+/// Send a Wake-on-LAN magic packet to `<mac>` via UDP broadcast on
+/// the LAN. Bound to the LAN's IPv4 address so the kernel picks
+/// the right iface (on a router, the default route leaves via WAN
+/// — a bare `255.255.255.255` send would go the wrong way).
+///
+/// Magic packet per the WoL spec: 6 bytes of 0xFF followed by 16
+/// repetitions of the target MAC (102 bytes total). Sent to UDP
+/// port 9 (discard) at the LAN's directed broadcast address.
+async fn diag_wol(state: &ControlState, args: &[String]) -> Result<String, String> {
+    use oxwrt_api::config::Network;
+    let mac_str = args
+        .first()
+        .ok_or("missing <mac> (e.g. aa:bb:cc:dd:ee:ff)")?;
+    let mac = crate::net::parse_mac(mac_str).map_err(|e| e.to_string())?;
+
+    // First LAN/Simple network defines the broadcast domain.
+    let cfg = state.config_snapshot();
+    let (lan_addr, lan_prefix) = cfg
+        .networks
+        .iter()
+        .find_map(|n| match n {
+            Network::Lan {
+                address, prefix, ..
+            }
+            | Network::Simple {
+                address, prefix, ..
+            } => Some((*address, *prefix)),
+            _ => None,
+        })
+        .ok_or("no LAN / Simple network configured to send from")?;
+    let broadcast = directed_broadcast(lan_addr, lan_prefix);
+
+    let mut packet = Vec::with_capacity(6 + 16 * 6);
+    packet.extend_from_slice(&[0xff; 6]);
+    for _ in 0..16 {
+        packet.extend_from_slice(&mac);
+    }
+
+    let sock = tokio::net::UdpSocket::bind((lan_addr, 0))
+        .await
+        .map_err(|e| format!("bind {lan_addr}:0: {e}"))?;
+    sock.set_broadcast(true)
+        .map_err(|e| format!("set_broadcast: {e}"))?;
+    sock.send_to(&packet, (broadcast, 9))
+        .await
+        .map_err(|e| format!("send_to {broadcast}:9: {e}"))?;
+
+    Ok(format!(
+        "sent WoL magic packet to {mac_str} via {broadcast}:9 (from {lan_addr})\n"
+    ))
+}
+
+/// Directed-broadcast address for a /prefix network containing
+/// `addr` (e.g. 192.168.50.1/24 → 192.168.50.255). `/32` returns
+/// the address itself; no-op at prefix=0 since the whole
+/// universe is one "network".
+fn directed_broadcast(addr: std::net::Ipv4Addr, prefix: u8) -> std::net::Ipv4Addr {
+    if prefix >= 32 {
+        return addr;
+    }
+    let shift = 32 - u32::from(prefix);
+    let mask = !((1u32 << shift) - 1);
+    let base = u32::from(addr) & mask;
+    let bcast = base | !mask;
+    std::net::Ipv4Addr::from(bcast)
 }
 
 async fn diag_links() -> Result<String, String> {
@@ -1126,6 +1199,44 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
         out.push_str("(no tables)\n");
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod wol_tests {
+    use super::directed_broadcast;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn slash_24_broadcast() {
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(192, 168, 50, 1), 24),
+            Ipv4Addr::new(192, 168, 50, 255)
+        );
+    }
+
+    #[test]
+    fn slash_16_broadcast() {
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(10, 0, 0, 1), 16),
+            Ipv4Addr::new(10, 0, 255, 255)
+        );
+    }
+
+    #[test]
+    fn slash_30_broadcast() {
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(10, 0, 0, 1), 30),
+            Ipv4Addr::new(10, 0, 0, 3)
+        );
+    }
+
+    #[test]
+    fn slash_32_returns_self() {
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(10, 0, 0, 5), 32),
+            Ipv4Addr::new(10, 0, 0, 5)
+        );
+    }
 }
 
 #[cfg(test)]

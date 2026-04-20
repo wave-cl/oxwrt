@@ -509,6 +509,12 @@ R=$(run_cmd diag links); check "diag links (has lo)" "lo" "$R"
 check "diag links (has eth0)" "eth0" "$R"
 R=$(run_cmd diag nft); check "diag nft (has input chain)" "chain input" "$R"
 R=$(run_cmd diag conntrack); check "diag conntrack (runs)" "" "$R"
+# Wake-on-LAN: bare `diag wol` with no MAC arg surfaces a clear
+# error. A valid send would require a reachable LAN broadcast
+# domain which this harness doesn't model, so we test the
+# validator path only.
+R=$(run_cmd diag wol); check_err "diag wol without mac rejected" "missing" "$R"
+R=$(run_cmd diag wol "zzz"); check_err "diag wol invalid mac rejected" "hex" "$R"
 
 echo "-- reload dry-run --"
 # Clean config — dry-run must pass before the reload runs it for
