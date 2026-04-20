@@ -214,6 +214,22 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             Ok(Request::Restore { data_b64, confirm })
         }
+        "rollback" => {
+            // Revert the live config pair to the last-good snapshot
+            // oxwrtd took after the most recent successful reload,
+            // then reload. --confirm gate because the current
+            // config is discarded (not saved anywhere else) and
+            // rollback may flap services visibly.
+            let confirm = args.iter().any(|a| a == "--confirm");
+            if !confirm {
+                return Err(
+                    "rollback: refusing to roll back without --confirm \
+                     (discards current config; reverts to the last-good snapshot)"
+                        .to_string(),
+                );
+            }
+            Ok(Request::Rollback { confirm: true })
+        }
         "config-push" => {
             let path = args.first().ok_or("config-push: missing TOML file path")?;
             let toml = std::fs::read_to_string(path)

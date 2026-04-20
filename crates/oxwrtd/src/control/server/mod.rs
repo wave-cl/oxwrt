@@ -241,6 +241,13 @@ impl Server {
                 send.finish().ok();
                 continue;
             }
+            // Rollback: revert to the last-good snapshot + reload.
+            if let Request::Rollback { confirm } = &request {
+                let resp = rollback::handle_rollback(&self.state, *confirm).await;
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
 
             // WireGuard enroll: server-generated client keypair + a
             // rendered [Interface]+[Peer] .conf text for the operator
@@ -283,6 +290,7 @@ mod logs;
 mod reboot;
 mod reload;
 mod reset;
+pub mod rollback;
 mod set;
 mod sysupgrade;
 
@@ -434,6 +442,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::Restore { .. } => vec![Response::Err {
             message: "BUG: Restore should be handled async upstream".to_string(),
+        }],
+        Request::Rollback { .. } => vec![Response::Err {
+            message: "BUG: Rollback should be handled async upstream".to_string(),
         }],
         Request::ConfigPush { .. } => vec![Response::Err {
             message: "BUG: ConfigPush should be handled upstream".to_string(),

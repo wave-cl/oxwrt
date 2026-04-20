@@ -129,6 +129,21 @@ pub enum Request {
         data_b64: String,
         confirm: bool,
     },
+    /// Revert `/etc/oxwrt/oxwrt.toml` (+ secrets overlay) to the
+    /// last-known-good snapshot oxwrtd captured after the most
+    /// recent successful reload, then reload so the reverted
+    /// config takes effect.
+    ///
+    /// `confirm` MUST be true — rollback discards the current
+    /// config (it's not saved anywhere else) and may change the
+    /// firewall + services visibly.
+    ///
+    /// Fails with a clear error if no last-good snapshot exists
+    /// (fresh flash that never successfully reloaded, or the
+    /// operator deleted `.last-good.toml` by hand).
+    Rollback {
+        confirm: bool,
+    },
     /// Graceful system reboot. Saves urandom seed, shuts down the
     /// supervisor (stops services in reverse-dep order, reaps
     /// children, removes cgroup leaves), syncs filesystems, then

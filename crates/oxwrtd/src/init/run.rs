@@ -1201,6 +1201,19 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
         });
     }
 
+    // Boot reconcile succeeded — everything up to this point
+    // (early mounts, netdev rename, firewall install, services up,
+    // control server listening) is the known-good state oxwrt
+    // should roll back TO if a subsequent reload breaks things.
+    // First boot on a fresh flash: this creates the initial
+    // snapshot. Subsequent boots: overwrites with whatever just
+    // came up, so a post-sysupgrade config that boots is
+    // automatically promoted to last-good.
+    let snap_path = std::env::var("OXWRT_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(crate::config::DEFAULT_PATH));
+    crate::control::server::rollback::take_snapshot(&snap_path);
+
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

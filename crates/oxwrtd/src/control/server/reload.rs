@@ -525,6 +525,12 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     // during the metrics live-verify.
     crate::metrics::apply(state);
 
+    // Snapshot: the live config just successfully reconciled, so
+    // it's now the last-known-good. Overwrites any previous
+    // snapshot. Non-fatal; see rollback::take_snapshot for the
+    // error-handling rationale.
+    super::rollback::take_snapshot(std::path::Path::new(crate::config::DEFAULT_PATH));
+
     tracing::info!("config reloaded, firewall reinstalled, supervisor rebuilt");
     Response::Ok
 }
