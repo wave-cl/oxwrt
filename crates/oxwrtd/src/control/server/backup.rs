@@ -1,4 +1,5 @@
-//! Backup + restore of `/etc/oxwrt.toml` + `/etc/oxwrt/`.
+//! Backup + restore of `/etc/oxwrt/` (which now contains
+//! `oxwrt.toml` + `oxwrt.secrets.toml` + crypto identity files).
 //!
 //! One tar.gz contains the identity-critical state: main config,
 //! sQUIC signing seed (`key.ed25519`), WireGuard server key
@@ -29,7 +30,6 @@ use flate2::write::GzEncoder;
 use crate::control::ControlState;
 use crate::rpc::Response;
 
-const OXWRT_TOML: &str = "/etc/oxwrt.toml";
 const OXWRT_DIR: &str = "/etc/oxwrt";
 
 /// Build the backup tarball in memory and return it as a base64
@@ -62,14 +62,6 @@ pub(super) fn handle_backup() -> Response {
 pub fn build_tarball(include_secrets: bool) -> Result<Vec<u8>, String> {
     let gz = GzEncoder::new(Vec::new(), Compression::default());
     let mut tar = tar::Builder::new(gz);
-
-    // /etc/oxwrt.toml — top-level entry "oxwrt.toml" so the archive
-    // extracts cleanly under any prefix dir (the restore side also
-    // looks up by basename, not full path, so moving the archive
-    // around doesn't break the roundtrip).
-    if let Ok(bytes) = std::fs::read(OXWRT_TOML) {
-        append_blob(&mut tar, "oxwrt.toml", &bytes)?;
-    }
 
     // /etc/oxwrt/ — recursive. Walk in sorted order for reproducible
     // tarballs (useful for SHA diffs between backups — if nothing
@@ -203,11 +195,13 @@ pub(super) async fn handle_restore(
             message: format!("restore: extract: {e}"),
         };
     }
-    // Validate that we got at least the main toml. Missing oxwrt.toml
-    // is a hard fail — backup must have been malformed.
-    if !stage.path().join("oxwrt.toml").exists() {
+    // Validate that we got the main config. Missing oxwrt.toml is
+    // a hard fail — backup must have been malformed. The archive
+    // places it at `oxwrt/oxwrt.toml` (under the /etc/oxwrt/ tree
+    // walk), matching the post-DEFAULT_PATH-migration layout.
+    if !stage.path().join("oxwrt/oxwrt.toml").exists() {
         return Response::Err {
-            message: "restore: tarball missing oxwrt.toml".to_string(),
+            message: "restore: tarball missing oxwrt/oxwrt.toml".to_string(),
         };
     }
     // Swap in.
@@ -263,11 +257,6 @@ fn extract_to(bytes: &[u8], dst: &Path) -> Result<(), String> {
 }
 
 fn swap_live(stage: &Path) -> Result<(), String> {
-    // /etc/oxwrt.toml
-    let src_toml = stage.join("oxwrt.toml");
-    if src_toml.exists() {
-        std::fs::copy(&src_toml, OXWRT_TOML).map_err(|e| format!("copy toml: {e}"))?;
-    }
     // /etc/oxwrt/ — clobber existing files. We do NOT rm the entire
     // dir first: some files (e.g. debug-ssh host keys) may legit
     // exist on-device but not in the backup (tarball was taken

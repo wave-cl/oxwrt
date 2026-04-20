@@ -12,14 +12,9 @@ use serde::{Deserialize, Serialize};
 /// operator config-push changes. Files under `/etc/oxwrt/` are
 /// NOT in the tgz (sysupgrade.conf lists the dir separately
 /// and the reload survives the extract). Empirically verified
-/// on MT7986 f2fs+overlay by watching upper_size via forensic
-/// logs — oxwrt/urandom.seed persists, oxwrt.toml in /etc/
-/// reverts.
+/// on MT7986 f2fs+overlay; `oxwrt/urandom.seed` persisted while
+/// `oxwrt.toml` in `/etc/` kept reverting.
 pub const DEFAULT_PATH: &str = "/etc/oxwrt/oxwrt.toml";
-
-/// Legacy path we read as a fallback for devices flashed before
-/// the primary path moved.
-pub const LEGACY_PATH: &str = "/etc/oxwrt.toml";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -2020,24 +2015,10 @@ impl Config {
     /// operator running without secrets / dev). Missing
     /// `primary` is an error.
     pub fn load_with_secrets(primary: &Path, secrets: &Path) -> Result<Self, Error> {
-        // Resolve primary: honour the legacy /etc/oxwrt.toml
-        // fallback on fresh-reflash devices, same as `load`.
-        let effective: PathBuf = match std::fs::metadata(primary) {
-            Ok(_) => primary.to_path_buf(),
-            Err(_) if primary == Path::new(DEFAULT_PATH) => {
-                let legacy = Path::new(LEGACY_PATH);
-                if std::fs::metadata(legacy).is_ok() {
-                    legacy.to_path_buf()
-                } else {
-                    primary.to_path_buf()
-                }
-            }
-            Err(_) => primary.to_path_buf(),
-        };
-        let base_text = read_text(&effective)?;
+        let base_text = read_text(primary)?;
         let mut base: toml::Value =
             toml::from_str(&base_text).map_err(|source| Error::Parse {
-                path: effective.clone(),
+                path: primary.to_path_buf(),
                 source,
             })?;
         if std::fs::metadata(secrets).is_ok() {
@@ -2051,7 +2032,7 @@ impl Config {
         }
         apply_env_overlay(&mut base);
         base.try_into().map_err(|source| Error::Parse {
-            path: effective,
+            path: primary.to_path_buf(),
             source,
         })
     }
