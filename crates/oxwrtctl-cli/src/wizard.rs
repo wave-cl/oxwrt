@@ -287,6 +287,34 @@ fn render(i: &Inputs) -> String {
         writeln!(s, "[metrics]").unwrap();
         writeln!(s, "listen = \"{}:9100\"\n", i.lan_router).unwrap();
     }
+    // [dns] — forwarding resolver, rendered to /etc/oxwrt/named.toml.
+    // Two DoH upstreams: operator can swap / add / remove freely.
+    writeln!(s, "[dns]").unwrap();
+    writeln!(s, "listen_v4 = [\"0.0.0.0\"]").unwrap();
+    writeln!(s, "listen_port = 15353\n").unwrap();
+    writeln!(s, "[[dns.upstreams]]").unwrap();
+    writeln!(s, "ip = \"1.1.1.1\"").unwrap();
+    writeln!(s, "protocol = \"https\"").unwrap();
+    writeln!(s, "server_name = \"cloudflare-dns.com\"").unwrap();
+    writeln!(s, "path = \"/dns-query\"\n").unwrap();
+    writeln!(s, "[[dns.upstreams]]").unwrap();
+    writeln!(s, "ip = \"9.9.9.9\"").unwrap();
+    writeln!(s, "protocol = \"https\"").unwrap();
+    writeln!(s, "server_name = \"dns.quad9.net\"").unwrap();
+    writeln!(s, "path = \"/dns-query\"\n").unwrap();
+    // [dhcp] — pool auto-derives to .100-.250 of the LAN subnet.
+    writeln!(s, "[dhcp]").unwrap();
+    writeln!(s, "network = \"lan\"").unwrap();
+    writeln!(s, "lease_time = \"12h\"\n").unwrap();
+    // [ntp] — upstream pool + LAN server on :1123 (firewall DNATs :123).
+    writeln!(s, "[ntp]").unwrap();
+    writeln!(s, "poll_min = 4").unwrap();
+    writeln!(s, "poll_max = 10").unwrap();
+    writeln!(s, "listen = [\"0.0.0.0:1123\"]\n").unwrap();
+    writeln!(s, "[[ntp.sources]]").unwrap();
+    writeln!(s, "mode = \"pool\"").unwrap();
+    writeln!(s, "address = \"pool.ntp.org\"").unwrap();
+    writeln!(s, "count = 4\n").unwrap();
     writeln!(s, "[control]").unwrap();
     writeln!(s, "listen = [\"[::]:51820\"]").unwrap();
     writeln!(s, "authorized_keys = \"/etc/oxwrt/authorized_keys\"").unwrap();

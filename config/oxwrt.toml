@@ -27,6 +27,30 @@
 # into a newly-created `oxwrt.secrets.toml`, leaving this public
 # file genuinely publishable.
 #
+# ── Cryptographic identity vs. configuration ──
+# The TOML pair describes CONFIG. It references four classes of
+# IDENTITY artifact that live as separate files (not inline):
+#
+#   /etc/oxwrt/key.ed25519     sQUIC server signing seed. Auto-
+#                              generated on first boot if missing.
+#                              Clients pin its derived pubkey via
+#                              SQUIC_SERVER_KEY — print it with
+#                              `oxctl --print-server-key` on-device.
+#   /etc/oxwrt/wg0.key         WireGuard server private key. Auto-
+#                              generated on first boot. Peers pin
+#                              its pubkey (derive with `wg pubkey`).
+#   /etc/oxwrt/vpn/<name>.key  VPN client private key(s). Provider-
+#                              issued (Mullvad / Proton portal) —
+#                              operator stages these; no auto-gen.
+#   /etc/oxwrt/dhcp6-duid      DHCPv6 DUID-LL, derived once from
+#                              WAN MAC. Preserved across reboots so
+#                              ISP-side PD bindings don't rotate.
+#
+# These live OUTSIDE the TOML pair on purpose: a pasted oxwrt.toml
+# in a bug report should never leak device identity, and a restored
+# backup shouldn't silently replace another router's crypto identity
+# with someone else's. Schema fields reference them via `*_path`.
+#
 # Section index:
 #   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
 #                  failover via priority/probe_target
@@ -516,6 +540,8 @@ action = "accept"
 # ── Optional on [[wireguard]] ──
 #   iface         String  — kernel iface; default = name.
 #   key_path      String  — default "/etc/oxwrt/wg0.key".
+#                           Auto-generated on first boot if missing;
+#                           persists across reboots + sysupgrades.
 #
 # ── Required on [[wireguard.peers]] ──
 #   name          String  — CRUD key, operator label.
@@ -591,6 +617,11 @@ action = "accept"
 # ── Optional ──
 #   priority                u32    — default 100. Lower = preferred.
 #   key_path                String — default /etc/oxwrt/vpn-client.key.
+#                                    Provider-issued (Mullvad/Proton
+#                                    portal); `vpn-profile import`
+#                                    stages it at this path. NOT
+#                                    auto-generated — the provider
+#                                    must know the matching pubkey.
 #   dns                     Vec<Ipv4Addr> — provider DNS, reached via tunnel.
 #   mtu                     u32    — default 1420.
 #   preshared_key_path      String — base64 PSK file.
@@ -1352,6 +1383,12 @@ count = 4
 # operator can reach it from their laptop without ssh. Adding a
 # network's router IP (e.g. "10.99.0.1:51820") would also work
 # if `allow_control_plane = true` on that zone.
+#
+# The daemon's server-side signing seed (identity, NOT config) is
+# at /etc/oxwrt/key.ed25519 — auto-generated on first boot. Derive
+# the server pubkey clients should pin with:
+#   oxctl --print-server-key
+# (or read it out of the boot log — the daemon emits it at startup).
 
 [control]
 listen = ["[::1]:51820", "192.168.50.1:51820"]
