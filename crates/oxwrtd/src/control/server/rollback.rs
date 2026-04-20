@@ -26,11 +26,9 @@ use std::path::{Path, PathBuf};
 use crate::control::ControlState;
 use crate::rpc::Response;
 
-/// Basename of the public config, relative to its parent dir.
-/// Matches `config::DEFAULT_PATH`'s basename — kept here as a
-/// literal so the snapshot path logic isn't coupled to a specific
-/// dir layout.
-const PUBLIC_BASENAME: &str = "oxwrt.toml";
+/// Basename of the secrets-overlay file, relative to the live
+/// public config's parent dir. Matches the sibling rule in
+/// `config::load_with_secrets`.
 const SECRETS_BASENAME: &str = "oxwrt.secrets.toml";
 const PUBLIC_SNAPSHOT_BASENAME: &str = "oxwrt.toml.last-good";
 const SECRETS_SNAPSHOT_BASENAME: &str = "oxwrt.secrets.toml.last-good";
@@ -106,6 +104,23 @@ pub fn take_snapshot(public_path: &Path) {
 pub fn has_snapshot(public_path: &Path) -> bool {
     let (public_snap, _, _) = snapshot_paths(public_path);
     public_snap.exists()
+}
+
+/// Cheap byte-compare of the live public (+ secrets) against the
+/// snapshot. Returns true when they match — the common "reload
+/// failed but the config we loaded IS the snapshot" case, so
+/// auto-restore has nothing to revert to.
+pub fn live_matches_snapshot(public_path: &Path) -> bool {
+    let (public_snap, secrets_live, secrets_snap) = snapshot_paths(public_path);
+    let live_pub = std::fs::read(public_path).unwrap_or_default();
+    let snap_pub = std::fs::read(&public_snap).unwrap_or_default();
+    if live_pub != snap_pub {
+        return false;
+    }
+    // Secrets: both absent or both present + equal.
+    let live_sec = std::fs::read(&secrets_live).ok();
+    let snap_sec = std::fs::read(&secrets_snap).ok();
+    live_sec == snap_sec
 }
 
 /// Copy the `.last-good` snapshot back over the live pair.
@@ -230,6 +245,33 @@ mod tests {
         restore_snapshot(&public).unwrap();
         assert!(std::fs::read_to_string(&public).unwrap().contains("nosec"));
         assert!(!tmp.path().join("oxwrt.secrets.toml").exists());
+    }
+
+    #[test]
+    fn live_matches_snapshot_detects_equality() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        std::fs::write(&public, "hostname = \"a\"\n").unwrap();
+        take_snapshot(&public);
+        assert!(live_matches_snapshot(&public));
+        std::fs::write(&public, "hostname = \"b\"\n").unwrap();
+        assert!(!live_matches_snapshot(&public));
+    }
+
+    #[test]
+    fn live_matches_snapshot_detects_secrets_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        let secrets = tmp.path().join("oxwrt.secrets.toml");
+        std::fs::write(&public, "hostname = \"x\"\n").unwrap();
+        std::fs::write(&secrets, "[[wifi]]\nssid = \"s\"\npassphrase = \"p\"\n")
+            .unwrap();
+        take_snapshot(&public);
+        assert!(live_matches_snapshot(&public));
+        // Add a secret that didn't exist at snapshot time.
+        std::fs::write(&secrets, "[[wifi]]\nssid = \"s\"\npassphrase = \"q\"\n")
+            .unwrap();
+        assert!(!live_matches_snapshot(&public));
     }
 
     #[test]

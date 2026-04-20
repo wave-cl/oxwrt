@@ -5,11 +5,91 @@ use super::*;
 
 pub async fn handle_reload_async(state: &std::sync::Arc<ControlState>) -> Response {
     let start = std::time::Instant::now();
-    let resp = handle_reload_inner(state).await;
+    let first = handle_reload_inner(state).await;
     let duration = start.elapsed();
-    let success = matches!(resp, Response::Ok);
+    let success = matches!(first, Response::Ok);
     crate::metrics_state::record_reload(success, duration);
-    resp
+
+    if success {
+        return first;
+    }
+
+    // Reload failed. Attempt a one-shot auto-restore: if a
+    // last-good snapshot exists AND it differs from what's live
+    // on disk right now, copy the snapshot back and re-run
+    // reconcile. Single level — if the recovery reload also
+    // fails, we STOP and surface a combined error. Better to
+    // admit "we're stuck, fix by hand" than recurse into an ever-
+    // older snapshot that might itself be broken.
+    //
+    // Skipped when live == snapshot (nothing to revert to), or
+    // no snapshot exists (fresh install that's never been
+    // successfully reloaded — there's no earlier known-good).
+    use super::rollback;
+    let path = std::path::Path::new(crate::config::DEFAULT_PATH);
+    let Response::Err { message: orig } = &first else {
+        return first;
+    };
+    if !rollback::has_snapshot(path) {
+        tracing::error!(
+            error = %orig,
+            "reload failed; no last-good snapshot to auto-restore from"
+        );
+        return first;
+    }
+    if rollback::live_matches_snapshot(path) {
+        tracing::error!(
+            error = %orig,
+            "reload failed and live config already matches the last-good snapshot — \
+             operator intervention needed (the snapshot itself is broken)"
+        );
+        return first;
+    }
+
+    tracing::warn!(
+        orig_error = %orig,
+        "reload failed; auto-restoring last-good snapshot + retrying"
+    );
+    if let Err(e) = rollback::restore_snapshot(path) {
+        tracing::error!(error = %e, orig_error = %orig, "auto-restore: copy failed");
+        return Response::Err {
+            message: format!(
+                "reload failed: {orig}\nauto-restore also failed while copying snapshot: {e}"
+            ),
+        };
+    }
+
+    let recovery = handle_reload_inner(state).await;
+    crate::metrics_state::record_reload(false, start.elapsed());
+    match recovery {
+        Response::Ok => {
+            tracing::warn!(
+                orig_error = %orig,
+                "auto-restore succeeded; device is back on the last-good config"
+            );
+            Response::Err {
+                message: format!(
+                    "reload failed; auto-restored to last-good snapshot.\n\
+                     original error: {orig}"
+                ),
+            }
+        }
+        Response::Err { message: recov_msg } => {
+            tracing::error!(
+                orig_error = %orig,
+                recov_error = %recov_msg,
+                "auto-restore: snapshot reload also failed — device in undefined state"
+            );
+            Response::Err {
+                message: format!(
+                    "reload failed: {orig}\n\
+                     auto-restore reload ALSO failed: {recov_msg}\n\
+                     operator intervention needed"
+                ),
+            }
+        }
+        other => other,
+    }
 }
 
 async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
