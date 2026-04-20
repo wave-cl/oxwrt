@@ -23,6 +23,13 @@ pub struct Server {
     pub signing_key: SigningKey,
     pub authorized_keys: Vec<[u8; 32]>,
     pub state: Arc<ControlState>,
+    /// Per-listener concurrent-connection cap. Shared across all
+    /// listeners (loopback + LAN bind both draw from this pool).
+    /// A `try_acquire_owned` on each incoming either returns a
+    /// permit (dropped when the connection task finishes) or
+    /// fails immediately — in which case we close the incoming
+    /// without handshake.
+    pub connection_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Server {
@@ -46,10 +53,17 @@ impl Server {
             "control: server signing keypair loaded"
         );
         let authorized_keys = load_merged_authorized_keys(control)?;
+        let slots = control.max_connections.max(1) as usize;
+        let connection_slots = Arc::new(tokio::sync::Semaphore::new(slots));
+        tracing::debug!(
+            max_connections = slots,
+            "control: sQUIC concurrent-connection cap"
+        );
         Ok(Self {
             signing_key,
             authorized_keys,
             state,
+            connection_slots,
         })
     }
 
@@ -79,8 +93,30 @@ impl Server {
                 Some(i) => i,
                 None => break,
             };
+            // Gate on the connection-slot semaphore. try_acquire
+            // succeeds-or-fails immediately; no await. If the
+            // pool is drained, close the incoming without a
+            // handshake — the operator will retry, a WAN scan
+            // gets a clean reject, and tasks already in flight
+            // aren't starved by a fresh flood.
+            let permit = match self.connection_slots.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(
+                        cap = self.connection_slots.available_permits() as i32
+                            + self.connection_slots.available_permits() as i32,
+                        "control: connection-cap reached; refusing new peer"
+                    );
+                    drop(incoming);
+                    continue;
+                }
+            };
             let this = self.clone();
             tokio::spawn(async move {
+                // Hold the permit for the lifetime of this task —
+                // dropped on return (success OR error path) via
+                // RAII, releasing the slot for the next peer.
+                let _permit = permit;
                 if let Err(e) = this.handle_incoming(incoming).await {
                     // Client disconnects-without-close (the CLI exits
                     // as soon as its single RPC finishes) show up here

@@ -1653,6 +1653,20 @@ fn default_bind_readonly() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Control {
     pub listen: Vec<String>,
+    /// Cap on concurrent sQUIC connections accepted on each
+    /// listener. Surplus connections are refused immediately
+    /// (no handshake attempt). Defaults to 32 — generous for
+    /// real operator use, tight enough that a WAN scan can't
+    /// exhaust the daemon's per-connection task state.
+    ///
+    /// Apply per listen address: `listen = ["[::1]:51820",
+    /// "192.168.50.1:51820"]` with `max_connections = 32` means
+    /// each listener tolerates up to 32, for 64 total. Tune
+    /// down for a single-operator fleet; the CLI uses one
+    /// connection per RPC and a healthy operator rarely stacks
+    /// more than a handful.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
     /// Path to a legacy plain-text file holding hex-encoded client
     /// ed25519 pubkeys (one per line, `#` comments skipped). Loaded
     /// alongside [`Control::clients`] and merged — keys from both
@@ -1768,6 +1782,10 @@ pub enum Ddns {
         /// DDNS key from the HE.net DNS dashboard.
         key: String,
     },
+}
+
+fn default_max_connections() -> u32 {
+    32
 }
 
 fn default_cf_ttl() -> u32 {
