@@ -594,7 +594,7 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
                     };
                 }
             };
-            let partial: serde_json::Value = match serde_json::from_str(json) {
+            let mut partial: serde_json::Value = match serde_json::from_str(json) {
                 Ok(v) => v,
                 Err(e) => {
                     return Response::Err {
@@ -602,7 +602,12 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
                     };
                 }
             };
-            json_merge(&mut existing, &partial);
+            // Service update uses the security-aware variant: top-level
+            // shallow-replace as usual, but `security` is deep-merged so
+            // `{"security":{"pid_namespace":true}}` means "toggle this one
+            // bit" instead of "reset every other security field to its
+            // default". See json_merge_service_update for the history.
+            crate::control::validate::json_merge_service_update(&mut existing, &mut partial);
             let updated: Service = match serde_json::from_value(existing) {
                 Ok(v) => v,
                 Err(e) => {

@@ -362,6 +362,40 @@ pub fn json_merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
     }
 }
 
+/// Service-update variant of [`json_merge`] with special-cased
+/// deep-merging of the `security` subfield.
+///
+/// Why: caught a real footgun during the 2026-04-20 pid-namespace
+/// rollout. Operators sending `{"security":{"pid_namespace":true}}`
+/// as a "just flip this one bit" update had the whole security
+/// block replaced with that single field. Since `SecurityProfile`
+/// uses `#[serde(default)]` on every field, the missing ones got
+/// silently reset to defaults — wiping `caps: [SYS_TIME]` etc.
+/// Services then crashed with cryptic EPERMs on syscalls that
+/// looked like the new sandboxing was broken.
+///
+/// Fix: if both sides carry a `security` object, pre-merge the
+/// partial onto the existing security subtree so the top-level
+/// merge sees a complete security block. Every other field keeps
+/// the documented shallow-replace semantics — only `security`
+/// gets this two-level treatment, because it's the only field
+/// that's commonly partially-updated and whose default values
+/// are subtly destructive.
+pub fn json_merge_service_update(
+    existing: &mut serde_json::Value,
+    partial: &mut serde_json::Value,
+) {
+    if let (Some(existing_sec), Some(partial_sec)) = (
+        existing.get("security").cloned(),
+        partial.get_mut("security"),
+    ) {
+        let mut merged_sec = existing_sec;
+        json_merge(&mut merged_sec, partial_sec);
+        *partial_sec = merged_sec;
+    }
+    json_merge(existing, partial);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,6 +1006,78 @@ mod tests {
         let mut base = json!([1, 2, 3]);
         json_merge(&mut base, &json!({"x": 1}));
         assert_eq!(base, json!([1, 2, 3]));
+    }
+
+    // ── json_merge_service_update ──────────────────────────────────
+
+    /// The footgun fix: a partial `security` patch preserves
+    /// unspecified fields instead of resetting them to defaults.
+    /// This is exactly the case that wiped SYS_TIME off ntp and
+    /// NET_RAW off corerad during the 2026-04-20 pid-ns rollout.
+    #[test]
+    fn service_update_security_deep_merges() {
+        let mut existing = json!({
+            "name": "ntp",
+            "net_mode": "isolated",
+            "security": {
+                "caps": ["SETUID", "SETGID", "SETPCAP", "SYS_TIME"],
+                "no_new_privs": true,
+                "seccomp": true,
+                "seccomp_allow": [],
+                "user_namespace": false,
+                "pid_namespace": false,
+                "landlock": true
+            }
+        });
+        // Operator sends "just flip pid_namespace on":
+        let mut partial = json!({"security": {"pid_namespace": true}});
+        json_merge_service_update(&mut existing, &mut partial);
+        // caps must still be there (previously got reset to [] via
+        // Default::default on the replaced SecurityProfile).
+        assert_eq!(
+            existing["security"]["caps"],
+            json!(["SETUID", "SETGID", "SETPCAP", "SYS_TIME"])
+        );
+        assert_eq!(existing["security"]["pid_namespace"], json!(true));
+        assert_eq!(existing["security"]["landlock"], json!(true));
+    }
+
+    /// Top-level fields (net_mode, entrypoint, binds, ...) keep the
+    /// shallow-replace contract. Only `security` is special-cased.
+    #[test]
+    fn service_update_top_level_still_shallow() {
+        let mut existing = json!({
+            "name": "dns",
+            "net_mode": "isolated",
+            "binds": [{"source": "/old", "target": "/old", "readonly": true}],
+        });
+        let mut partial = json!({
+            "binds": [{"source": "/new", "target": "/new", "readonly": true}]
+        });
+        json_merge_service_update(&mut existing, &mut partial);
+        // `binds` is an array — shallow replace wins.
+        assert_eq!(
+            existing["binds"],
+            json!([{"source": "/new", "target": "/new", "readonly": true}])
+        );
+    }
+
+    /// If the partial doesn't touch security, nothing magical happens
+    /// — existing security is preserved as usual by the shallow merge
+    /// on the top level (it simply isn't in the patch).
+    #[test]
+    fn service_update_no_security_patch_is_noop_on_security() {
+        let mut existing = json!({
+            "name": "ntp",
+            "security": {"caps": ["SYS_TIME"], "pid_namespace": false},
+        });
+        let mut partial = json!({"memory_max": 1000});
+        json_merge_service_update(&mut existing, &mut partial);
+        assert_eq!(
+            existing["security"],
+            json!({"caps": ["SYS_TIME"], "pid_namespace": false})
+        );
+        assert_eq!(existing["memory_max"], json!(1000));
     }
 
     // ── check_vlan_consistency ─────────────────────────────────────
