@@ -62,6 +62,7 @@ pub enum Error {
 
 mod clock;
 pub mod console;
+mod main_loop;
 mod modules;
 mod netdev;
 mod preinit;
