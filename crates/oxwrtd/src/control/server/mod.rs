@@ -205,8 +205,8 @@ impl Server {
             // Firmware update: streaming upload on the same bi-stream.
             // The client sends the metadata frame (already read above),
             // then streams raw image bytes. We read, hash, and stage.
-            if let Request::FwUpdate { size, sha256 } = &request {
-                let resp = handle_fw_update(&mut send, &mut recv, *size, sha256).await;
+            if let Request::FwUpdate { size, sha256, sig } = &request {
+                let resp = handle_fw_update(&mut send, &mut recv, *size, sha256, sig.as_deref()).await;
                 write_frame(&mut send, &resp).await?;
                 send.finish().ok();
                 continue;
@@ -1168,6 +1168,7 @@ mod tests {
             listen: vec![],
             authorized_keys: std::path::PathBuf::from(file_path),
             clients,
+            max_connections: 32,
         }
     }
 
@@ -1223,6 +1224,7 @@ mod tests {
                 name: "same-key-new-label".into(),
                 key: key.clone(),
             }],
+            max_connections: 32,
         };
         let keys = load_merged_authorized_keys(&ctrl).unwrap();
         assert_eq!(keys.len(), 1);
@@ -1242,6 +1244,7 @@ mod tests {
                 name: "inline-only".into(),
                 key: inline_key,
             }],
+            max_connections: 32,
         };
         let keys = load_merged_authorized_keys(&ctrl).unwrap();
         assert_eq!(keys.len(), 2);

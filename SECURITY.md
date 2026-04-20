@@ -158,29 +158,34 @@ compliance requires to be credential-free.
 These are **real gaps** in the current implementation. Each is
 tracked as either "intentional v1 scope" or "genuine TODO."
 
-### Known — firmware updates are SHA-verified, not signed
+### P9 — firmware updates require a release signature (when baked)
 
 `FwUpdate` verifies `sha256(image)` against a hash the client
-sent (`sysupgrade.rs`). Any client with control-plane pubkey auth
-can trigger an update. There is **no cryptographic signature
-verification** on the image itself — a compromise of one operator
-pubkey is sufficient to push arbitrary code.
+sent (`sysupgrade.rs`) AND, when
+`/etc/oxwrt/release-pubkey.ed25519` is present on the router,
+requires the client to supply an ed25519 signature over the
+hash (`handle_fw_update` + `verify_release_signature`). Images
+built with a signing key baked in refuse unsigned update pushes;
+a compromise of one operator's control-plane pubkey no longer
+lets them install arbitrary code — they'd also need the offline
+release-signing key.
 
-Mitigation for operators: keep `control.clients` lists tight,
-rotate keys after any suspected exposure, don't share pubkey
-signing-keys across boxes.
+Clients sign with `oxctl --sign <image>`, keyed off
+`$OXWRT_SIGNING_KEY_PATH` (or `$OXWRT_SIGNING_KEY` hex).
+Dev-mode images without a baked pubkey fall through to SHA-only
+with a warning log, so self-built flows keep working.
 
-**TODO.** Implement ed25519-signed release artifacts + verify
-against a build-time embedded pubkey before sysupgrade. Tracked.
+### Known — control-plane connection cap, but no per-RPC rate limit
 
-### Known — no control-plane rate limiting
+sQUIC's accept loop gates on a `tokio::sync::Semaphore` sized to
+`cfg.control.max_connections` (default 32). Surplus connections
+are refused immediately — a WAN scan can't exhaust the
+per-connection task state. But an authenticated client *inside*
+that cap can still hammer RPCs on its held connection.
 
-sQUIC accepts connections in a naive `loop { accept; spawn }`
-(`control/server/mod.rs::listen_on`). An authenticated client can
-flood requests; an unauthenticated WAN attacker can burn CPU on
-sQUIC handshake failures. Pubkey-pin rejection is cheap enough
-that realistic WAN-scan rates don't DoS us, but there's no
-explicit guardrail.
+Mitigation today: tight `[[control.clients]]` ACL, short-lived
+connections (the CLI opens one per RPC and exits), the
+connection cap bounds the concurrent damage.
 
 **TODO.** Per-pubkey token-bucket rate limit + global
 connection-count cap.

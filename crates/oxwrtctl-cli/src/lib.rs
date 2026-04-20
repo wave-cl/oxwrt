@@ -17,6 +17,7 @@ pub mod diff;
 pub mod dump_config;
 pub mod mullvad;
 pub mod qr;
+pub mod sign;
 pub mod vpn_import;
 pub mod watch;
 pub mod wizard;

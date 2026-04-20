@@ -24,11 +24,18 @@ const FW_PROGRESS_INTERVAL: u64 = 1024 * 1024; // 1 MiB
 ///
 /// Progress frames (`FwProgress { bytes_received }`) are sent back on
 /// the send side periodically so the client can display a progress bar.
+/// Path to the baked-in release-signing pubkey. Present when the
+/// image was built with a signing key; absent on self-built /
+/// dev images. Shape: raw 32 bytes (the ed25519 VerifyingKey's
+/// byte representation).
+const RELEASE_PUBKEY_PATH: &str = "/etc/oxwrt/release-pubkey.ed25519";
+
 pub(super) async fn handle_fw_update(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     size: u64,
     expected_sha256: &str,
+    sig_hex: Option<&str>,
 ) -> Response {
     use sha2::{Digest, Sha256};
 
@@ -43,6 +50,38 @@ pub(super) async fn handle_fw_update(
         return Response::Err {
             message: "fw_update: sha256 must be 64 hex chars".to_string(),
         };
+    }
+
+    // Gate the release-signing policy before we start streaming
+    // bytes: cheap fail-fast if the client forgot the .sig or
+    // sent a malformed one. Actual signature verification runs
+    // AFTER the hash is computed (can't verify a sig over a hash
+    // that doesn't exist yet).
+    let pubkey = load_release_pubkey();
+    match (&pubkey, sig_hex) {
+        (Some(_), None) => {
+            return Response::Err {
+                message: format!(
+                    "fw_update: router has a release pubkey at {RELEASE_PUBKEY_PATH} \
+                     but the update request carries no .sig. Pass a signed image \
+                     (run `oxctl --sign <image>` on your build host, or rebuild \
+                     without the pubkey for dev-mode acceptance)."
+                ),
+            };
+        }
+        (Some(_), Some(s)) if s.len() != 128 || !s.chars().all(|c| c.is_ascii_hexdigit()) => {
+            return Response::Err {
+                message: "fw_update: sig must be 128 hex chars (ed25519 detached sig)"
+                    .to_string(),
+            };
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                "fw_update: .sig received but no {RELEASE_PUBKEY_PATH} on router; \
+                 accepting unsigned (dev-mode image)"
+            );
+        }
+        _ => {}
     }
 
     // Open temp file for writing.
@@ -112,7 +151,8 @@ pub(super) async fn handle_fw_update(
     drop(file);
 
     // Verify the hash.
-    let computed = hex::encode(hasher.finalize());
+    let digest = hasher.finalize();
+    let computed = hex::encode(digest);
     if computed != expected_sha256 {
         let _ = tokio::fs::remove_file(FW_STAGING_TMP).await;
         return Response::Err {
@@ -120,6 +160,21 @@ pub(super) async fn handle_fw_update(
                 "fw_update: SHA-256 mismatch: expected {expected_sha256}, got {computed}"
             ),
         };
+    }
+
+    // Signature verification. Gate condition from the pre-stream
+    // check above guarantees (pubkey.is_some() ↔ sig_hex.is_some()
+    // AND well-formed) by the time we reach here, so the only
+    // remaining path is "verify the bytes match the claimed
+    // signature."
+    if let (Some(pk), Some(sig_s)) = (&pubkey, sig_hex) {
+        if let Err(e) = verify_release_signature(pk, &digest[..], sig_s) {
+            let _ = tokio::fs::remove_file(FW_STAGING_TMP).await;
+            return Response::Err {
+                message: format!("fw_update: signature verify failed: {e}"),
+            };
+        }
+        tracing::info!("fw_update: release signature verified");
     }
 
     // Atomic rename to the staging path.
@@ -191,4 +246,102 @@ pub(super) fn handle_fw_apply(confirm: bool, keep_settings: bool) -> Response {
         .expect("spawn sysupgrade thread");
 
     Response::Ok
+}
+
+/// Read the baked-in release pubkey from
+/// `/etc/oxwrt/release-pubkey.ed25519`. Returns None on any error
+/// (missing file, wrong length, unreadable) — those are logged
+/// but not fatal; the caller falls through to the dev-mode path.
+fn load_release_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
+    let bytes = match std::fs::read(RELEASE_PUBKEY_PATH) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "fw_update: release pubkey unreadable at {RELEASE_PUBKEY_PATH}");
+            return None;
+        }
+    };
+    let arr: [u8; 32] = match bytes.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => {
+            tracing::warn!(
+                len = bytes.len(),
+                "fw_update: release pubkey at {RELEASE_PUBKEY_PATH} wrong length (expected 32 bytes)"
+            );
+            return None;
+        }
+    };
+    ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()
+}
+
+/// Verify that `sig_hex` is a valid ed25519 signature of
+/// `digest` bytes under `pubkey`. The signing protocol is
+/// "sign the 32 raw hash bytes" — stable, replay-safe, and
+/// cheap to compute offline via `oxctl --sign`.
+fn verify_release_signature(
+    pubkey: &ed25519_dalek::VerifyingKey,
+    digest: &[u8],
+    sig_hex: &str,
+) -> Result<(), String> {
+    use ed25519_dalek::Verifier;
+    let sig_bytes: [u8; 64] = hex::decode(sig_hex)
+        .map_err(|e| format!("decode: {e}"))?
+        .as_slice()
+        .try_into()
+        .map_err(|_| "sig must decode to 64 bytes".to_string())?;
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    pubkey
+        .verify(digest, &sig)
+        .map_err(|e| format!("verify: {e}"))
+}
+
+#[cfg(test)]
+mod signed_update_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn sign_verify_round_trip() {
+        let seed = [42u8; 32];
+        let sk = SigningKey::from_bytes(&seed);
+        let vk = sk.verifying_key();
+        let digest = [0xabu8; 32];
+        let sig = sk.sign(&digest);
+        let sig_hex = hex::encode(sig.to_bytes());
+        verify_release_signature(&vk, &digest, &sig_hex).expect("valid sig verifies");
+    }
+
+    #[test]
+    fn wrong_pubkey_rejects() {
+        let sk_a = SigningKey::from_bytes(&[1u8; 32]);
+        let sk_b = SigningKey::from_bytes(&[2u8; 32]);
+        let digest = [0xabu8; 32];
+        let sig = sk_a.sign(&digest);
+        let sig_hex = hex::encode(sig.to_bytes());
+        let err = verify_release_signature(&sk_b.verifying_key(), &digest, &sig_hex)
+            .unwrap_err();
+        assert!(err.contains("verify"));
+    }
+
+    #[test]
+    fn tampered_digest_rejects() {
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let vk = sk.verifying_key();
+        let digest = [0xabu8; 32];
+        let sig = sk.sign(&digest);
+        let sig_hex = hex::encode(sig.to_bytes());
+        let mut tampered = digest;
+        tampered[0] ^= 1;
+        assert!(verify_release_signature(&vk, &tampered, &sig_hex).is_err());
+    }
+
+    #[test]
+    fn malformed_sig_hex_rejected() {
+        let vk = SigningKey::from_bytes(&[4u8; 32]).verifying_key();
+        let digest = [0u8; 32];
+        // Not hex.
+        assert!(verify_release_signature(&vk, &digest, "zzz").is_err());
+        // Hex, wrong length (32 bytes, not 64).
+        assert!(verify_release_signature(&vk, &digest, &"aa".repeat(32)).is_err());
+    }
 }

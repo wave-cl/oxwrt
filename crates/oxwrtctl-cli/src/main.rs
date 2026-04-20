@@ -34,6 +34,11 @@ fn main() -> ExitCode {
         Some("--print-server-key") => {
             oxwrtctl_cli::print_server_key(args.into_iter().skip(1).collect())
         }
+        // `--sign`: client-local, no sQUIC. Signs a firmware
+        // image using an operator's offline ed25519 key + writes
+        // `<image>.sig`. Companion to the daemon's release-
+        // signature verify path.
+        Some("--sign") => oxwrtctl_cli::sign::run(args.into_iter().skip(1).collect()),
         // `wizard`: client-local, no sQUIC. Prompts stdin, emits
         // a starter oxwrt.toml. Takes [--out <path>] optionally.
         Some("wizard") => match oxwrtctl_cli::wizard::run(args.into_iter().skip(1).collect()) {
@@ -117,6 +122,7 @@ fn print_usage() {
                 oxctl <remote> diff <local.toml>\n\
                 oxctl wizard [--out <path>]\n\
                 oxctl dump-config [--public PATH] [--secrets PATH]\n\
+                oxctl --sign <image> [--print-pubkey]\n\
                 oxctl --print-server-key [path]\n\
                 oxctl --version\n\
                 oxctl --help\n\

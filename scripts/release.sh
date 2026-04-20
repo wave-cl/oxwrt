@@ -231,6 +231,35 @@ git tag -a "$TAG" -m "oxwrt $TAG
 
 $(echo "$GROUPED")"
 
+# ── optional: sign firmware artifacts if present ──
+# After the tag lands, look for firmware images matching
+# `build/*.bin` or `build/*.img` and emit a detached .sig next
+# to each using `oxctl --sign`. Skipped silently when no image
+# is present (which is the case when the script is invoked
+# from a source-only release — image builds live in a separate
+# `make image` target and may or may not have run yet).
+#
+# Requires OXWRT_SIGNING_KEY_PATH or OXWRT_SIGNING_KEY env set;
+# otherwise emits a warning and skips. `oxctl --sign` is built
+# from this workspace so we know it exists.
+if ls build/*.bin build/*.img 2>/dev/null | grep -q .; then
+    if [ -n "${OXWRT_SIGNING_KEY_PATH:-}${OXWRT_SIGNING_KEY:-}" ]; then
+        if [ -x target/release/oxctl ]; then
+            for img in build/*.bin build/*.img; do
+                [ -f "$img" ] || continue
+                echo "release.sh: signing $img ..."
+                target/release/oxctl --sign "$img"
+            done
+        else
+            echo "release.sh: skipping sign step — target/release/oxctl not built" >&2
+            echo "  (run: cargo build --release -p oxwrtctl-cli)" >&2
+        fi
+    else
+        echo "release.sh: firmware images present but no signing key env set — skipping signatures" >&2
+        echo "  (set OXWRT_SIGNING_KEY_PATH=./release-signing.key or OXWRT_SIGNING_KEY=<hex>)" >&2
+    fi
+fi
+
 # ── finale: paste-ready release body ──
 echo ""
 echo "==== $TAG tagged locally ===="

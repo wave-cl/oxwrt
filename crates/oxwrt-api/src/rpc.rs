@@ -58,9 +58,19 @@ pub enum Request {
     /// first, then streams the raw image bytes on the same sQUIC
     /// bi-stream (bypassing write_frame). The server reads `size` bytes,
     /// hashes on the fly, and verifies against `sha256`.
+    ///
+    /// When `/etc/oxwrt/release-pubkey.ed25519` exists on the router
+    /// (images built with a signing key baked in), `sig` is required:
+    /// the 128-hex-char ed25519 signature over the 32-byte SHA-256
+    /// hash bytes. Without the file, `sig` is optional and the daemon
+    /// falls back to SHA-only verification + a warning log — useful
+    /// for dev flows / self-built images. Closes the biggest
+    /// SECURITY.md "Known limitations" bullet.
     FwUpdate {
         size: u64,
         sha256: String,
+        #[serde(default)]
+        sig: Option<String>,
     },
     /// Firmware update phase 2: apply the staged image. Triggers
     /// `sysupgrade` and reboots. `confirm` MUST be true (same safety

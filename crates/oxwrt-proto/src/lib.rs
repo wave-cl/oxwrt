@@ -156,7 +156,28 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                     .map_err(|e| format!("update: hash {path}: {e}"))?;
                 hex::encode(hasher.finalize())
             };
-            Ok(Request::FwUpdate { size, sha256 })
+            // Detached signature: look for `<image>.sig`. If
+            // present, read it as 128 hex chars; if absent, send
+            // None and let the server decide whether that's OK
+            // (required when the router has a baked release
+            // pubkey, optional for dev images).
+            let sig_path = format!("{path}.sig");
+            let sig = match std::fs::read_to_string(&sig_path) {
+                Ok(text) => {
+                    let trimmed = text.trim().to_string();
+                    if trimmed.len() != 128 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(format!(
+                            "update: {sig_path:?}: expected 128 hex chars (ed25519 signature), \
+                             got {} chars",
+                            trimmed.len()
+                        ));
+                    }
+                    Some(trimmed)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("update: read {sig_path}: {e}")),
+            };
+            Ok(Request::FwUpdate { size, sha256, sig })
         }
         "apply" => {
             let confirm = args.iter().any(|a| a == "--confirm");
@@ -781,9 +802,10 @@ mod tests {
 
         let req = parse_request("update", &[tmp.to_str().unwrap().to_string()]).unwrap();
         match req {
-            Request::FwUpdate { size, sha256 } => {
+            Request::FwUpdate { size, sha256, sig } => {
                 assert_eq!(size, payload.len() as u64);
                 assert_eq!(sha256.len(), 64, "sha256 should be 64 hex chars");
+                assert!(sig.is_none(), "no .sig file next to the tmp image");
                 assert!(
                     sha256.chars().all(|c| c.is_ascii_hexdigit()),
                     "sha256 should be hex: {sha256}"
