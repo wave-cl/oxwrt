@@ -238,6 +238,43 @@ oxwrtd we shipped. Compromising the overlay (via a bug in our
 code, or physical access) → persistent root. Hardware-level
 secure boot would address this; out of scope v1.
 
+### Known — supervised services share the host PID namespace
+
+Services spawned via the normal (Command-based) path inherit the
+host PID namespace — `CLONE_NEWPID` is only applied when
+`user_namespace = true` is set, via the clone3 path. In practice
+that means every supervised service (none of which currently opt
+into user_namespace) can see and signal every other host process.
+
+For services whose retained cap set lacks `CAP_KILL`, this is
+largely cosmetic — a service can only signal processes matching
+its own uid, and the default `nobody`-drop in each service
+narrows that to "itself." Only **debug-ssh** retains
+`CAP_KILL`, and in that service the gap is meaningful: a
+compromised dropbear could SIGKILL oxwrtd (the PID-1 supervisor)
+or any supervised sibling, triggering a reboot or service
+outage. Confirmed live (2026-04-20 audit): `kill -0 <pid>`
+from inside the dropbear container succeeds against every
+other service's PID.
+
+Mitigation today: the other isolation layers (caps bounding-set
+drop, seccomp, mount + UTS + IPC namespaces, landlock) all
+still apply, so the damage is bounded to signal delivery. A
+compromised non-CAP_KILL service (dns, dhcp, hostapd-*, corerad,
+ntp) can enumerate host PIDs but not signal them. Read access
+to `/proc/<other-pid>/*` is the usual DAC gate — most sensitive
+files (`environ`, `root`, `maps`) return EPERM without
+`CAP_SYS_PTRACE`.
+
+**Action items.** (1) Drop `CAP_KILL` from debug-ssh — dropbear
+only needs it if it's signaling another user's processes, which
+our single-user bench setup doesn't do. (2) Consider adding an
+opt-in `pid_namespace` field to `SecurityProfile` decoupled from
+`user_namespace`, so services can gain PID-ns isolation without
+the userns rootless-mapping overhead. Blocked on: figuring out
+how the supervisor collects exit status when the spawned child
+is PID 1 inside its own namespace.
+
 ### Known — host-netns services are MITM-capable if compromised
 
 Four supervised services run in the host netns because their

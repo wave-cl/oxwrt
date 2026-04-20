@@ -1431,14 +1431,21 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 #
 # # Dropbear is a legacy C codebase that needs more caps than the
 # # default four: CHOWN/DAC_OVERRIDE/FOWNER for pty ownership transfer
-# # to the logged-in user, SETUID/SETGID/SETPCAP to drop privilege to
-# # that user, KILL to signal child shells, SYS_CHROOT for the
-# # user-session chroot, NET_BIND_SERVICE just in case the port
-# # changes below 1024. Seccomp and landlock off — adds weeks of
-# # policy-authoring work for a service that only runs during
-# # bring-up. Tighten later.
+# # to the logged-in user, SETUID/SETGID/SETPCAP to drop privilege
+# # to that user, SYS_CHROOT for the user-session chroot,
+# # NET_BIND_SERVICE just in case the port changes below 1024.
+# # Seccomp and landlock off — adds weeks of policy-authoring work
+# # for a service that only runs during bring-up. Tighten later.
+# #
+# # CAP_KILL was dropped 2026-04-20 during live audit: combined with
+# # the shared host PID namespace (SECURITY.md "Known — supervised
+# # services share the host PID namespace"), KILL would let a
+# # compromised dropbear SIGKILL oxwrtd or any sibling service.
+# # Dropbear only needs KILL to signal processes it doesn't own —
+# # our single-user bench setup (root logs in via pinned key) never
+# # hits that path.
 # [services.security]
-# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SYS_CHROOT"]
+# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SYS_CHROOT"]
 # no_new_privs = true
 # seccomp = false
 # seccomp_allow = []
