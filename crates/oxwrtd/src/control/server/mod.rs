@@ -922,22 +922,50 @@ use crate::control::validate::{
 };
 
 /// Dump the entire running config as TOML.
-/// Write config text to disk. Tries atomic tmp+rename first; falls back
-/// to direct overwrite if rename returns EBUSY (bind-mounted files in
-/// Docker / containers can't be renamed over).
+/// Write config text to disk, splitting secrets out into
+/// `oxwrt.secrets.toml` alongside the public `oxwrt.toml`.
+///
+/// Both files use the same tmp+fsync+rename pattern as
+/// `urandom_seed::save` (empirically the only shape that persists
+/// across reboots on MT7986 f2fs+overlay). The secrets file is
+/// written mode 0600 so `cat` by a non-root user fails.
+///
+/// `text` is the merged (public + secret) TOML as a single string,
+/// as produced today by `toml::to_string_pretty(&cfg)` or by
+/// operator-authored `toml_edit` edits. We re-parse it here to
+/// split — cheaper than threading DocumentMut through every
+/// caller, and keeps the split logic confined to one function.
 fn atomic_write_config(text: &str) -> Result<(), String> {
-    use std::io::Write;
+    use oxwrt_api::secrets::split_document;
     let path = std::path::Path::new(crate::config::DEFAULT_PATH);
-    // Follow the exact pattern urandom_seed::save uses (which
-    // demonstrably persists across reboots on our target): write
-    // to tmp, fsync tmp, rename, fsync parent dir. The rename
-    // vs truncate-in-place decision here is empirically what's
-    // different between paths that persist and paths that revert
-    // on MT7986 f2fs+overlay; tmp+rename wins.
+    let secrets_path = path.with_file_name("oxwrt.secrets.toml");
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("re-parse config for secrets split: {e}"))?;
+    let secret_doc = split_document(&mut doc);
+    let public_text = doc.to_string();
+    let secret_text = secret_doc.to_string();
+    atomic_write_file(path, &public_text, 0o644)?;
+    atomic_write_file(&secrets_path, &secret_text, 0o600)?;
+    Ok(())
+}
+
+/// tmp+fsync+rename atomic write, with post-rename chmod to `mode`
+/// (because create(true) respects umask rather than mode).
+fn atomic_write_file(
+    path: &std::path::Path,
+    text: &str,
+    mode: u32,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp_path = path.with_extension("toml.tmp");
+    let tmp_path = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.tmp"),
+        None => "tmp".to_string(),
+    });
     {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -947,9 +975,14 @@ fn atomic_write_config(text: &str) -> Result<(), String> {
             .map_err(|e| format!("open tmp {}: {e}", tmp_path.display()))?;
         f.write_all(text.as_bytes())
             .map_err(|e| format!("write tmp: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync tmp: {e}"))?;
+        f.sync_all().map_err(|e| format!("fsync tmp: {e}"))?;
     }
+    // Set mode pre-rename so there's no window where the file
+    // exists at its final path with default perms.
+    let _ = std::fs::set_permissions(
+        &tmp_path,
+        std::fs::Permissions::from_mode(mode),
+    );
     std::fs::rename(&tmp_path, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
         format!("rename {} → {}: {e}", tmp_path.display(), path.display())

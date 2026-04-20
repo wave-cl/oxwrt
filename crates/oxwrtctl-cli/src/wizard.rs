@@ -97,12 +97,59 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     });
 
     if let Some(path) = out_path {
-        std::fs::write(&path, &toml).map_err(|e| format!("write {path}: {e}"))?;
-        eprintln!("\n✓ wrote {}", path);
-        eprintln!("Next: `oxctl <remote> config-push {path}` then `oxctl <remote> reload`.");
+        // Split the merged wizard output into a publishable
+        // oxwrt.toml (mode 0644) and a sibling oxwrt.secrets.toml
+        // (mode 0600). The in-memory `toml` string carries the
+        // operator's fresh passphrases / pppoe password — we
+        // re-parse it via `toml_edit` so split_document can lift
+        // secret leaves cleanly, then write both files.
+        let (public_text, secret_text) = split_outputs(&toml)?;
+        let pub_path = std::path::PathBuf::from(&path);
+        let sec_path = pub_path.with_file_name("oxwrt.secrets.toml");
+        write_file_mode(&pub_path, &public_text, 0o644)?;
+        if !secret_text.trim().is_empty() {
+            write_file_mode(&sec_path, &secret_text, 0o600)?;
+            eprintln!(
+                "\n✓ wrote {} (public, mode 0644)\n✓ wrote {} (secrets, mode 0600)",
+                pub_path.display(),
+                sec_path.display(),
+            );
+        } else {
+            eprintln!("\n✓ wrote {} (public, mode 0644)", pub_path.display());
+        }
+        eprintln!(
+            "Next: copy both to /etc/oxwrt/ on the router, then\n  `oxctl <remote> reload`."
+        );
     } else {
+        // stdout path: emit merged form (dev / pipe-to-inspection).
+        // Leave a header warning the operator that this form
+        // includes secrets.
+        print!("# WARNING: merged form (contains secrets). Use `--out PATH`\n");
+        print!("# to split into oxwrt.toml + oxwrt.secrets.toml.\n");
         print!("{toml}");
     }
+    Ok(())
+}
+
+/// Parse the merged wizard TOML and split secrets out.
+/// Returns `(public, secret)` as strings.
+fn split_outputs(merged: &str) -> Result<(String, String), String> {
+    let mut doc: toml_edit::DocumentMut = merged
+        .parse()
+        .map_err(|e| format!("wizard: parse own output: {e}"))?;
+    let secret_doc = oxwrt_api::secrets::split_document(&mut doc);
+    Ok((doc.to_string(), secret_doc.to_string()))
+}
+
+fn write_file_mode(
+    path: &std::path::Path,
+    text: &str,
+    mode: u32,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -422,6 +469,50 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("networks");
         assert!(nets.len() >= 3); // wan, lan, guest
+    }
+
+    #[test]
+    fn split_outputs_separates_passphrases() {
+        let i = Inputs {
+            hostname: "test".into(),
+            timezone: "UTC".into(),
+            lan_router: "192.168.50.1".into(),
+            lan_prefix: 24,
+            wan_block: pppoe_wan_block("pppoe-user", "pppoe-secret"),
+            guest_enabled: true,
+            iot_enabled: false,
+            ssid_5g: "test5".into(),
+            pw_5g: "pw5gpass".into(),
+            ssid_2g: "test2".into(),
+            pw_2g: "pw2gpass".into(),
+            guest_ssid: Some(("guest".into(), "guestpass".into())),
+            metrics: false,
+        };
+        let merged = render(&i);
+        let (public, secret) = split_outputs(&merged).unwrap();
+        // Passphrases and pppoe password gone from public.
+        assert!(!public.contains("pw5gpass"));
+        assert!(!public.contains("pw2gpass"));
+        assert!(!public.contains("guestpass"));
+        assert!(!public.contains("pppoe-secret"));
+        // Non-secret identifiers stay.
+        assert!(public.contains("pppoe-user"));
+        assert!(public.contains("ssid = \"test5\""));
+        // All secrets land in the overlay.
+        assert!(secret.contains("pw5gpass"));
+        assert!(secret.contains("pw2gpass"));
+        assert!(secret.contains("guestpass"));
+        assert!(secret.contains("pppoe-secret"));
+        // Write both to a tmpdir and go through the real loader
+        // (which merges + deserializes) to prove the split output
+        // round-trips to a valid Config.
+        let tmp = tempfile::tempdir().unwrap();
+        let pub_path = tmp.path().join("oxwrt.toml");
+        let sec_path = tmp.path().join("oxwrt.secrets.toml");
+        std::fs::write(&pub_path, &public).unwrap();
+        std::fs::write(&sec_path, &secret).unwrap();
+        let _cfg = oxwrt_api::config::Config::load_with_secrets(&pub_path, &sec_path)
+            .expect("merged wizard output must load as a valid Config");
     }
 
     #[test]

@@ -58,3 +58,8 @@ serde.workspace = true
 serde_json.workspace = true
 # For parallel-ping the relay list in `vpn-auto-switch`.
 futures-util.workspace = true
+
+[dev-dependencies]
+# `wizard` tests round-trip generated TOML through a tmpdir +
+# `Config::load_with_secrets` to prove the split output is valid.
+tempfile.workspace = true

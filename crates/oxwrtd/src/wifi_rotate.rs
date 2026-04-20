@@ -116,43 +116,75 @@ fn generate_passphrase() -> Result<String, String> {
     Ok(out)
 }
 
-/// Patch oxwrt.toml via toml_edit so operator-hand-written
-/// comments / section ordering survive the round-trip. Writes
-/// to a tempfile + atomic rename.
+/// Patch the new passphrase into `oxwrt.secrets.toml` (sibling of
+/// the public config file). The public file is never touched —
+/// passphrases have been moved out by the config-split refactor,
+/// so writing the new value here keeps the public file publishable
+/// and just updates the overlay that the loader merges on boot.
+///
+/// Entries are addressed by ssid (not array index) because the
+/// secrets overlay is sparse and the operator may reorder the
+/// public file's `[[wifi]]` entries between boots without that
+/// having any bearing on overlay identity.
+///
+/// `config_path` is the *public* oxwrt.toml path; we derive the
+/// secrets path as its sibling `oxwrt.secrets.toml`. If absent,
+/// we create a minimal skeleton with just this ssid's entry.
 fn patch_config_passphrase(
-    path: &std::path::Path,
-    wifi_idx: usize,
-    expected_ssid: &str,
+    config_path: &std::path::Path,
+    _wifi_idx: usize,
+    ssid: &str,
     new_pw: &str,
 ) -> Result<(), String> {
-    let body = std::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
-    let mut doc: toml_edit::DocumentMut =
-        body.parse().map_err(|e| format!("parse {path:?}: {e}"))?;
+    use std::os::unix::fs::PermissionsExt;
+    let secrets_path = config_path.with_file_name("oxwrt.secrets.toml");
+    let existing = match std::fs::read_to_string(&secrets_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {secrets_path:?}: {e}")),
+    };
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| format!("parse {secrets_path:?}: {e}"))?;
+    // Ensure [[wifi]] exists.
+    if !doc.contains_key("wifi") {
+        doc.insert(
+            "wifi",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
     let wifi_arr = doc
         .get_mut("wifi")
         .and_then(|i| i.as_array_of_tables_mut())
-        .ok_or_else(|| "no [[wifi]] array in config".to_string())?;
-    // Double-check SSID matches the expected idx — an operator
-    // reorder between boot and tick would otherwise clobber the
-    // wrong network.
-    let t = wifi_arr
-        .get_mut(wifi_idx)
-        .ok_or_else(|| format!("wifi index {wifi_idx} out of bounds"))?;
-    let current_ssid = t
-        .get("ssid")
-        .and_then(|i| i.as_value())
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if current_ssid != expected_ssid {
-        return Err(format!(
-            "wifi[{wifi_idx}] ssid changed from {expected_ssid:?} to {current_ssid:?} — aborting rotation to avoid clobbering the wrong network"
-        ));
-    }
-    t["passphrase"] = toml_edit::value(new_pw.to_string());
-    // Atomic write: tempfile + rename.
-    let tmp = path.with_extension("toml.rotate-tmp");
-    std::fs::write(&tmp, doc.to_string()).map_err(|e| format!("write tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+        .ok_or_else(|| "wifi key present but not an array-of-tables".to_string())?;
+    // Find the entry for this ssid, or create a new one.
+    let existing_idx = wifi_arr.iter().position(|t| {
+        t.get("ssid")
+            .and_then(|i| i.as_value())
+            .and_then(|v| v.as_str())
+            == Some(ssid)
+    });
+    let entry = match existing_idx {
+        Some(i) => wifi_arr.get_mut(i).unwrap(),
+        None => {
+            let mut t = toml_edit::Table::new();
+            t.insert("ssid", toml_edit::value(ssid.to_string()));
+            wifi_arr.push(t);
+            let n = wifi_arr.len();
+            wifi_arr.get_mut(n - 1).unwrap()
+        }
+    };
+    entry["passphrase"] = toml_edit::value(new_pw.to_string());
+    // Atomic write: tempfile + rename, at mode 0600 since this file
+    // contains secrets.
+    let tmp = secrets_path.with_extension("toml.rotate-tmp");
+    std::fs::write(&tmp, doc.to_string())
+        .map_err(|e| format!("write tmp {tmp:?}: {e}"))?;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    std::fs::rename(&tmp, &secrets_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {tmp:?} → {secrets_path:?}: {e}")
+    })?;
     Ok(())
 }
 
