@@ -283,7 +283,8 @@ impl Server {
             // The client sends the metadata frame (already read above),
             // then streams raw image bytes. We read, hash, and stage.
             if let Request::FwUpdate { size, sha256, sig } = &request {
-                let resp = handle_fw_update(&mut send, &mut recv, *size, sha256, sig.as_deref()).await;
+                let resp =
+                    handle_fw_update(&mut send, &mut recv, *size, sha256, sig.as_deref()).await;
                 write_frame(&mut send, &resp).await?;
                 send.finish().ok();
                 continue;
@@ -471,11 +472,8 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
             let firewall_rules = state.firewall_dump.read().unwrap().len();
             let aps = collect_ap_status(&state.config_snapshot());
             let wg = collect_wg_status(&state.config_snapshot());
-            let active_wan: Option<String> = state
-                .active_wan
-                .lock()
-                .ok()
-                .and_then(|g| (*g).clone());
+            let active_wan: Option<String> =
+                state.active_wan.lock().ok().and_then(|g| (*g).clone());
             // Per-WAN breakdown — one entry per declared WAN,
             // regardless of active-ness. Cheap: reads 3 locks,
             // clones the small HashMaps inside, releases.
@@ -499,29 +497,25 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
             // Per-VPN snapshot. Same pattern as wans above —
             // read-only clone of the shared state. Empty on a
             // non-VPN router (no vpn_client declared).
-            let active_vpn: Option<String> = state
-                .active_vpn
-                .lock()
-                .ok()
-                .and_then(|g| (*g).clone());
-            let vpns: Vec<crate::rpc::VpnEntry> =
-                crate::vpn_failover::snapshot_all(
-                    &state.config_snapshot(),
-                    &state.vpn_bringup,
-                    &state.vpn_health,
-                    &state.active_vpn,
-                )
-                .into_iter()
-                .map(|s| crate::rpc::VpnEntry {
-                    name: s.name,
-                    iface: s.iface,
-                    priority: s.priority,
-                    healthy: s.healthy,
-                    active: s.active,
-                    endpoint: s.endpoint,
-                    probe_target: s.probe_target.to_string(),
-                })
-                .collect();
+            let active_vpn: Option<String> =
+                state.active_vpn.lock().ok().and_then(|g| (*g).clone());
+            let vpns: Vec<crate::rpc::VpnEntry> = crate::vpn_failover::snapshot_all(
+                &state.config_snapshot(),
+                &state.vpn_bringup,
+                &state.vpn_health,
+                &state.active_vpn,
+            )
+            .into_iter()
+            .map(|s| crate::rpc::VpnEntry {
+                name: s.name,
+                iface: s.iface,
+                priority: s.priority,
+                healthy: s.healthy,
+                active: s.active,
+                endpoint: s.endpoint,
+                probe_target: s.probe_target.to_string(),
+            })
+            .collect();
             vec![Response::Status {
                 services,
                 supervisor_uptime_secs,
@@ -1025,9 +1019,7 @@ fn load_or_create_signing_key(path: &Path) -> Result<SigningKey, Error> {
 /// logged at `warn` and skipped — the daemon should boot even with
 /// a malformed ACL entry, because the legacy file path may still
 /// admit the operator.
-fn load_merged_authorized_keys(
-    control: &crate::config::Control,
-) -> Result<Vec<[u8; 32]>, Error> {
+fn load_merged_authorized_keys(control: &crate::config::Control) -> Result<Vec<[u8; 32]>, Error> {
     use std::collections::BTreeSet;
     let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut out: Vec<[u8; 32]> = Vec::new();
@@ -1145,11 +1137,7 @@ fn atomic_write_config(text: &str) -> Result<(), String> {
 
 /// tmp+fsync+rename atomic write, with post-rename chmod to `mode`
 /// (because create(true) respects umask rather than mode).
-fn atomic_write_file(
-    path: &std::path::Path,
-    text: &str,
-    mode: u32,
-) -> Result<(), String> {
+fn atomic_write_file(path: &std::path::Path, text: &str, mode: u32) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
@@ -1172,10 +1160,7 @@ fn atomic_write_file(
     }
     // Set mode pre-rename so there's no window where the file
     // exists at its final path with default perms.
-    let _ = std::fs::set_permissions(
-        &tmp_path,
-        std::fs::Permissions::from_mode(mode),
-    );
+    let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode));
     std::fs::rename(&tmp_path, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
         format!("rename {} → {}: {e}", tmp_path.display(), path.display())

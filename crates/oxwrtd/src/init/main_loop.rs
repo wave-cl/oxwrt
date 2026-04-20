@@ -362,9 +362,7 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
             // first tick. Runs BEFORE the coordinator spawns so
             // there's no race where the coordinator's first
             // install is immediately wiped by this cleanup.
-            if let Err(e) =
-                crate::vpn_routing::cleanup_stale_endpoint_exemptions(&handle).await
-            {
+            if let Err(e) = crate::vpn_routing::cleanup_stale_endpoint_exemptions(&handle).await {
                 tracing::warn!(error = %e, "vpn_routing: exemption cleanup failed");
             }
             // IPv6 parallel. Only installed when at least one
@@ -475,7 +473,12 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
             if let Network::Wan {
                 name,
                 iface,
-                wan: WanConfig::Dhcp { send_hostname, hostname_override, vendor_class_id },
+                wan:
+                    WanConfig::Dhcp {
+                        send_hostname,
+                        hostname_override,
+                        vendor_class_id,
+                    },
                 ..
             } = w
             {
@@ -539,10 +542,9 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
                         crate::wan_routing::wan_table_id(&name, &cfg_for_wanrt),
                         lease.gateway,
                     ) {
-                        if let Err(e) = crate::wan_routing::set_wan_table_default(
-                            &handle, table_id, &iface, gw,
-                        )
-                        .await
+                        if let Err(e) =
+                            crate::wan_routing::set_wan_table_default(&handle, table_id, &iface, gw)
+                                .await
                         {
                             tracing::warn!(wan = %name, table_id, error = %e, "wan_routing: per-WAN default install failed");
                         }
@@ -875,8 +877,7 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
 
     if !cfg.vpn_client.is_empty() {
         if let Some(net_handle) = &net {
-            let probes =
-                crate::vpn_failover::spawn_probes(&cfg, state.vpn_health.clone());
+            let probes = crate::vpn_failover::spawn_probes(&cfg, state.vpn_health.clone());
             if let Ok(mut h) = state.vpn_probe_handles.lock() {
                 h.extend(probes);
             }

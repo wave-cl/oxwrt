@@ -520,9 +520,8 @@ pub fn parse_mac(s: &str) -> Result<[u8; 6], Error> {
                 "mac_address {s:?}: octet {p:?} must be two hex chars"
             )));
         }
-        out[i] = u8::from_str_radix(p, 16).map_err(|_| {
-            Error::Firewall(format!("mac_address {s:?}: octet {p:?} not hex"))
-        })?;
+        out[i] = u8::from_str_radix(p, 16)
+            .map_err(|_| Error::Firewall(format!("mac_address {s:?}: octet {p:?} not hex")))?;
     }
     if out[0] & 0x01 != 0 {
         return Err(Error::Firewall(format!(
@@ -593,7 +592,9 @@ pub(crate) fn apply_bridge_vlan_filtering(
         if let Some(vid) = p.pvid {
             let vid_s = vid.to_string();
             let out = Command::new("bridge")
-                .args(["vlan", "add", "vid", &vid_s, "dev", &p.iface, "pvid", "untagged"])
+                .args([
+                    "vlan", "add", "vid", &vid_s, "dev", &p.iface, "pvid", "untagged",
+                ])
                 .output()
                 .map_err(|e| Error::Firewall(format!("bridge vlan add pvid: {e}")))?;
             if !out.status.success() {

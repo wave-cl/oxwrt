@@ -163,10 +163,7 @@ pub fn take_snapshot(public_path: &Path) {
             );
             return;
         }
-        let _ = std::fs::set_permissions(
-            &sec_snap,
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ = std::fs::set_permissions(&sec_snap, std::fs::Permissions::from_mode(0o600));
     } else if sec_snap.exists() {
         // Live secrets disappeared between last snapshot and now
         // (operator deleted it). Clean up the stale slot-0 secrets
@@ -239,17 +236,9 @@ pub fn restore_snapshot_index(public_path: &Path, idx: usize) -> Result<(), Stri
     // has none" rule. Otherwise a rollback-to-older-than-secrets
     // would leave stale credentials around.
     if sec_snap.exists() {
-        std::fs::copy(&sec_snap, &sec_live).map_err(|e| {
-            format!(
-                "copy {} → {}: {e}",
-                sec_snap.display(),
-                sec_live.display()
-            )
-        })?;
-        let _ = std::fs::set_permissions(
-            &sec_live,
-            std::fs::Permissions::from_mode(0o600),
-        );
+        std::fs::copy(&sec_snap, &sec_live)
+            .map_err(|e| format!("copy {} → {}: {e}", sec_snap.display(), sec_live.display()))?;
+        let _ = std::fs::set_permissions(&sec_live, std::fs::Permissions::from_mode(0o600));
     } else if sec_live.exists() {
         let _ = std::fs::remove_file(&sec_live);
     }
@@ -357,10 +346,7 @@ pub fn handle_rollback_list() -> Response {
     let mut s = String::new();
     s.push_str("index  age         size   hostname\n");
     for snap in &snaps {
-        let age_s = snap
-            .mtime_secs
-            .map(|m| now.saturating_sub(m))
-            .unwrap_or(0);
+        let age_s = snap.mtime_secs.map(|m| now.saturating_sub(m)).unwrap_or(0);
         let age = format_age(age_s);
         s.push_str(&format!(
             "{:5}  {:10}  {:5}  {}\n",
@@ -543,8 +529,7 @@ mod tests {
         std::fs::write(&public, "hostname = \"old\"\n").unwrap();
         take_snapshot(&public); // no secrets at snapshot time
         std::fs::write(&public, "hostname = \"new\"\n").unwrap();
-        std::fs::write(&secrets, "[[wifi]]\nssid = \"s\"\npassphrase = \"x\"\n")
-            .unwrap();
+        std::fs::write(&secrets, "[[wifi]]\nssid = \"s\"\npassphrase = \"x\"\n").unwrap();
         restore_snapshot(&public).unwrap();
         assert!(!secrets.exists());
     }

@@ -212,10 +212,7 @@ async fn push(client: &reqwest::Client, entry: &Ddns, ip: Ipv4Addr) -> Result<()
                 .await
                 .map_err(|e| format!("dynv6 send: {e}"))?;
             let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| format!("dynv6 body: {e}"))?;
+            let body = resp.text().await.map_err(|e| format!("dynv6 body: {e}"))?;
             // "addresses updated" is the success body. "addresses
             // already set to …" is ALSO success — a no-op update
             // when we push the same IP twice in a row. Both match
@@ -245,10 +242,7 @@ async fn push(client: &reqwest::Client, entry: &Ddns, ip: Ipv4Addr) -> Result<()
                 .await
                 .map_err(|e| format!("he.net send: {e}"))?;
             let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| format!("he.net body: {e}"))?;
+            let body = resp.text().await.map_err(|e| format!("he.net body: {e}"))?;
             let trimmed = body.trim();
             if status.is_success()
                 && (trimmed.starts_with("good ") || trimmed.starts_with("nochg "))

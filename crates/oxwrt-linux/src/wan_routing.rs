@@ -92,10 +92,7 @@ pub async fn set_wan_table_default(
 /// every (zone_iface, table) pair derived from zones with
 /// `wan = "<name>"`. Idempotent + diffed-against-previous —
 /// stale rules from a previous reload are reaped.
-pub async fn install_zone_wan_rules(
-    handle: &Handle,
-    cfg: &Config,
-) -> Result<(), Error> {
+pub async fn install_zone_wan_rules(handle: &Handle, cfg: &Config) -> Result<(), Error> {
     use oxwrt_api::config::Network;
     let mut new_set: HashSet<(String, u32)> = HashSet::new();
     for zone in &cfg.firewall.zones {
@@ -143,7 +140,9 @@ pub async fn install_zone_wan_rules(
         match handle.rule().del(msg).execute().await {
             Ok(()) => tracing::info!(%iface, table, "wan_routing: stale zone rule removed"),
             Err(e) if is_noent(&e) => {}
-            Err(e) => tracing::warn!(%iface, table, error = %e, "wan_routing: zone rule del failed"),
+            Err(e) => {
+                tracing::warn!(%iface, table, error = %e, "wan_routing: zone rule del failed")
+            }
         }
     }
     // Install new.
@@ -172,11 +171,7 @@ pub async fn install_zone_wan_rules(
 }
 
 async fn ifindex(handle: &Handle, name: &str) -> Result<u32, Error> {
-    let mut stream = handle
-        .link()
-        .get()
-        .match_name(name.to_string())
-        .execute();
+    let mut stream = handle.link().get().match_name(name.to_string()).execute();
     let msg = stream
         .try_next()
         .await

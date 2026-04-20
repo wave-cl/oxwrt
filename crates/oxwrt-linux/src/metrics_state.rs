@@ -106,8 +106,7 @@ pub fn record_blocklist_fetch(name: &str, result: &'static str, entries: Option<
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        m.blocklist_last_fetch_unix
-            .insert(name.to_string(), unix);
+        m.blocklist_last_fetch_unix.insert(name.to_string(), unix);
     }
 }
 

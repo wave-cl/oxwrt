@@ -129,12 +129,20 @@ pub fn filter_relays(
         .filter(|r| include_inactive || r.active)
         .filter(|r| {
             country
-                .map(|c| r.country_code().map(|x| x.eq_ignore_ascii_case(c)).unwrap_or(false))
+                .map(|c| {
+                    r.country_code()
+                        .map(|x| x.eq_ignore_ascii_case(c))
+                        .unwrap_or(false)
+                })
                 .unwrap_or(true)
         })
         .filter(|r| {
-            city.map(|c| r.city_code().map(|x| x.eq_ignore_ascii_case(c)).unwrap_or(false))
-                .unwrap_or(true)
+            city.map(|c| {
+                r.city_code()
+                    .map(|x| x.eq_ignore_ascii_case(c))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true)
         })
         .cloned()
         .collect();

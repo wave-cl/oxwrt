@@ -503,10 +503,7 @@ fn build_request(
 /// Shared helper: insert the operator-supplied hostname (opt 12)
 /// and vendor-class-id (opt 60) into a DHCP message's option set.
 /// Both are no-ops when their respective config field is None.
-fn insert_client_opts(
-    opts: &mut dhcproto::v4::DhcpOptions,
-    client_opts: &DhcpClientOpts,
-) {
+fn insert_client_opts(opts: &mut dhcproto::v4::DhcpOptions, client_opts: &DhcpClientOpts) {
     if let Some(h) = client_opts.hostname.as_deref() {
         if !h.is_empty() {
             opts.insert(DhcpOption::Hostname(h.to_string()));
@@ -847,11 +844,7 @@ mod tests {
         let msg = build_discover(0xdead_beef, &hw(), &DhcpClientOpts::default());
         let opts = msg.opts();
         assert!(!opts.iter().any(|(c, _)| *c == OptionCode::Hostname));
-        assert!(
-            !opts
-                .iter()
-                .any(|(c, _)| *c == OptionCode::ClassIdentifier)
-        );
+        assert!(!opts.iter().any(|(c, _)| *c == OptionCode::ClassIdentifier));
     }
 
     /// hostname: Some("...") → option 12 present with the value.

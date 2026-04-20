@@ -126,15 +126,23 @@ pub fn render_block(
     key_path: &str,
 ) -> String {
     use std::fmt::Write as _;
-    let probe_target = parsed.dns_v4.first().copied().unwrap_or(Ipv4Addr::new(1, 1, 1, 1));
+    let probe_target = parsed
+        .dns_v4
+        .first()
+        .copied()
+        .unwrap_or(Ipv4Addr::new(1, 1, 1, 1));
     let mut out = String::new();
     writeln!(out, "[[vpn_client]]").unwrap();
     writeln!(out, "name = {:?}", name).unwrap();
     writeln!(out, "iface = {:?}", iface).unwrap();
     writeln!(out, "priority = {}", priority).unwrap();
     writeln!(out, "key_path = {:?}", key_path).unwrap();
-    writeln!(out, "address = {:?}", parsed.address_v4.as_deref().unwrap_or(""))
-        .unwrap();
+    writeln!(
+        out,
+        "address = {:?}",
+        parsed.address_v4.as_deref().unwrap_or("")
+    )
+    .unwrap();
     if let Some(a6) = &parsed.address_v6 {
         writeln!(out, "address_v6 = {:?}", a6).unwrap();
     }
@@ -204,10 +212,7 @@ pub fn merge_vpn_block(existing_toml: &str, name: &str, new_block: &str) -> Resu
     let replace = match doc.get("vpn_client") {
         None => true,
         Some(Item::ArrayOfTables(_)) => false,
-        Some(Item::Value(v)) => v
-            .as_array()
-            .map(|a| a.is_empty())
-            .unwrap_or(true),
+        Some(Item::Value(v)) => v.as_array().map(|a| a.is_empty()).unwrap_or(true),
         Some(_) => true,
     };
     if replace {
@@ -262,7 +267,10 @@ Endpoint = 103.251.26.127:51820
     #[test]
     fn parses_mullvad_conf() {
         let p = parse_conf(MULLVAD_SAMPLE).unwrap();
-        assert_eq!(p.private_key, "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=");
+        assert_eq!(
+            p.private_key,
+            "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX="
+        );
         assert_eq!(p.public_key, "ddv7vosBlf396nOa79nWn6qXQu2LzezGXfNUDO3hAXQ=");
         assert_eq!(p.address_v4.as_deref(), Some("10.66.24.93/32"));
         assert_eq!(
@@ -282,7 +290,13 @@ Endpoint = 103.251.26.127:51820
     #[test]
     fn renders_block_with_quoted_strings() {
         let parsed = parse_conf(MULLVAD_SAMPLE).unwrap();
-        let out = render_block("mullvad-se", "wgvpn0", 100, &parsed, "/etc/oxwrt/vpn/mullvad-se.key");
+        let out = render_block(
+            "mullvad-se",
+            "wgvpn0",
+            100,
+            &parsed,
+            "/etc/oxwrt/vpn/mullvad-se.key",
+        );
         assert!(out.contains(r#"name = "mullvad-se""#), "got: {out}");
         assert!(out.contains(r#"iface = "wgvpn0""#));
         assert!(out.contains(r#"address = "10.66.24.93/32""#));

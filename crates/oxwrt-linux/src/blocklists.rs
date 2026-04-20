@@ -79,11 +79,7 @@ pub async fn install(cfg: &Config) -> Result<(), Error> {
                     name = %bl.name, url = %bl.url, count = cidrs.len(),
                     "blocklist: fetched"
                 );
-                crate::metrics_state::record_blocklist_fetch(
-                    &bl.name,
-                    "ok",
-                    Some(cidrs.len()),
-                );
+                crate::metrics_state::record_blocklist_fetch(&bl.name, "ok", Some(cidrs.len()));
                 entries.push((bl.name.clone(), cidrs));
             }
             Err(e) => {
@@ -177,10 +173,7 @@ async fn fetch_and_parse(
     if !resp.status().is_success() {
         return Err(Error::Http(format!("status {}", resp.status())));
     }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = resp.text().await.map_err(|e| Error::Http(e.to_string()))?;
     Ok(parse_cidr_list(&body))
 }
 
@@ -286,14 +279,9 @@ pub(crate) fn build_install_script(
     // Chain hooked at priority -10 so it runs before the main
     // `oxwrt` filter table's INPUT (priority 0). ip saddr @set drop
     // for each configured blocklist.
-    script.push_str(
-        "  chain input {\n    type filter hook input priority -10; policy accept;\n",
-    );
+    script.push_str("  chain input {\n    type filter hook input priority -10; policy accept;\n");
     for bl in blocklists {
-        script.push_str(&format!(
-            "    ip saddr @{} drop\n",
-            nft_ident(&bl.name)
-        ));
+        script.push_str(&format!("    ip saddr @{} drop\n", nft_ident(&bl.name)));
     }
     script.push_str("  }\n");
     script.push_str("}\n");
@@ -455,10 +443,7 @@ url = "http://example.com/list.txt"
     #[test]
     fn install_script_uses_delete_then_add() {
         let bl = vec![sample_bl("fh")];
-        let entries = vec![(
-            "fh".to_string(),
-            vec![(Ipv4Addr::new(1, 2, 3, 0), 24)],
-        )];
+        let entries = vec![("fh".to_string(), vec![(Ipv4Addr::new(1, 2, 3, 0), 24)])];
         let s = build_install_script(&bl, &entries);
         assert!(s.contains("table inet oxwrt-blocklist { }\n"));
         assert!(s.contains("delete table inet oxwrt-blocklist\n"));
@@ -485,10 +470,7 @@ url = "http://example.com/list.txt"
     #[test]
     fn install_script_set_uses_interval_flags() {
         let bl = vec![sample_bl("fh")];
-        let entries = vec![(
-            "fh".to_string(),
-            vec![(Ipv4Addr::new(1, 2, 3, 0), 24)],
-        )];
+        let entries = vec![("fh".to_string(), vec![(Ipv4Addr::new(1, 2, 3, 0), 24)])];
         let s = build_install_script(&bl, &entries);
         assert!(s.contains("flags interval"));
         assert!(s.contains("1.2.3.0/24"));

@@ -93,7 +93,11 @@ fn save_to(path: &Path) -> Result<(), Error> {
             p.set_file_name(format!("{}.tmp", name.to_string_lossy()));
             p
         }
-        None => return Err(Error::Io(std::io::Error::other("seed path has no filename"))),
+        None => {
+            return Err(Error::Io(std::io::Error::other(
+                "seed path has no filename",
+            )));
+        }
     };
 
     // Ensure the parent dir exists — on a fresh flash with a

@@ -71,8 +71,7 @@ pub(super) async fn handle_fw_update(
         }
         (Some(_), Some(s)) if s.len() != 128 || !s.chars().all(|c| c.is_ascii_hexdigit()) => {
             return Response::Err {
-                message: "fw_update: sig must be 128 hex chars (ed25519 detached sig)"
-                    .to_string(),
+                message: "fw_update: sig must be 128 hex chars (ed25519 detached sig)".to_string(),
             };
         }
         (None, Some(_)) => {
@@ -318,8 +317,7 @@ mod signed_update_tests {
         let digest = [0xabu8; 32];
         let sig = sk_a.sign(&digest);
         let sig_hex = hex::encode(sig.to_bytes());
-        let err = verify_release_signature(&sk_b.verifying_key(), &digest, &sig_hex)
-            .unwrap_err();
+        let err = verify_release_signature(&sk_b.verifying_key(), &digest, &sig_hex).unwrap_err();
         assert!(err.contains("verify"));
     }
 

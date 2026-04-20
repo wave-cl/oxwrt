@@ -74,7 +74,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 /// `--interval=N` anywhere before the inner cmd.
 fn parse_args(args: Vec<String>) -> Result<(String, Duration, Vec<String>), String> {
     let mut it = args.into_iter();
-    let remote = it.next().ok_or_else(|| "watch: missing <remote>".to_string())?;
+    let remote = it
+        .next()
+        .ok_or_else(|| "watch: missing <remote>".to_string())?;
     let mut interval_s: u64 = 1;
     let mut inner: Vec<String> = Vec::new();
     let mut in_inner = false;
@@ -153,7 +155,10 @@ fn ctrlc_once<F: FnMut() + Send + 'static>(f: F) {
     // standard for single-signal apps and we only install once.
     unsafe {
         CB_PTR = cb_ptr as *mut _ as *mut ();
-        libc::signal(libc::SIGINT, sigint_trampoline as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            sigint_trampoline as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -207,12 +212,8 @@ mod tests {
 
     #[test]
     fn inner_command_passes_through_with_args() {
-        let (_, _, inner) = parse_args(vec![
-            "1.2.3.4:51820".into(),
-            "diag".into(),
-            "links".into(),
-        ])
-        .unwrap();
+        let (_, _, inner) =
+            parse_args(vec!["1.2.3.4:51820".into(), "diag".into(), "links".into()]).unwrap();
         assert_eq!(inner, vec!["diag", "links"]);
     }
 

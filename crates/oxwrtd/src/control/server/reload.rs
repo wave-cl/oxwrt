@@ -301,7 +301,8 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Ok(mut health) = state.wan_health.write() {
             health.clear();
         }
-        let new_handles = oxwrt_linux::wan_failover::spawn_probes(&new_cfg, state.wan_health.clone());
+        let new_handles =
+            oxwrt_linux::wan_failover::spawn_probes(&new_cfg, state.wan_health.clone());
         handles_guard.extend(new_handles);
     }
 
@@ -440,10 +441,8 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
             // old one's already aborted above. When the next
             // reload fires, a fresh connection replaces this.
             tokio::spawn(connection);
-            let new_probes = oxwrt_linux::vpn_failover::spawn_probes(
-                &new_cfg,
-                state.vpn_health.clone(),
-            );
+            let new_probes =
+                oxwrt_linux::vpn_failover::spawn_probes(&new_cfg, state.vpn_health.clone());
             probe_handles.extend(new_probes);
             let coord = oxwrt_linux::vpn_failover::spawn(
                 std::sync::Arc::new(new_cfg.clone()),
@@ -523,8 +522,7 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
             .iter()
             .flat_map(|v| v.bypass_destinations_v6.iter().cloned())
             .collect();
-        if let Err(e) = oxwrt_linux::vpn_routing::install_bypass_rules_v6(&handle, &bypass_v6)
-            .await
+        if let Err(e) = oxwrt_linux::vpn_routing::install_bypass_rules_v6(&handle, &bypass_v6).await
         {
             tracing::error!(error = %e, "reload: v6 bypass install failed");
         }

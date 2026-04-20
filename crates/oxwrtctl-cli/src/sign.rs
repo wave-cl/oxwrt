@@ -89,8 +89,8 @@ fn write_signature(
     use ed25519_dalek::Signer;
     use sha2::{Digest, Sha256};
 
-    let mut file = std::fs::File::open(image_path)
-        .map_err(|e| format!("open {image_path}: {e}"))?;
+    let mut file =
+        std::fs::File::open(image_path).map_err(|e| format!("open {image_path}: {e}"))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).map_err(|e| format!("read {image_path}: {e}"))?;
     let digest = hasher.finalize();

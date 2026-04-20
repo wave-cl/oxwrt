@@ -167,7 +167,7 @@ mod tests {
                 authorized_keys: PathBuf::from("/x"),
                 clients: vec![],
                 max_connections: 32,
-            max_rpcs_per_sec: 20,
+                max_rpcs_per_sec: 20,
             },
         }
     }

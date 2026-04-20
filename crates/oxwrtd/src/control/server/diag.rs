@@ -139,12 +139,14 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                 .args(["list", "ruleset"])
                 .output();
             match out {
-                Ok(o) if o.status.success() => match summarize_nft_text(&String::from_utf8_lossy(&o.stdout)) {
-                    Ok(text) => Response::Value { value: text },
-                    Err(e) => Response::Err {
-                        message: format!("diag nft-summary: parse: {e}"),
-                    },
-                },
+                Ok(o) if o.status.success() => {
+                    match summarize_nft_text(&String::from_utf8_lossy(&o.stdout)) {
+                        Ok(text) => Response::Value { value: text },
+                        Err(e) => Response::Err {
+                            message: format!("diag nft-summary: parse: {e}"),
+                        },
+                    }
+                }
                 Ok(o) => Response::Err {
                     message: format!(
                         "diag nft-summary: exit {:?}: {}",
@@ -503,8 +505,8 @@ async fn diag_devices(state: &ControlState) -> Result<String, String> {
         })
         .collect();
 
-    let text = std::fs::read_to_string("/proc/net/arp")
-        .map_err(|e| format!("read /proc/net/arp: {e}"))?;
+    let text =
+        std::fs::read_to_string("/proc/net/arp").map_err(|e| format!("read /proc/net/arp: {e}"))?;
 
     // First line is the column header; skip it.
     let mut rows: Vec<Row> = text
@@ -530,11 +532,19 @@ async fn diag_devices(state: &ControlState) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    writeln!(out, "{:<16}  {:<17}  {:<10}  {}", "IP", "MAC", "STATE", "IFACE")
-        .unwrap();
+    writeln!(
+        out,
+        "{:<16}  {:<17}  {:<10}  {}",
+        "IP", "MAC", "STATE", "IFACE"
+    )
+    .unwrap();
     for r in &rows {
-        writeln!(out, "{:<16}  {:<17}  {:<10}  {}", r.ip, r.mac, r.state, r.iface)
-            .unwrap();
+        writeln!(
+            out,
+            "{:<16}  {:<17}  {:<10}  {}",
+            r.ip, r.mac, r.state, r.iface
+        )
+        .unwrap();
     }
     writeln!(out, "\n{} device(s) on LAN", rows.len()).unwrap();
     Ok(out)
@@ -737,7 +747,9 @@ pub fn build_ping_args(args: &[String]) -> Result<Vec<String>, String> {
         return Err("ping: missing target (e.g. 1.1.1.1 or 2606:4700:4700::1111)".to_string());
     };
     if target_s.parse::<std::net::IpAddr>().is_err() {
-        return Err(format!("ping: invalid target {target_s:?}: not an IP address"));
+        return Err(format!(
+            "ping: invalid target {target_s:?}: not an IP address"
+        ));
     }
     let count: u16 = match args.get(1).map(|s| s.parse::<u16>()) {
         None => 3,
@@ -759,10 +771,14 @@ pub fn build_ping_args(args: &[String]) -> Result<Vec<String>, String> {
 /// the address literal. Max-hops clamped 1..=30 (default 30).
 pub fn build_traceroute_args(args: &[String]) -> Result<Vec<String>, String> {
     let Some(target_s) = args.first() else {
-        return Err("traceroute: missing target (e.g. 1.1.1.1 or 2606:4700:4700::1111)".to_string());
+        return Err(
+            "traceroute: missing target (e.g. 1.1.1.1 or 2606:4700:4700::1111)".to_string(),
+        );
     };
     if target_s.parse::<std::net::IpAddr>().is_err() {
-        return Err(format!("traceroute: invalid target {target_s:?}: not an IP address"));
+        return Err(format!(
+            "traceroute: invalid target {target_s:?}: not an IP address"
+        ));
     }
     let max_hops: u8 = match args.get(1).map(|s| s.parse::<u8>()) {
         None => 30,
@@ -1148,15 +1164,20 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
                         (cur_table.as_ref(), cur_set_name.take())
                     {
                         let typ = cur_set_type.take().unwrap_or_default();
-                        let entry = tables
-                            .entry(format!("{fam}:{tab}"))
-                            .or_insert_with(|| TableAgg {
-                                family: fam.clone(),
-                                name: tab.clone(),
-                                ..Default::default()
-                            });
-                        let mut line =
-                            format!("  set {} type={} elements={}", name, typ, cur_set_elements.len());
+                        let entry =
+                            tables
+                                .entry(format!("{fam}:{tab}"))
+                                .or_insert_with(|| TableAgg {
+                                    family: fam.clone(),
+                                    name: tab.clone(),
+                                    ..Default::default()
+                                });
+                        let mut line = format!(
+                            "  set {} type={} elements={}",
+                            name,
+                            typ,
+                            cur_set_elements.len()
+                        );
                         if !cur_set_elements.is_empty() {
                             let sample: Vec<&str> = cur_set_elements
                                 .iter()
@@ -1165,10 +1186,7 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
                                 .collect();
                             line.push_str(&format!(" sample=[{}]", sample.join(", ")));
                             if cur_set_elements.len() > 5 {
-                                line.push_str(&format!(
-                                    " +{} more",
-                                    cur_set_elements.len() - 5
-                                ));
+                                line.push_str(&format!(" +{} more", cur_set_elements.len() - 5));
                             }
                         }
                         entry.sets.push(line);
@@ -1202,7 +1220,10 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
                 continue;
             }
             if line.starts_with("chain ") && line.ends_with('{') {
-                let body = line.trim_start_matches("chain ").trim_end_matches('{').trim();
+                let body = line
+                    .trim_start_matches("chain ")
+                    .trim_end_matches('{')
+                    .trim();
                 let name = body.split_whitespace().next().unwrap_or("?").to_string();
                 if let Some((fam, tab)) = cur_table.as_ref() {
                     let entry = tables
@@ -1248,7 +1269,10 @@ fn summarize_nft_text(text: &str) -> Result<String, String> {
                 let mut prio = None;
                 let mut policy = None;
                 // Tokenize coarsely.
-                let toks: Vec<&str> = rest.split(|c: char| c == ';' || c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+                let toks: Vec<&str> = rest
+                    .split(|c: char| c == ';' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 let mut i = 0;
                 while i < toks.len() {
                     match toks[i] {
@@ -1401,8 +1425,7 @@ mod devices_tests {
         // The /proc/net/arp header has 8 columns and parses, but
         // trimming to its first column "IP" fails at the flags
         // hex-parse step → returns None.
-        let line =
-            "IP address       HW type     Flags       HW address            Mask     Device";
+        let line = "IP address       HW type     Flags       HW address            Mask     Device";
         assert!(parse_arp_row(line).is_none());
     }
 }
@@ -1467,8 +1490,14 @@ table ip oxwrt {
 }
 "#;
         let out = summarize_nft_text(text).unwrap();
-        assert!(out.contains("table ip oxwrt chains=1 rules=2 sets=0"), "got: {out}");
-        assert!(out.contains("chain input hook=input prio=0 policy=drop"), "got: {out}");
+        assert!(
+            out.contains("table ip oxwrt chains=1 rules=2 sets=0"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("chain input hook=input prio=0 policy=drop"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -1482,8 +1511,14 @@ table ip oxwrt-bl {
 }
 "#;
         let out = summarize_nft_text(text).unwrap();
-        assert!(out.contains("table ip oxwrt-bl chains=0 rules=0 sets=1"), "got: {out}");
-        assert!(out.contains("set blk type=ipv4_addr elements=2"), "got: {out}");
+        assert!(
+            out.contains("table ip oxwrt-bl chains=0 rules=0 sets=1"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("set blk type=ipv4_addr elements=2"),
+            "got: {out}"
+        );
         assert!(out.contains("sample=[10.0.0.1, 10.0.0.2]"), "got: {out}");
     }
 }

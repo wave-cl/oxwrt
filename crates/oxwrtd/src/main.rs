@@ -13,6 +13,8 @@ pub use oxwrt_linux::{
 mod control;
 
 #[cfg(target_os = "linux")]
+mod backup_sftp;
+#[cfg(target_os = "linux")]
 mod ddns;
 #[cfg(target_os = "linux")]
 mod init;
@@ -20,8 +22,6 @@ mod init;
 mod metrics;
 #[cfg(target_os = "linux")]
 mod wifi_rotate;
-#[cfg(target_os = "linux")]
-mod backup_sftp;
 
 use std::process::ExitCode;
 

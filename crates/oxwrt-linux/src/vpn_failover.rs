@@ -109,11 +109,7 @@ pub fn snapshot_all(
 ///
 /// Health rule:
 ///   lease (bring-up) present AND (probe absent OR probe ok)
-pub fn pick_active_vpn(
-    cfg: &Config,
-    bringup: &VpnBringup,
-    health: &VpnHealth,
-) -> Option<String> {
+pub fn pick_active_vpn(cfg: &Config, bringup: &VpnBringup, health: &VpnHealth) -> Option<String> {
     let bringup = bringup.read().ok()?;
     let health = health.read().ok()?;
     let mut best: Option<(u32, String)> = None;
@@ -164,8 +160,7 @@ pub fn spawn(
             //    active profile (and only that one — stale /32s
             //    for ex-profiles are removed on transition).
             if let Some(profile_name) = &desired {
-                let Some(profile) = cfg.vpn_client.iter().find(|v| &v.name == profile_name)
-                else {
+                let Some(profile) = cfg.vpn_client.iter().find(|v| &v.name == profile_name) else {
                     continue;
                 };
                 // Resolve endpoint host:port → IP. Endpoint may be
@@ -190,9 +185,9 @@ pub fn spawn(
                     let active_name: Option<String> =
                         active_wan.lock().ok().and_then(|g| (*g).clone());
                     let leases = wan_leases.read().ok();
-                    active_name
-                        .zip(leases)
-                        .and_then(|(name, l)| l.get(&name).cloned().flatten().map(|lease| (name, lease)))
+                    active_name.zip(leases).and_then(|(name, l)| {
+                        l.get(&name).cloned().flatten().map(|lease| (name, lease))
+                    })
                 };
 
                 if let (Some(endpoint_ip), Some((wan_name, wan_lease))) =
@@ -206,12 +201,8 @@ pub fn spawn(
                             _ => None,
                         });
                         if let Some(wan_iface) = wan_iface {
-                            let key = (
-                                profile.name.clone(),
-                                endpoint_ip,
-                                wan_gw,
-                                wan_iface.clone(),
-                            );
+                            let key =
+                                (profile.name.clone(), endpoint_ip, wan_gw, wan_iface.clone());
                             if prev_endpoint_key.as_ref() != Some(&key) {
                                 // Remove the prior exemption BEFORE
                                 // installing the new one. Otherwise
@@ -228,12 +219,10 @@ pub fn spawn(
                                 // we'd yank the live exemption.
                                 if let Some((_, prev_ip, _, _)) = &prev_endpoint_key {
                                     if *prev_ip != endpoint_ip {
-                                        if let Err(e) =
-                                            vpn_routing::remove_endpoint_exemption(
-                                                &handle,
-                                                *prev_ip,
-                                            )
-                                            .await
+                                        if let Err(e) = vpn_routing::remove_endpoint_exemption(
+                                            &handle, *prev_ip,
+                                        )
+                                        .await
                                         {
                                             tracing::debug!(
                                                 prev_ip = %prev_ip,
@@ -286,8 +275,7 @@ pub fn spawn(
             }
 
             if let Some(profile_name) = &desired {
-                let Some(profile) = cfg.vpn_client.iter().find(|v| &v.name == profile_name)
-                else {
+                let Some(profile) = cfg.vpn_client.iter().find(|v| &v.name == profile_name) else {
                     continue;
                 };
                 if let Err(e) = vpn_routing::set_table_51_default(&handle, &profile.iface).await {
@@ -326,8 +314,7 @@ pub fn spawn(
                 // the /32 exemption so it doesn't linger forever
                 // across a profile delete-and-re-add cycle.
                 if let Some((_, prev_ip, _, _)) = &prev_endpoint_key {
-                    if let Err(e) =
-                        vpn_routing::remove_endpoint_exemption(&handle, *prev_ip).await
+                    if let Err(e) = vpn_routing::remove_endpoint_exemption(&handle, *prev_ip).await
                     {
                         tracing::debug!(
                             prev_ip = %prev_ip, error = %e,
@@ -406,16 +393,7 @@ pub fn spawn_probes(cfg: &Config, health: VpnHealth) -> Vec<tokio::task::JoinHan
 
 async fn probe_once(iface: &str, target: &str, timeout_s: &str) -> bool {
     let res = tokio::process::Command::new("ping")
-        .args([
-            "-I",
-            iface,
-            "-c",
-            "1",
-            "-W",
-            timeout_s,
-            "-q",
-            target,
-        ])
+        .args(["-I", iface, "-c", "1", "-W", timeout_s, "-q", target])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -453,4 +431,3 @@ pub fn mark_bringup(bringup: &VpnBringup, cfg: &Config, success: bool) {
         b.insert(v.name.clone(), success);
     }
 }
-

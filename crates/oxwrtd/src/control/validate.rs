@@ -332,7 +332,11 @@ mod tests {
                 Network::Wan {
                     name: "wan".to_string(),
                     iface: "eth1".to_string(),
-                    wan: crate::config::WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None },
+                    wan: crate::config::WanConfig::Dhcp {
+                        send_hostname: false,
+                        hostname_override: None,
+                        vendor_class_id: None,
+                    },
                     ipv6_pd: false,
                     sqm: None,
                     priority: 100,
@@ -399,7 +403,7 @@ mod tests {
                     icmp_type: None,
                     limit: None,
                     log: None,
-src: Some("lan".to_string()),
+                    src: Some("lan".to_string()),
                     dest: Some("wan".to_string()),
                     proto: None,
                     dest_port: None,
@@ -472,7 +476,7 @@ src: Some("lan".to_string()),
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
                 clients: vec![],
                 max_connections: 32,
-            max_rpcs_per_sec: 20,
+                max_rpcs_per_sec: 20,
             },
         }
     }
@@ -549,14 +553,14 @@ src: Some("lan".to_string()),
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: None,
             dest_port: None,
             ct_state: vec!["established".to_string()],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -575,14 +579,14 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: Some("lan".to_string()),
+            src: Some("lan".to_string()),
             dest: Some("wan".to_string()),
             proto: None,
             dest_port: None,
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -601,14 +605,14 @@ src: Some("lan".to_string()),
             icmp_type: None,
             limit: None,
             log: None,
-src: Some("nowhere".to_string()),
+            src: Some("nowhere".to_string()),
             dest: None,
             proto: None,
             dest_port: None,
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -629,14 +633,14 @@ src: Some("nowhere".to_string()),
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: Some("nowhere".to_string()),
             proto: None,
             dest_port: None,
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -656,14 +660,14 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: None,
             dest_port: None,
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -683,14 +687,14 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: Some(crate::config::Proto::Tcp),
             dest_port: Some(crate::config::PortSpec::Single(80)),
             ct_state: vec![],
             action: Action::Dnat,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -710,7 +714,7 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: Some(crate::config::Proto::Tcp),
             dest_port: Some(crate::config::PortSpec::Single(80)),
@@ -736,7 +740,7 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: None,
             dest_port: None,
@@ -766,14 +770,14 @@ src: None,
             icmp_type: None,
             limit: None,
             log: None,
-src: None,
+            src: None,
             dest: None,
             proto: Some(crate::config::Proto::Icmp),
             dest_port: Some(crate::config::PortSpec::Single(53)),
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
-                    schedule: None,
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -949,7 +953,10 @@ src: None,
     fn vlan_without_parent_rejected() {
         let cfg = cfg_with_networks(vec![simple_vlan("v10", "eth0.10", Some(10), None)]);
         let err = check_vlan_consistency(&cfg).unwrap_err();
-        assert!(err.contains("vlan_parent"), "expected parent-required err: {err}");
+        assert!(
+            err.contains("vlan_parent"),
+            "expected parent-required err: {err}"
+        );
     }
 
     #[test]
@@ -961,11 +968,18 @@ src: None,
 
     #[test]
     fn vlan_id_out_of_range_rejected() {
-        let cfg =
-            cfg_with_networks(vec![simple_vlan("bad", "x", Some(4095), Some("eth0"))]);
-        assert!(check_vlan_consistency(&cfg).unwrap_err().contains("out of range"));
+        let cfg = cfg_with_networks(vec![simple_vlan("bad", "x", Some(4095), Some("eth0"))]);
+        assert!(
+            check_vlan_consistency(&cfg)
+                .unwrap_err()
+                .contains("out of range")
+        );
         let cfg0 = cfg_with_networks(vec![simple_vlan("bad", "x", Some(0), Some("eth0"))]);
-        assert!(check_vlan_consistency(&cfg0).unwrap_err().contains("out of range"));
+        assert!(
+            check_vlan_consistency(&cfg0)
+                .unwrap_err()
+                .contains("out of range")
+        );
     }
 
     #[test]

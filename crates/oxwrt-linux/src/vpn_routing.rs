@@ -114,10 +114,7 @@ static INSTALLED_BYPASS_RULES_V6: Mutex<Option<HashSet<(Ipv6Addr, u8)>>> = Mutex
 /// kill-switch blackhole so the worst case is "zone uses VPN
 /// when it shouldn't"). Follow-up: track installed rules on
 /// ControlState and diff on reload.
-pub async fn install_policy_rules(
-    handle: &Handle,
-    via_vpn_ifaces: &[String],
-) -> Result<(), Error> {
+pub async fn install_policy_rules(handle: &Handle, via_vpn_ifaces: &[String]) -> Result<(), Error> {
     // Diff against what we installed last time. Rules for ifaces
     // that were in the previous set but aren't in this one are
     // removed; rules for new ifaces are added. Rules that stay
@@ -197,10 +194,7 @@ pub async fn install_policy_rules(
 /// Diff-and-delete on reload: rules present in the previous set
 /// but not the current one are removed first; new ones are then
 /// added. Duplicate adds EEXIST-tolerated.
-pub async fn install_bypass_rules(
-    handle: &Handle,
-    bypass_cidrs: &[String],
-) -> Result<(), Error> {
+pub async fn install_bypass_rules(handle: &Handle, bypass_cidrs: &[String]) -> Result<(), Error> {
     let mut new_set: HashSet<(Ipv4Addr, u8)> = HashSet::new();
     for s in bypass_cidrs {
         match parse_cidr_v4(s) {
@@ -223,7 +217,7 @@ pub async fn install_bypass_rules(
             .add()
             .v4()
             .destination_prefix(*addr, *prefix)
-            .table_id(254)  // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
+            .table_id(254) // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
             .priority(VPN_BYPASS_PRIORITY)
             .action(RuleAction::ToTable);
         let msg = add_builder.message_mut().clone();
@@ -240,7 +234,7 @@ pub async fn install_bypass_rules(
             .add()
             .v4()
             .destination_prefix(*addr, *prefix)
-            .table_id(254)  // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
+            .table_id(254) // RT_TABLE_MAIN — well-known, not in rtnetlink's pub consts
             .priority(VPN_BYPASS_PRIORITY)
             .action(RuleAction::ToTable)
             .execute()
@@ -285,7 +279,10 @@ pub async fn install_table_51_blackhole(handle: &Handle) -> Result<(), Error> {
         .build();
     match handle.route().add(route).execute().await {
         Ok(()) => {
-            tracing::info!(table = VPN_TABLE, "vpn_routing: blackhole fallback installed");
+            tracing::info!(
+                table = VPN_TABLE,
+                "vpn_routing: blackhole fallback installed"
+            );
             Ok(())
         }
         Err(e) if is_exists(&e) => Ok(()),
@@ -522,11 +519,7 @@ pub async fn remove_endpoint_exemption(
 // ── internals ───────────────────────────────────────────────────
 
 async fn ifindex(handle: &Handle, name: &str) -> Result<u32, Error> {
-    let mut stream = handle
-        .link()
-        .get()
-        .match_name(name.to_string())
-        .execute();
+    let mut stream = handle.link().get().match_name(name.to_string()).execute();
     let msg = stream
         .try_next()
         .await
@@ -592,7 +585,9 @@ pub async fn install_policy_rules_v6(
         match handle.rule().del(msg).execute().await {
             Ok(()) => tracing::info!(iif = %iface, "vpn_routing: stale v6 iif rule removed"),
             Err(e) if is_noent(&e) => {}
-            Err(e) => tracing::warn!(iif = %iface, error = %e, "vpn_routing: v6 iif rule del failed"),
+            Err(e) => {
+                tracing::warn!(iif = %iface, error = %e, "vpn_routing: v6 iif rule del failed")
+            }
         }
     }
     for iface in via_vpn_ifaces {

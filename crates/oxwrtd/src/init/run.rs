@@ -191,10 +191,7 @@ fn tighten_secrets_file_mode(public_path: &Path) {
     };
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o600 {
-        if let Err(e) = std::fs::set_permissions(
-            &secrets,
-            std::fs::Permissions::from_mode(0o600),
-        ) {
+        if let Err(e) = std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)) {
             tracing::error!(
                 error = %e,
                 path = %secrets.display(),

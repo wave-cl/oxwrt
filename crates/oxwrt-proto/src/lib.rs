@@ -259,11 +259,9 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             //   --to N      pick ring slot (default 0 = most recent).
             let confirm = args.iter().any(|a| a == "--confirm");
             if !confirm {
-                return Err(
-                    "rollback: refusing to roll back without --confirm \
+                return Err("rollback: refusing to roll back without --confirm \
                      (discards current config; reverts to a snapshot)"
-                        .to_string(),
-                );
+                    .to_string());
             }
             let mut to: Option<u32> = None;
             let mut i = 0;
@@ -274,9 +272,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                     continue;
                 }
                 if a == "--to" {
-                    let v = args
-                        .get(i + 1)
-                        .ok_or("rollback: --to needs an index")?;
+                    let v = args.get(i + 1).ok_or("rollback: --to needs an index")?;
                     to = Some(
                         v.parse::<u32>()
                             .map_err(|_| format!("rollback: --to {v:?} is not a u32"))?,
@@ -311,7 +307,10 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             // `.conf` path directly without pre-extracting), and
             // sends the base64 key bytes. The router validates +
             // writes to /etc/oxwrt/vpn/<name>.key.
-            let name = args.first().ok_or("vpn-key-upload: missing <name>")?.clone();
+            let name = args
+                .first()
+                .ok_or("vpn-key-upload: missing <name>")?
+                .clone();
             let path = args.get(1).ok_or("vpn-key-upload: missing <keyfile>")?;
             let body = std::fs::read_to_string(path)
                 .map_err(|e| format!("vpn-key-upload: read {path}: {e}"))?;
@@ -647,8 +646,8 @@ mod tests {
             listen: vec!["192.168.8.1:51820".to_string(), "[::1]:51820".to_string()],
             authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),
             clients: vec![],
-                max_connections: 32,
-        max_rpcs_per_sec: 20,
+            max_connections: 32,
+            max_rpcs_per_sec: 20,
         };
         let text = default_config_text(&control);
         let cfg: Config = toml::from_str(&text).expect("default config must parse");
@@ -667,8 +666,8 @@ mod tests {
             listen: vec!["10.0.0.1:51820".to_string()],
             authorized_keys: PathBuf::from("/etc/oxwrt/keys"),
             clients: vec![],
-                max_connections: 32,
-        max_rpcs_per_sec: 20,
+            max_connections: 32,
+            max_rpcs_per_sec: 20,
         };
         let text = default_config_text(&control);
         let n = text.matches("\"10.0.0.1:51820\"").count();

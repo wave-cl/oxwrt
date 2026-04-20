@@ -110,7 +110,10 @@ mod tests {
         let text = render(&cfg);
         assert!(text.contains("mode = \"server\""));
         assert!(text.contains("time.cloudflare.com"));
-        assert!(!text.contains("count ="), "count must not render for server mode");
+        assert!(
+            !text.contains("count ="),
+            "count must not render for server mode"
+        );
     }
 
     #[test]

@@ -120,7 +120,11 @@ pub(super) fn handle_set(state: &ControlState, key: &str, value: &str) -> Respon
             };
             match value {
                 "dhcp" => {
-                    *wan = WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None };
+                    *wan = WanConfig::Dhcp {
+                        send_hostname: false,
+                        hostname_override: None,
+                        vendor_class_id: None,
+                    };
                 }
                 "static" => {
                     *wan = WanConfig::Static {

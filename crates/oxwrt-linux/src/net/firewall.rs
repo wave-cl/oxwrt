@@ -16,7 +16,9 @@
 // pre-split shape) handle rustables imports to minimise churn.
 use std::net::{IpAddr, Ipv4Addr};
 
-use oxwrt_api::config::{Action, ChainPolicy, Config, Network, PortSpec, Proto, Service, WanConfig};
+use oxwrt_api::config::{
+    Action, ChainPolicy, Config, Network, PortSpec, Proto, Service, WanConfig,
+};
 
 /// A rule needs the nft-text path (instead of rustables) when it
 /// uses any primitive that rustables' builder doesn't expose
@@ -460,8 +462,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // takes the first verdict, so established accept beats this
     // drop for response packets.
     if cfg.firewall.zones.iter().any(|z| z.via_vpn) {
-        let vpn_ifaces: Vec<String> =
-            cfg.vpn_client.iter().map(|v| v.iface.clone()).collect();
+        let vpn_ifaces: Vec<String> = cfg.vpn_client.iter().map(|v| v.iface.clone()).collect();
         for zone in &cfg.firewall.zones {
             if !zone.via_vpn {
                 continue;
@@ -658,8 +659,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .iter()
         .min_by_key(|v| v.priority)
         .and_then(|v| v.dns.first().copied());
-    let need_via_vpn_dns = via_vpn_dns_target.is_some()
-        && cfg.firewall.zones.iter().any(|z| z.via_vpn);
+    let need_via_vpn_dns =
+        via_vpn_dns_target.is_some() && cfg.firewall.zones.iter().any(|z| z.via_vpn);
 
     // Build the DNAT table if EITHER legacy DNAT rules or port-forwards
     // or via_vpn-DNS redirection need it. Three sources, one table.
@@ -793,8 +794,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                         .with_family(ProtocolFamily::Ipv4)
                         .with_ip_register(Register::Reg1)
                         .with_port_register(Register::Reg2);
-                    let mut r = Rule::new(&dnat_output)
-                        .map_err(|e| Error::Firewall(e.to_string()))?;
+                    let mut r =
+                        Rule::new(&dnat_output).map_err(|e| Error::Firewall(e.to_string()))?;
                     r = r.dport(pf.external_port, proto);
                     r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
                         .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
@@ -846,14 +847,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                             .iiface(&zone_if)
                             .map_err(|e| Error::Firewall(e.to_string()))?
                             .dport(53, proto)
-                            .with_expr(Immediate::new_data(
-                                dns_ip_bytes.clone(),
-                                Register::Reg1,
-                            ))
-                            .with_expr(Immediate::new_data(
-                                dns_port_bytes.clone(),
-                                Register::Reg2,
-                            ))
+                            .with_expr(Immediate::new_data(dns_ip_bytes.clone(), Register::Reg1))
+                            .with_expr(Immediate::new_data(dns_port_bytes.clone(), Register::Reg2))
                             .with_expr(nat_expr)
                             .add_to_batch(&mut dnat_batch);
                     }
@@ -1005,20 +1000,21 @@ pub(crate) fn build_scheduled_rules_script(cfg: &Config) -> String {
         // Optional schedule prefix (when the rule also has a
         // time window). Parsed once; we only emit for the
         // chains we target above.
-        let sched_frag: Option<String> = rule.schedule.as_deref().and_then(|s| {
-            match parse_schedule(s) {
-                Ok(sc) => Some(render_nft_predicate(&sc)),
-                Err(e) => {
-                    tracing::warn!(
-                        rule = %rule.name,
-                        schedule = %s,
-                        error = %e,
-                        "rule: schedule parse failed; skipping rule"
-                    );
-                    None
-                }
-            }
-        });
+        let sched_frag: Option<String> =
+            rule.schedule
+                .as_deref()
+                .and_then(|s| match parse_schedule(s) {
+                    Ok(sc) => Some(render_nft_predicate(&sc)),
+                    Err(e) => {
+                        tracing::warn!(
+                            rule = %rule.name,
+                            schedule = %s,
+                            error = %e,
+                            "rule: schedule parse failed; skipping rule"
+                        );
+                        None
+                    }
+                });
         // Parse failure on a scheduled rule: skip entirely so we
         // don't emit a rule missing its time gate.
         if rule.schedule.is_some() && sched_frag.is_none() {
@@ -1118,7 +1114,10 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
             PortSpec::Single(p) => format!("{p}"),
             PortSpec::List(ps) => format!(
                 "{{ {} }}",
-                ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                ps.iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         };
         match proto {
@@ -1141,7 +1140,10 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
         let p = if log_prefix.is_empty() {
             String::new()
         } else {
-            format!("prefix \"{}\" ", log_prefix.chars().take(128).collect::<String>())
+            format!(
+                "prefix \"{}\" ",
+                log_prefix.chars().take(128).collect::<String>()
+            )
         };
         out.push_str(&format!("log {p}"));
     }
@@ -1168,8 +1170,7 @@ fn emit_addr_match(
         return;
     }
     let dir = if is_src { "saddr" } else { "daddr" };
-    let (v4, v6): (Vec<&String>, Vec<&String>) =
-        addrs.iter().partition(|a| !a.contains(':'));
+    let (v4, v6): (Vec<&String>, Vec<&String>) = addrs.iter().partition(|a| !a.contains(':'));
     // Filter by declared family restriction, if any.
     let emit_v4 = family != Family::Ipv6 && !v4.is_empty();
     let emit_v6 = family != Family::Ipv4 && !v6.is_empty();
@@ -1207,10 +1208,15 @@ fn render_proto_port(out: &mut String, rule: &oxwrt_api::config::Rule) {
                     PortSpec::Single(p) => format!("{p}"),
                     PortSpec::List(ps) => format!(
                         "{{ {} }}",
-                        ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                        ps.iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 };
-                out.push_str(&format!("meta l4proto {{ tcp, udp }} th dport {port_fragment} "));
+                out.push_str(&format!(
+                    "meta l4proto {{ tcp, udp }} th dport {port_fragment} "
+                ));
             } else {
                 out.push_str("meta l4proto { tcp, udp } ");
             }
@@ -1219,7 +1225,10 @@ fn render_proto_port(out: &mut String, rule: &oxwrt_api::config::Rule) {
                 PortSpec::Single(p) => format!("{p}"),
                 PortSpec::List(ps) => format!(
                     "{{ {} }}",
-                    ps.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                    ps.iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             };
             out.push_str(&format!("{proto_s} dport {port_fragment} "));
@@ -1575,7 +1584,6 @@ fn veth_host_name(svc: &Service) -> String {
     format!("veth-{}", svc.name)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1668,8 +1676,12 @@ mod tests {
         cfg.firewall.rules.push(r);
         let s = build_scheduled_rules_script(&cfg);
         // Global rule (no src/dest zone) renders into both input + forward.
-        assert!(s.contains("add rule inet oxwrt input ip saddr 192.168.50.10/32 tcp dport 22 accept"));
-        assert!(s.contains("add rule inet oxwrt forward ip saddr 192.168.50.10/32 tcp dport 22 accept"));
+        assert!(
+            s.contains("add rule inet oxwrt input ip saddr 192.168.50.10/32 tcp dport 22 accept")
+        );
+        assert!(
+            s.contains("add rule inet oxwrt forward ip saddr 192.168.50.10/32 tcp dport 22 accept")
+        );
     }
 
     #[test]
@@ -1683,8 +1695,14 @@ mod tests {
         cfg.firewall.rules.push(r);
         let s = build_scheduled_rules_script(&cfg);
         // meta nfproto ipv6 prefix present + icmpv6 type selector.
-        assert!(s.contains("meta nfproto ipv6"), "expected v6 family prefix: {s}");
-        assert!(s.contains("icmpv6 type nd-neighbor-solicit"), "expected icmpv6 type: {s}");
+        assert!(
+            s.contains("meta nfproto ipv6"),
+            "expected v6 family prefix: {s}"
+        );
+        assert!(
+            s.contains("icmpv6 type nd-neighbor-solicit"),
+            "expected icmpv6 type: {s}"
+        );
     }
 
     #[test]
@@ -1699,7 +1717,10 @@ mod tests {
         cfg.firewall.rules.push(r);
         let s = build_scheduled_rules_script(&cfg);
         assert!(s.contains("limit rate 3/minute"), "missing limit: {s}");
-        assert!(s.contains("log prefix \"ssh-flood \""), "missing log prefix: {s}");
+        assert!(
+            s.contains("log prefix \"ssh-flood \""),
+            "missing log prefix: {s}"
+        );
         // Emission order: limit before log before verdict.
         let li = s.find("limit rate").unwrap();
         let lo = s.find("log prefix").unwrap();
@@ -1715,7 +1736,10 @@ mod tests {
         r.action = oxwrt_api::config::Action::Accept;
         cfg.firewall.rules.push(r);
         let s = build_scheduled_rules_script(&cfg);
-        assert!(s.contains("ether saddr { aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66 }"), "{s}");
+        assert!(
+            s.contains("ether saddr { aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66 }"),
+            "{s}"
+        );
     }
     use oxwrt_api::config::{Config, Control, Firewall, Network, PortSpec, Proto, Service, Zone};
     use std::collections::BTreeMap;

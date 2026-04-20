@@ -27,8 +27,7 @@ use oxwrt_api::config::Config;
 /// 16 chars from the URL-safe alphabet (no O/0/I/l/1 to reduce
 /// misreading). 94 bits of entropy — more than enough for a
 /// WPA2/WPA3 PSK that's only valid for a day.
-const PASSPHRASE_ALPHABET: &[u8] =
-    b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const PASSPHRASE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 const PASSPHRASE_LEN: usize = 16;
 
 /// Spawn one rotation task per rotating SSID. Handles are not
@@ -87,7 +86,8 @@ async fn rotate_once(
     // call handle_reload_async directly. v1 is "write the
     // config + sidecar, operator reloads."
     tracing::warn!(
-        ssid, pw_location = "/etc/oxwrt/wifi-<ssid>-passphrase.txt",
+        ssid,
+        pw_location = "/etc/oxwrt/wifi-<ssid>-passphrase.txt",
         "wifi passphrase rotated — run `oxctl reload` to activate"
     );
     Ok(())
@@ -103,7 +103,8 @@ fn generate_passphrase() -> Result<String, String> {
     let mut out = String::with_capacity(PASSPHRASE_LEN);
     let mut buf = [0u8; 1];
     while out.len() < PASSPHRASE_LEN {
-        f.read_exact(&mut buf).map_err(|e| format!("read urandom: {e}"))?;
+        f.read_exact(&mut buf)
+            .map_err(|e| format!("read urandom: {e}"))?;
         // Unbiased: accept only bytes in the largest multiple of
         // alphabet length that fits in u8. 56 * 4 = 224; bytes
         // 0..=223 are usable, 224..=255 get re-rolled.
@@ -178,8 +179,7 @@ fn patch_config_passphrase(
     // Atomic write: tempfile + rename, at mode 0600 since this file
     // contains secrets.
     let tmp = secrets_path.with_extension("toml.rotate-tmp");
-    std::fs::write(&tmp, doc.to_string())
-        .map_err(|e| format!("write tmp {tmp:?}: {e}"))?;
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| format!("write tmp {tmp:?}: {e}"))?;
     let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     std::fs::rename(&tmp, &secrets_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -193,8 +193,7 @@ fn write_sidecars(ssid: &str, new_pw: &str) -> Result<(), String> {
     // newline. Operator `cat`s it or pipes into anything that
     // wants the raw value.
     let pw_path = format!("/etc/oxwrt/wifi-{}-passphrase.txt", sanitize(ssid));
-    std::fs::write(&pw_path, format!("{new_pw}\n"))
-        .map_err(|e| format!("write {pw_path}: {e}"))?;
+    std::fs::write(&pw_path, format!("{new_pw}\n")).map_err(|e| format!("write {pw_path}: {e}"))?;
     // UTF-8 half-block QR for the standard WiFi URI format
     // (`WIFI:T:WPA;S:<ssid>;P:<pw>;;`) — scan with any phone
     // camera. Reuses the render helper from oxwrtctl-cli via
@@ -214,7 +213,13 @@ fn write_sidecars(ssid: &str, new_pw: &str) -> Result<(), String> {
 /// slashes, dots, or spaces.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -237,8 +242,8 @@ fn qr_escape(s: &str) -> String {
 /// client dep.
 fn render_qr(payload: &str) -> Result<String, String> {
     use qrcodegen::{QrCode, QrCodeEcc};
-    let qr = QrCode::encode_text(payload, QrCodeEcc::Medium)
-        .map_err(|e| format!("encode: {e:?}"))?;
+    let qr =
+        QrCode::encode_text(payload, QrCodeEcc::Medium).map_err(|e| format!("encode: {e:?}"))?;
     let n = qr.size();
     let mut out = String::new();
     // Quiet zone: 1 row of blanks above and below.
@@ -254,7 +259,11 @@ fn render_qr(payload: &str) -> Result<String, String> {
         out.push_str("  ");
         for x in 0..n {
             let top = qr.get_module(x, y);
-            let bot = if y + 1 < n { qr.get_module(x, y + 1) } else { false };
+            let bot = if y + 1 < n {
+                qr.get_module(x, y + 1)
+            } else {
+                false
+            };
             let ch = match (top, bot) {
                 (false, false) => ' ',
                 (true, false) => '▀',

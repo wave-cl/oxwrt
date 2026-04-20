@@ -583,12 +583,7 @@ impl VpnClient {
             writeln!(s, "# PresharedKey from {}", psk_path).unwrap();
         }
         if self.persistent_keepalive > 0 {
-            writeln!(
-                s,
-                "PersistentKeepalive = {}",
-                self.persistent_keepalive
-            )
-            .unwrap();
+            writeln!(s, "PersistentKeepalive = {}", self.persistent_keepalive).unwrap();
         }
         s
     }
@@ -2048,15 +2043,11 @@ pub fn merge_toml(base: &mut toml::Value, overlay: toml::Value, path: &str) {
                     .map(|(_, id)| *id);
                 if let Some(identity) = identity {
                     for o_entry in o {
-                        let key = o_entry
-                            .as_table()
-                            .and_then(|t| t.get(identity))
-                            .cloned();
+                        let key = o_entry.as_table().and_then(|t| t.get(identity)).cloned();
                         match key {
                             Some(k) => {
                                 let idx = b.iter().position(|b_entry| {
-                                    b_entry.as_table().and_then(|t| t.get(identity))
-                                        == Some(&k)
+                                    b_entry.as_table().and_then(|t| t.get(identity)) == Some(&k)
                                 });
                                 match idx {
                                     Some(i) => merge_toml(&mut b[i], o_entry, path),
@@ -2180,11 +2171,10 @@ impl Config {
     /// `primary` is an error.
     pub fn load_with_secrets(primary: &Path, secrets: &Path) -> Result<Self, Error> {
         let base_text = read_text(primary)?;
-        let mut base: toml::Value =
-            toml::from_str(&base_text).map_err(|source| Error::Parse {
-                path: primary.to_path_buf(),
-                source,
-            })?;
+        let mut base: toml::Value = toml::from_str(&base_text).map_err(|source| Error::Parse {
+            path: primary.to_path_buf(),
+            source,
+        })?;
         if std::fs::metadata(secrets).is_ok() {
             let sec_text = read_text(secrets)?;
             let overlay: toml::Value =
@@ -2228,19 +2218,13 @@ mod tests {
 
     #[test]
     fn merge_leaf_overwrite() {
-        let merged = merge_roundtrip(
-            r#"hostname = "a""#,
-            r#"hostname = "b""#,
-        );
+        let merged = merge_roundtrip(r#"hostname = "a""#, r#"hostname = "b""#);
         assert_eq!(merged["hostname"].as_str(), Some("b"));
     }
 
     #[test]
     fn merge_adds_missing_leaf() {
-        let merged = merge_roundtrip(
-            r#"hostname = "a""#,
-            r#"timezone = "UTC""#,
-        );
+        let merged = merge_roundtrip(r#"hostname = "a""#, r#"timezone = "UTC""#);
         assert_eq!(merged["hostname"].as_str(), Some("a"));
         assert_eq!(merged["timezone"].as_str(), Some("UTC"));
     }
@@ -2387,11 +2371,7 @@ mod tests {
         "#;
         let mut base: toml::Value = toml::from_str(base_toml).unwrap();
         // Simulate env overlay without touching the process env.
-        apply_env_one(
-            &mut base,
-            &["wifi", "main", "passphrase"],
-            "from-env",
-        );
+        apply_env_one(&mut base, &["wifi", "main", "passphrase"], "from-env");
         assert_eq!(base["wifi"][0]["passphrase"].as_str(), Some("from-env"));
     }
 
@@ -2442,11 +2422,9 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/oxwrt.secrets.toml.example"
         );
-        let cfg = Config::load_with_secrets(
-            std::path::Path::new(public),
-            std::path::Path::new(secrets),
-        )
-        .unwrap_or_else(|e| panic!("load {public} + {secrets}: {e}"));
+        let cfg =
+            Config::load_with_secrets(std::path::Path::new(public), std::path::Path::new(secrets))
+                .unwrap_or_else(|e| panic!("load {public} + {secrets}: {e}"));
 
         // A handful of spot checks that double as documentation:
         // future field additions can extend the example TOML AND the
@@ -2880,7 +2858,10 @@ iface = "wg0"
 metric = 200
 "#;
         let r: Route6 = toml::from_str(toml).unwrap();
-        assert_eq!(r.gateway, Some("fe80::1".parse::<std::net::Ipv6Addr>().unwrap()));
+        assert_eq!(
+            r.gateway,
+            Some("fe80::1".parse::<std::net::Ipv6Addr>().unwrap())
+        );
         assert_eq!(r.metric, 200);
     }
 

@@ -654,9 +654,7 @@ mod tests {
             out.contains(r#"oxwrt_wan_dhcp_acquires_total{iface="eth1",result="ok"} 3"#),
             "got:\n{out}"
         );
-        assert!(out.contains(
-            r#"oxwrt_wan_dhcp_acquires_total{iface="eth1",result="timeout"} 1"#
-        ));
+        assert!(out.contains(r#"oxwrt_wan_dhcp_acquires_total{iface="eth1",result="timeout"} 1"#));
         assert!(out.contains(r#"oxwrt_wan_dhcp_last_acquire_seconds{iface="eth1"} 1.234"#));
     }
 
@@ -665,17 +663,11 @@ mod tests {
         let mut out = String::new();
         render_counters(&mut out, &mk_state());
         assert!(out.contains(r#"oxwrt_blocklist_entries{name="firehol"} 912"#));
+        assert!(out.contains(r#"oxwrt_blocklist_fetches_total{name="firehol",result="ok"} 7"#));
         assert!(
-            out.contains(r#"oxwrt_blocklist_fetches_total{name="firehol",result="ok"} 7"#)
+            out.contains(r#"oxwrt_blocklist_fetches_total{name="firehol",result="http_error"} 2"#)
         );
-        assert!(
-            out.contains(
-                r#"oxwrt_blocklist_fetches_total{name="firehol",result="http_error"} 2"#
-            )
-        );
-        assert!(out.contains(
-            r#"oxwrt_blocklist_last_fetch_timestamp{name="firehol"} 1700000000"#
-        ));
+        assert!(out.contains(r#"oxwrt_blocklist_last_fetch_timestamp{name="firehol"} 1700000000"#));
     }
 
     #[test]

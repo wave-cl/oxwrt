@@ -377,7 +377,10 @@ async fn handle_vpn_profile_import(
         "vpn-profile import: profile {:?} merged as iface {} priority {}",
         name, iface, priority
     );
-    eprintln!("vpn-profile import: run `oxctl {} reload` to activate.", addr);
+    eprintln!(
+        "vpn-profile import: run `oxctl {} reload` to activate.",
+        addr
+    );
     Ok(())
 }
 
@@ -390,22 +393,28 @@ async fn diag_ping_many_via_router(
     addr: SocketAddr,
     ips: &[String],
 ) -> Result<Vec<(String, f64)>, String> {
-    let server_key_hex = std::env::var("SQUIC_SERVER_KEY")
-        .map_err(|_| "missing SQUIC_SERVER_KEY".to_string())?;
+    let server_key_hex =
+        std::env::var("SQUIC_SERVER_KEY").map_err(|_| "missing SQUIC_SERVER_KEY".to_string())?;
     let server_key = parse_pubkey(&server_key_hex).map_err(|e| e.to_string())?;
     let mut cfg = squic::Config::default();
     if let Ok(client_key) = std::env::var("SQUIC_CLIENT_KEY") {
         cfg.client_key = Some(client_key);
     }
-    let conn = squic::dial(addr, &server_key, cfg).await.map_err(|e| e.to_string())?;
+    let conn = squic::dial(addr, &server_key, cfg)
+        .await
+        .map_err(|e| e.to_string())?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
     let req = Request::Diag {
         name: "ping-many".to_string(),
         args: ips.to_vec(),
     };
-    write_frame(&mut send, &req).await.map_err(|e| e.to_string())?;
+    write_frame(&mut send, &req)
+        .await
+        .map_err(|e| e.to_string())?;
     send.finish().map_err(|e| e.to_string())?;
-    let resp = read_frame::<_, Response>(&mut recv).await.map_err(|e| e.to_string())?;
+    let resp = read_frame::<_, Response>(&mut recv)
+        .await
+        .map_err(|e| e.to_string())?;
     conn.close(0u32.into(), b"bye");
     let value = match resp {
         Response::Value { value } => value,
@@ -546,8 +555,12 @@ async fn handle_vpn_auto_switch(
 
     eprintln!("vpn-auto-switch: fetching Mullvad relay list...");
     let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
-    let mut filtered =
-        mullvad::filter_relays(&relays.wireguard.relays, country.as_deref(), city.as_deref(), false);
+    let mut filtered = mullvad::filter_relays(
+        &relays.wireguard.relays,
+        country.as_deref(),
+        city.as_deref(),
+        false,
+    );
     if filtered.is_empty() {
         return Err(Error::Rpc(format!(
             "no relays matched country={:?} city={:?}",
@@ -625,8 +638,8 @@ async fn handle_vpn_switch_relay(
 
     // 1. API lookup — fail early before touching the router.
     let relays = mullvad::fetch_relays().await.map_err(Error::Rpc)?;
-    let relay = mullvad::find_by_hostname(&relays.wireguard.relays, &hostname)
-        .ok_or_else(|| {
+    let relay =
+        mullvad::find_by_hostname(&relays.wireguard.relays, &hostname).ok_or_else(|| {
             Error::Rpc(format!(
                 "vpn-switch-relay: no Mullvad relay with hostname {:?}",
                 hostname

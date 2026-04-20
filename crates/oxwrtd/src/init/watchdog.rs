@@ -182,11 +182,7 @@ pub(super) fn spawn_watchdog_pet() {
 ///
 /// Extracted so the decision logic is unit-testable without
 /// spawning threads or reading the real HEARTBEAT static.
-fn update_stall_tracker(
-    last_seen: u64,
-    last_advance: Instant,
-    current: u64,
-) -> (u64, Instant) {
+fn update_stall_tracker(last_seen: u64, last_advance: Instant, current: u64) -> (u64, Instant) {
     if current != last_seen {
         (current, Instant::now())
     } else {

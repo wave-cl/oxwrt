@@ -244,10 +244,7 @@ fn split_wireguard_peers(public: &mut DocumentMut, secret: &mut DocumentMut, sf:
         let Some(wg_name) = get_str_field(wg, "name").map(|s| s.to_string()) else {
             continue;
         };
-        let Some(peers) = wg
-            .get_mut("peers")
-            .and_then(|i| i.as_array_of_tables_mut())
-        else {
+        let Some(peers) = wg.get_mut("peers").and_then(|i| i.as_array_of_tables_mut()) else {
             continue;
         };
         for peer in peers.iter_mut() {
@@ -299,9 +296,7 @@ fn redact_one(doc: &mut DocumentMut, sf: &SecretField) {
                 return;
             };
             for wg in wg_aot.iter_mut() {
-                let Some(peers) = wg
-                    .get_mut("peers")
-                    .and_then(|i| i.as_array_of_tables_mut())
+                let Some(peers) = wg.get_mut("peers").and_then(|i| i.as_array_of_tables_mut())
                 else {
                     continue;
                 };
@@ -313,7 +308,10 @@ fn redact_one(doc: &mut DocumentMut, sf: &SecretField) {
             }
         }
         section => {
-            let Some(aot) = doc.get_mut(section).and_then(|i| i.as_array_of_tables_mut()) else {
+            let Some(aot) = doc
+                .get_mut(section)
+                .and_then(|i| i.as_array_of_tables_mut())
+            else {
                 return;
             };
             for entry in aot.iter_mut() {
@@ -391,8 +389,7 @@ pub fn migrate_public_to_split(
     write_tmp_rename(&secrets_path, &secret_doc.to_string(), 0o600)?;
     // Double-check mode post-rename (some filesystems / umasks leak
     // through tmp-rename; cheap insurance).
-    let _ =
-        std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600));
+    let _ = std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600));
     Ok(MigrationOutcome::Migrated {
         count: secret_count,
     })
@@ -433,11 +430,7 @@ pub fn count_entries(doc: &DocumentMut) -> usize {
     n
 }
 
-fn write_tmp_rename(
-    path: &std::path::Path,
-    text: &str,
-    mode: u32,
-) -> Result<(), std::io::Error> {
+fn write_tmp_rename(path: &std::path::Path, text: &str, mode: u32) -> Result<(), std::io::Error> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
@@ -484,11 +477,8 @@ mod tests {
     #[test]
     fn public_example_is_free_of_secrets() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/oxwrt.toml");
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let mut doc: DocumentMut = text
-            .parse()
-            .unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let mut doc: DocumentMut = text.parse().unwrap_or_else(|e| panic!("parse {path}: {e}"));
         let secret_doc = split_document(&mut doc);
         // If split produced any entries, the public file had
         // secret leaves. Emit them for the operator to fix.
@@ -706,8 +696,11 @@ passphrase = "hunter2"
     fn migrate_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let public = tmp.path().join("oxwrt.toml");
-        std::fs::write(&public, "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n")
-            .unwrap();
+        std::fs::write(
+            &public,
+            "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n",
+        )
+        .unwrap();
         let _first = migrate_public_to_split(&public).unwrap();
         let second = migrate_public_to_split(&public).unwrap();
         // Second call: public is already clean.
@@ -719,8 +712,11 @@ passphrase = "hunter2"
         let tmp = tempfile::tempdir().unwrap();
         let public = tmp.path().join("oxwrt.toml");
         let secrets = tmp.path().join("oxwrt.secrets.toml");
-        std::fs::write(&public, "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n")
-            .unwrap();
+        std::fs::write(
+            &public,
+            "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n",
+        )
+        .unwrap();
         std::fs::write(&secrets, "").unwrap();
         let outcome = migrate_public_to_split(&public).unwrap();
         assert_eq!(outcome, MigrationOutcome::BothPresentUnsafe);

@@ -100,14 +100,8 @@ pub fn snapshot_all(
     wan_health: &WanHealth,
     active_wan: &ActiveWan,
 ) -> Vec<WanSnapshot> {
-    let leases = wan_leases
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    let health = wan_health
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let leases = wan_leases.read().map(|g| g.clone()).unwrap_or_default();
+    let health = wan_health.read().map(|g| g.clone()).unwrap_or_default();
     let active_name: Option<String> = active_wan.lock().ok().and_then(|g| (*g).clone());
     cfg.networks
         .iter()
@@ -189,7 +183,9 @@ pub fn spawn(
             // exactly the thing operators will grep dmesg for
             // after a mystery outage.
             match (&prev_active, &now_key) {
-                (None, Some((n, gw))) => tracing::warn!(active = %n, gateway = %gw, "wan failover: activating"),
+                (None, Some((n, gw))) => {
+                    tracing::warn!(active = %n, gateway = %gw, "wan failover: activating")
+                }
                 (Some((old, _)), Some((new, gw))) if old == new => {
                     tracing::info!(wan = %new, gateway = %gw, "wan failover: gateway changed on same WAN")
                 }
@@ -213,7 +209,9 @@ pub fn spawn(
                 if let Some(gw) = lease.gateway {
                     // Find the iface for this WAN from cfg.
                     let iface = cfg.networks.iter().find_map(|n| match n {
-                        Network::Wan { name: n2, iface, .. } if n2 == name => Some(iface.clone()),
+                        Network::Wan {
+                            name: n2, iface, ..
+                        } if n2 == name => Some(iface.clone()),
                         _ => None,
                     });
                     if let Some(iface) = iface {
@@ -355,10 +353,7 @@ async fn probe_once(iface: &str, target: &str, timeout_s: &str) -> bool {
     // -c / -W; pass both.
     let res = tokio::process::Command::new("ping")
         .args([
-            "-I", iface,
-            "-c", "1",
-            "-W", timeout_s,
-            "-q", // quiet, only emit summary
+            "-I", iface, "-c", "1", "-W", timeout_s, "-q", // quiet, only emit summary
             target,
         ])
         .stdout(std::process::Stdio::null())
@@ -440,7 +435,11 @@ mod tests {
         Network::Wan {
             name: name.into(),
             iface: iface.into(),
-            wan: oxwrt_api::config::WanConfig::Dhcp { send_hostname: false, hostname_override: None, vendor_class_id: None },
+            wan: oxwrt_api::config::WanConfig::Dhcp {
+                send_hostname: false,
+                hostname_override: None,
+                vendor_class_id: None,
+            },
             ipv6_pd: false,
             sqm: None,
             priority,
@@ -482,7 +481,7 @@ mod tests {
                 authorized_keys: PathBuf::from("/x"),
                 clients: vec![],
                 max_connections: 32,
-            max_rpcs_per_sec: 20,
+                max_rpcs_per_sec: 20,
             },
         }
     }
