@@ -353,6 +353,8 @@ IMAGEBUILDER_PACKAGES := \
 	tc-tiny \
 	ca-bundle \
 	nftables \
+	drill \
+	ss \
 	-netifd \
 	-uci \
 	-uclient-fetch \

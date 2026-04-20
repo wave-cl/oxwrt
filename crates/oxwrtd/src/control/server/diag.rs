@@ -417,7 +417,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
             message: format!(
                 "diag: unknown op {other:?} (supported: links, routes, addresses, firewall, dhcp, \
                  modules, dmesg, nft, nft-summary, conntrack, resolv, qdisc, sysctl, ping, ping-many, \
-                 traceroute, dig, stall, wol, devices)"
+                 traceroute, drill, ss, stall, wol, devices)"
             ),
         },
     }
@@ -917,6 +917,26 @@ async fn diag_exec(entry: &DiagBinary, args: &[String]) -> Result<String, String
     use crate::config::{NetMode, SecurityProfile, Service};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    // Pre-flight: check the binary actually exists in the diag rootfs
+    // before spawning the container. On stock mediatek/filogic +
+    // side-binary deployments `drill` and `ss` are provisioned only
+    // if the host OpenWrt image shipped them — many minimal images
+    // don't, and the operator would otherwise see a confusing
+    // "No such file or directory (os error 2)" from the spawn.
+    // An explicit "not provisioned on this image" points at the
+    // right fix (bake it in via openwrt-packages or the uci-default
+    // diag-rootfs provisioner).
+    let bin_path = format!("{}{}", entry.rootfs, entry.bin);
+    if !std::path::Path::new(&bin_path).exists() {
+        return Err(format!(
+            "diag {}: {bin_path} not provisioned on this image — add the \
+             relevant OpenWrt package (ldns-utils for drill, iproute2 for ss) \
+             to IMAGEBUILDER_PACKAGES, or stage the binary into \
+             /usr/lib/oxwrt/diag/bin/ via a custom overlay",
+            entry.name
+        ));
+    }
 
     let argv = (entry.arg_builder)(args)?;
 

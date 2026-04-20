@@ -43,13 +43,27 @@ for b in ping traceroute dig drill ss; do
     fi
 done
 
-# Runtime libs for the (dynamically-linked) BusyBox. On aarch64 musl
-# OpenWrt: the loader + libgcc_s. If the image uses glibc or adds more
-# libs, this list expands.
+# Runtime libs: the loader + libgcc are always copied. BusyBox
+# applets (ping, traceroute) are statically-linked against musl
+# so the explicit list used to suffice. For real binaries (drill
+# pulls libldns + libssl + libcrypto, ss pulls libmnl), walk each
+# binary's ldd output and copy every transitive dep.
 for lib in /lib/ld-musl-aarch64.so.1 /lib/libgcc_s.so.1; do
     if [ -f "$lib" ]; then
         cp "$lib" "$R/lib/"
     fi
+done
+for bin in "$R"/bin/*; do
+    [ -x "$bin" ] || continue
+    # musl's ldd prints "<libname> => <path> (<addr>)" per line.
+    # Column 3 is the resolved absolute path. Skip libs already
+    # copied. Errors on statically-linked binaries are tolerated.
+    ldd "$bin" 2>/dev/null | awk '/=>/{print $3}' | while read -r lib; do
+        [ -n "$lib" ] && [ -f "$lib" ] || continue
+        base=$(basename "$lib")
+        [ -e "$R/lib/$base" ] && continue
+        cp "$lib" "$R/lib/"
+    done || true
 done
 
 # Minimal /etc — ping and traceroute look up the invoking user and
