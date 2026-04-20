@@ -1224,6 +1224,12 @@ target = "/etc/hostapd-5g.conf"
 # under the sysupgrade.conf-preserved tree, which broke the config-
 # backup tar step ("socket can not be archived").
 
+# CAP_NET_RAW: 802.11 raw frame TX/RX via the wireless monitor socket.
+# CAP_NET_ADMIN: required by nl80211 — every AP-configuration command
+# (NL80211_CMD_SET_CHANNEL, NL80211_CMD_START_AP, NL80211_CMD_NEW_KEY,
+# etc.) is gated on CAP_NET_ADMIN in the kernel's cfg80211.c. Can't
+# be dropped without the AP failing to start. Both caps audited
+# 2026-04-20 as genuinely required.
 [services.security]
 caps = [
   "SETUID", "SETGID", "SETPCAP",
@@ -1285,13 +1291,19 @@ depends_on = []
 source = "/etc/oxwrt/corerad.toml"
 target = "/etc/corerad.toml"
 
-# corerad needs CAP_NET_RAW for the ICMPv6 raw socket (mandatory) and
-# CAP_NET_ADMIN so it can toggle /proc/sys/net/ipv6/conf/<if>/accept_ra
-# + subscribe to rtnetlink link/addr notifications. Without NET_ADMIN
-# it still runs but won't disable kernel autoconf on the advertising
-# iface.
+# corerad needs CAP_NET_RAW for the ICMPv6 raw socket (mandatory).
+# CAP_NET_ADMIN was previously retained to let corerad toggle
+# /proc/sys/net/ipv6/conf/<if>/accept_ra per-iface, but oxwrtd
+# already sets `net.ipv6.conf.all.accept_ra = 2` at boot (see
+# net/mod.rs:660), which covers every iface via sysctl inheritance.
+# Rtnetlink subscription for link/addr change events uses read-only
+# netlink and doesn't require NET_ADMIN. Trimmed on 2026-04-20
+# during the services-security audit — fewer caps = smaller blast
+# radius of a corerad 0-day. If RAs stop advertising after a bump,
+# check whether a new corerad version has started issuing nl commands
+# that need NET_ADMIN and restore.
 [services.security]
-caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_RAW", "NET_ADMIN"]
+caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_RAW"]
 
 # --- ntpd-rs: NTP client + server ---
 [[services]]
