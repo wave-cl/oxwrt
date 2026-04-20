@@ -1,6 +1,18 @@
 //! Clock bootstrapping: SNTP via anycast + build-epoch floor.
 //! Split out of init.rs in step 6.
 
+/// Is this a transient route-not-yet-installed error worth retrying?
+/// ENETUNREACH (101) fires when the main routing table has no
+/// default; EADDRNOTAVAIL (99) fires when the source-address we'd
+/// use isn't up yet. Both go away within a few hundred ms of the
+/// wan_failover coordinator installing the default route.
+fn is_transient_route_err(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(101) /* ENETUNREACH */ | Some(99) /* EADDRNOTAVAIL */
+    )
+}
+
 pub(super) async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
     use tokio::net::UdpSocket;
     use tokio::time::{Duration, timeout};
@@ -10,23 +22,49 @@ pub(super) async fn sntp_bootstrap_clock(addr: &str) -> Result<(), String> {
     let mut req = [0u8; 48];
     req[0] = 0x1B;
 
-    let sock = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| format!("bind: {e}"))?;
-    sock.connect(addr)
-        .await
-        .map_err(|e| format!("connect {addr}: {e}"))?;
-
-    timeout(Duration::from_secs(5), sock.send(&req))
-        .await
-        .map_err(|_| "send timeout".to_string())?
-        .map_err(|e| format!("send: {e}"))?;
-
+    // Retry loop for the startup race. The caller (main_loop's
+    // DHCP-acquired hook) fires us the instant the lease lands —
+    // but the main-table default route is installed half a beat
+    // later by the wan_failover coordinator. In between, a
+    // straight connect() hits ENETUNREACH (os error 101). Retry
+    // on ENETUNREACH / EADDRNOTAVAIL with 500 ms backoff so the
+    // common first-boot path goes quiet; up to ~3s total before
+    // we give up and let the supervised `ntp` service take over.
     let mut buf = [0u8; 48];
-    timeout(Duration::from_secs(5), sock.recv(&mut buf))
-        .await
-        .map_err(|_| "recv timeout".to_string())?
-        .map_err(|e| format!("recv: {e}"))?;
+    let mut attempts = 0;
+    let max_attempts = 6;
+    loop {
+        attempts += 1;
+        let sock = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => return Err(format!("bind: {e}")),
+        };
+        // A bind succeeded, so retry only on connect/send ENETUNREACH.
+        match sock.connect(addr).await {
+            Ok(()) => {}
+            Err(e) if is_transient_route_err(&e) && attempts < max_attempts => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Err(e) => return Err(format!("connect {addr}: {e}")),
+        }
+
+        match timeout(Duration::from_secs(5), sock.send(&req)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) if is_transient_route_err(&e) && attempts < max_attempts => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Ok(Err(e)) => return Err(format!("send: {e}")),
+            Err(_) => return Err("send timeout".to_string()),
+        }
+
+        match timeout(Duration::from_secs(5), sock.recv(&mut buf)).await {
+            Ok(Ok(_)) => break,
+            Ok(Err(e)) => return Err(format!("recv: {e}")),
+            Err(_) => return Err("recv timeout".to_string()),
+        }
+    }
 
     // Transmit timestamp: offset 40, 8 bytes (32-bit seconds since
     // NTP epoch 1900, 32-bit fractional seconds).
