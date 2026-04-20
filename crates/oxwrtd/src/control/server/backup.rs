@@ -37,7 +37,11 @@ const OXWRT_DIR: &str = "/etc/oxwrt";
 /// tens of KB, well under any sQUIC frame limit (and the base64
 /// expansion of a 20 KB input is still under 30 KB).
 pub(super) fn handle_backup() -> Response {
-    let bytes = match build_tarball() {
+    // Called from the Backup RPC. The operator explicitly asked
+    // for the tarball, so always include secrets — the alternative
+    // would be a backup that can't restore the device without
+    // out-of-band credential replay.
+    let bytes = match build_tarball(true) {
         Ok(b) => b,
         Err(e) => {
             return Response::Err {
@@ -49,7 +53,13 @@ pub(super) fn handle_backup() -> Response {
     Response::Value { value: b64 }
 }
 
-pub fn build_tarball() -> Result<Vec<u8>, String> {
+/// Build the backup tarball. `include_secrets` controls whether
+/// `oxwrt.secrets.toml` (sibling of the public config) is included.
+/// For the Backup RPC we always pass `true` (restore would be
+/// useless otherwise); the SFTP-backup path honours the config's
+/// `[backup_sftp].include_secrets` knob so compliance-conscious
+/// operators can push only the publishable half to the remote.
+pub fn build_tarball(include_secrets: bool) -> Result<Vec<u8>, String> {
     let gz = GzEncoder::new(Vec::new(), Compression::default());
     let mut tar = tar::Builder::new(gz);
 
@@ -88,6 +98,16 @@ pub fn build_tarball() -> Result<Vec<u8>, String> {
             .to_string();
         // Skip the vpn/ subtree — see comment above.
         if is_vpn_key_path(&rel) {
+            continue;
+        }
+        // Honour include_secrets: drop oxwrt.secrets.toml if the
+        // operator opted out. The rest of /etc/oxwrt/ (keys, known
+        // hosts, etc.) stays — those are needed for identity
+        // continuity on restore regardless of the secrets-file
+        // choice. If an operator really needs a secret-free backup
+        // they'll also want to rotate wg0.key / key.ed25519
+        // out-of-band; we leave that to them.
+        if !include_secrets && rel == "oxwrt.secrets.toml" {
             continue;
         }
         let archive_name = format!("oxwrt/{rel}");

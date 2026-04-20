@@ -180,6 +180,14 @@ pub struct SftpBackup {
     /// (unbounded growth — not recommended).
     #[serde(default = "default_sftp_keep")]
     pub keep: u32,
+    /// Include the secrets overlay (`oxwrt.secrets.toml`) in the
+    /// pushed tarball. Default `true` — most operators use SFTP
+    /// backups precisely so a dead router is a full restore away,
+    /// and that requires the secrets. Set `false` for compliance
+    /// scenarios where the remote must never receive credentials;
+    /// in that case restore requires rotating every secret by hand.
+    #[serde(default = "default_sftp_include_secrets")]
+    pub include_secrets: bool,
 }
 
 fn default_sftp_port() -> u16 {
@@ -190,6 +198,9 @@ fn default_sftp_interval() -> u32 {
 }
 fn default_sftp_keep() -> u32 {
     30
+}
+fn default_sftp_include_secrets() -> bool {
+    true
 }
 
 /// UPnP / NAT-PMP / PCP (miniupnpd) configuration. Renders to a
@@ -1510,7 +1521,7 @@ pub(crate) const ARRAY_IDENTITY_KEYS: &[(&str, &str)] = &[
 ///
 /// `path` is the dotted path being merged; the top-level call
 /// passes `""`.
-pub(crate) fn merge_toml(base: &mut toml::Value, overlay: toml::Value, path: &str) {
+pub fn merge_toml(base: &mut toml::Value, overlay: toml::Value, path: &str) {
     use toml::Value;
     match overlay {
         Value::Table(o) => {
@@ -1577,7 +1588,7 @@ pub(crate) fn merge_toml(base: &mut toml::Value, overlay: toml::Value, path: &st
 /// Apply `OXWRT_SECRET__…` env vars on top of `base`. Silent no-op
 /// for malformed / non-matching vars — the load path shouldn't
 /// fail because of environmental noise.
-pub(crate) fn apply_env_overlay(base: &mut toml::Value) {
+pub fn apply_env_overlay(base: &mut toml::Value) {
     for (k, v) in std::env::vars() {
         let Some(rest) = k.strip_prefix(SECRET_ENV_PREFIX) else {
             continue;

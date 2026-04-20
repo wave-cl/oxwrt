@@ -26,5 +26,5 @@ rmp-serde.workspace = true
 # For tests that round-trip TOML — the example-config parse test
 # needs access to the workspace-checked-in config/oxwrt.toml and
 # config/services/ files. tempfile is used by the Config::load-from-
-# path tests.
+# path tests and the secrets-migration tests.
 tempfile = { workspace = true }

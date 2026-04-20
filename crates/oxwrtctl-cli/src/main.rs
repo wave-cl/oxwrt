@@ -43,6 +43,19 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // `dump-config`: client-local, no sQUIC. Reads the split
+        // pair (public + secrets + env overlay), merges, redacts
+        // every secret leaf, and prints the result. Safe to paste
+        // into a bug report.
+        Some("dump-config") => {
+            match oxwrtctl_cli::dump_config::run(args.into_iter().skip(1).collect()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("oxctl dump-config: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         // Anything else: treat args as `<remote> <cmd> [args...]`.
         _ => oxwrtctl_cli::run_client_sync(args),
     }
@@ -64,6 +77,7 @@ fn print_usage() {
     eprintln!(
         "usage: oxctl <remote> <cmd> [args...]\n\
                 oxctl wizard [--out <path>]\n\
+                oxctl dump-config [--public PATH] [--secrets PATH]\n\
                 oxctl --print-server-key [path]\n\
                 oxctl --version\n\
                 oxctl --help\n\

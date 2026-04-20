@@ -133,6 +133,7 @@ pub fn run() -> Result<(), Error> {
         }
     }
 
+    run_secrets_migration(&config_path);
     let cfg = Config::load(&config_path)?;
 
     // Sanity-truncate coredhcp's persisted lease file if any lease falls
@@ -187,6 +188,7 @@ pub fn run_control_only() -> Result<(), Error> {
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+    run_secrets_migration(&config_path);
     let cfg = Config::load(&config_path)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -216,6 +218,7 @@ pub fn run_services_only() -> Result<(), Error> {
     let config_path = std::env::var("OXWRT_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+    run_secrets_migration(&config_path);
     let cfg = Config::load(&config_path)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1030,8 +1033,13 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // cfg.backup_sftp.interval_hours (default 24), shells out to
     // ssh(1) to push /etc/oxwrt/* tarball to a remote host. No-op
     // when cfg.backup_sftp is None.
-    crate::backup_sftp::spawn(&cfg, || {
-        crate::control::server::backup::build_tarball()
+    let include_secrets = cfg
+        .backup_sftp
+        .as_ref()
+        .map(|s| s.include_secrets)
+        .unwrap_or(true);
+    crate::backup_sftp::spawn(&cfg, move || {
+        crate::control::server::backup::build_tarball(include_secrets)
     });
 
     if !cfg.vpn_client.is_empty() {
@@ -1202,6 +1210,41 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     }
     server_task.abort();
     Ok(())
+}
+
+/// One-shot migration from the old single-file `oxwrt.toml` (inline
+/// secrets) to the split public + `oxwrt.secrets.toml` layout.
+///
+/// Called once on boot, before `Config::load`. Idempotent:
+/// subsequent boots find the public file already clean and
+/// short-circuit. On error we log and continue — the loader's
+/// merge path handles any partial state.
+fn run_secrets_migration(public_path: &Path) {
+    use oxwrt_api::secrets::{MigrationOutcome, migrate_public_to_split};
+    match migrate_public_to_split(public_path) {
+        Ok(MigrationOutcome::Migrated { count }) => {
+            tracing::info!(
+                count,
+                public = %public_path.display(),
+                secrets = %public_path.with_file_name("oxwrt.secrets.toml").display(),
+                "migrated secrets out of public config; public file is now publishable"
+            );
+        }
+        Ok(MigrationOutcome::AlreadyClean) => {} // steady state
+        Ok(MigrationOutcome::NoPublicFile) => {}
+        Ok(MigrationOutcome::BothPresentUnsafe) => {
+            tracing::warn!(
+                public = %public_path.display(),
+                "oxwrt.toml contains inline secrets and oxwrt.secrets.toml \
+                 already exists; leaving both alone. Delete oxwrt.secrets.toml \
+                 to force re-migration, or remove the inline secrets from the \
+                 public file by hand."
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "secrets migration failed; loader will merge whatever is on disk");
+        }
+    }
 }
 
 fn parse_listen_addrs(listen: &[String]) -> Vec<SocketAddr> {

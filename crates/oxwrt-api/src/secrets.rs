@@ -335,6 +335,137 @@ pub fn empty_array() -> Array {
     Array::new()
 }
 
+/// Possible outcomes of a one-shot `migrate_public_to_split` call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// Public file doesn't exist — nothing to do (fresh flash / dev).
+    NoPublicFile,
+    /// Public file has no secret leaves — the split already happened
+    /// in a previous boot, or this config never had secrets.
+    AlreadyClean,
+    /// Public file contains secrets AND the secrets file already
+    /// exists. Refuse to touch — the secrets file might have newer
+    /// values the operator deliberately put there; a merge would be
+    /// guesswork. Caller should log a warning and leave things to
+    /// operator intervention.
+    BothPresentUnsafe,
+    /// Migrated `count` secret leaves from public to a newly-created
+    /// secrets file. Public is now publishable; secrets file is
+    /// mode 0600.
+    Migrated { count: usize },
+}
+
+/// One-shot migration helper: if `public_path` contains live secret
+/// leaves AND there's no sibling `oxwrt.secrets.toml`, split the
+/// public file in place and write both halves to disk.
+///
+/// Called from the daemon's boot path before `Config::load` so the
+/// loader always sees the split layout. Idempotent: subsequent
+/// boots find `oxwrt.secrets.toml` present and short-circuit.
+pub fn migrate_public_to_split(
+    public_path: &std::path::Path,
+) -> Result<MigrationOutcome, std::io::Error> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
+    let secrets_path = public_path.with_file_name("oxwrt.secrets.toml");
+    let public_text = match std::fs::read_to_string(public_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Ok(MigrationOutcome::NoPublicFile);
+        }
+        Err(e) => return Err(e),
+    };
+    let mut doc: DocumentMut = public_text
+        .parse()
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, format!("parse public: {e}")))?;
+    let secret_doc = split_document(&mut doc);
+    let secret_count = count_entries(&secret_doc);
+    if secret_count == 0 {
+        return Ok(MigrationOutcome::AlreadyClean);
+    }
+    if secrets_path.exists() {
+        return Ok(MigrationOutcome::BothPresentUnsafe);
+    }
+    // Write atomically: tmp → fsync → rename, pair of files.
+    write_tmp_rename(public_path, &doc.to_string(), 0o644)?;
+    write_tmp_rename(&secrets_path, &secret_doc.to_string(), 0o600)?;
+    // Double-check mode post-rename (some filesystems / umasks leak
+    // through tmp-rename; cheap insurance).
+    let _ =
+        std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600));
+    Ok(MigrationOutcome::Migrated {
+        count: secret_count,
+    })
+}
+
+/// Count the number of secret entries in a (freshly-split) overlay
+/// doc. Entries are flat: one per secret leaf across all top-level
+/// arrays + the nested `wireguard.peers` path. Used by
+/// `migrate_public_to_split` to decide whether the migration has
+/// work to do, and by the dump-config path to emit an honest
+/// `secrets: N` header.
+pub fn count_entries(doc: &DocumentMut) -> usize {
+    let mut n = 0;
+    for (_, item) in doc.iter() {
+        let Some(aot) = item.as_array_of_tables() else {
+            continue;
+        };
+        for entry in aot.iter() {
+            // Count every field on each entry except the identity
+            // key. Multiple secret leaves per entry (impossible
+            // today but future-proof) count separately.
+            let identity_keys = ["ssid", "name"];
+            n += entry
+                .iter()
+                .filter(|(k, _)| !identity_keys.contains(k))
+                .count();
+            // Recurse into nested peers arrays for wireguard.
+            if let Some(peers) = entry.get("peers").and_then(|i| i.as_array_of_tables()) {
+                for peer in peers.iter() {
+                    n += peer
+                        .iter()
+                        .filter(|(k, _)| !identity_keys.contains(k))
+                        .count();
+                }
+            }
+        }
+    }
+    n
+}
+
+fn write_tmp_rename(
+    path: &std::path::Path,
+    text: &str,
+    mode: u32,
+) -> Result<(), std::io::Error> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.mig-tmp"),
+        None => "mig-tmp".to_string(),
+    });
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +642,71 @@ passphrase = "hunter2"
         let s = doc.to_string();
         assert!(!s.contains("hunter2"));
         assert!(s.contains(REDACTED));
+    }
+
+    #[test]
+    fn migrate_splits_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        std::fs::write(
+            &public,
+            concat!(
+                "hostname = \"x\"\n",
+                "[[wifi]]\nssid = \"main\"\npassphrase = \"hunter2\"\n",
+            ),
+        )
+        .unwrap();
+        let outcome = migrate_public_to_split(&public).unwrap();
+        assert_eq!(outcome, MigrationOutcome::Migrated { count: 1 });
+        let pub_after = std::fs::read_to_string(&public).unwrap();
+        assert!(!pub_after.contains("hunter2"));
+        let sec = std::fs::read_to_string(tmp.path().join("oxwrt.secrets.toml")).unwrap();
+        assert!(sec.contains("hunter2"));
+        // Mode check (Unix only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(tmp.path().join("oxwrt.secrets.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn migrate_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        std::fs::write(&public, "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n")
+            .unwrap();
+        let _first = migrate_public_to_split(&public).unwrap();
+        let second = migrate_public_to_split(&public).unwrap();
+        // Second call: public is already clean.
+        assert_eq!(second, MigrationOutcome::AlreadyClean);
+    }
+
+    #[test]
+    fn migrate_refuses_when_both_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml");
+        let secrets = tmp.path().join("oxwrt.secrets.toml");
+        std::fs::write(&public, "hostname = \"x\"\n[[wifi]]\nssid = \"m\"\npassphrase = \"p\"\n")
+            .unwrap();
+        std::fs::write(&secrets, "").unwrap();
+        let outcome = migrate_public_to_split(&public).unwrap();
+        assert_eq!(outcome, MigrationOutcome::BothPresentUnsafe);
+        // Public not modified.
+        assert!(std::fs::read_to_string(&public).unwrap().contains("p"));
+    }
+
+    #[test]
+    fn migrate_missing_public_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let public = tmp.path().join("oxwrt.toml"); // absent
+        let outcome = migrate_public_to_split(&public).unwrap();
+        assert_eq!(outcome, MigrationOutcome::NoPublicFile);
     }
 
     #[test]
