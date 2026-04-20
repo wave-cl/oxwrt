@@ -654,12 +654,13 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         tracing::error!(error = %e, "reload: wifi::write_all failed");
     }
 
-    // Phase 4: reconcile supervisor. Unlike the previous
+    // Phase 4a: reconcile supervisor. Unlike the previous
     // shutdown()+from_config() pattern this leaves unchanged
     // services running — hostapd doesn't blip wifi clients on a
     // reload that only touched a route or a firewall rule. Spec
-    // changes still trigger a stop+respawn, so `oxctl wifi update`
-    // + reload still takes effect.
+    // changes still trigger a stop+respawn (stop synchronously
+    // + reap with a 1s deadline per service), so `oxctl wifi
+    // update` + reload still takes effect.
     {
         let Ok(mut sup) = state.supervisor.lock() else {
             return Response::Err {
@@ -667,6 +668,48 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
             };
         };
         sup.reconcile(&new_cfg.services);
+    }
+
+    // Phase 4b: re-setup host-side veth pairs for every isolated
+    // service. Must run AFTER reconcile has stopped changed
+    // children, because veth pair semantics tie the host end's
+    // lifetime to the peer's netns: when the child dies and its
+    // netns is torn down, the kernel unregisters both ends of the
+    // pair. Before this re-setup, the supervisor's next tick
+    // would call attach_netns on the new child and hit "No such
+    // device" because veth-<svc>-p vanished with the old child.
+    //
+    // create_veth_pair is idempotent on EEXIST (mod.rs), so
+    // unchanged services whose pair survived are a cheap no-op.
+    // This loop also catches pairs that died for other reasons
+    // (kernel races, manual deletion) by recreating them on
+    // every reload.
+    {
+        match crate::net::Net::new() {
+            Ok(net) => {
+                for svc in &new_cfg.services {
+                    if svc.net_mode != crate::config::NetMode::Isolated {
+                        continue;
+                    }
+                    let Some(veth) = &svc.veth else {
+                        continue;
+                    };
+                    if let Err(e) = net
+                        .setup_host_veth(&svc.name, veth.host_ip, veth.prefix)
+                        .await
+                    {
+                        tracing::warn!(
+                            service = %svc.name,
+                            error = %e,
+                            "reload: veth re-setup failed — service may fail to attach netns"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reload: Net::new for veth re-setup failed");
+            }
+        }
     }
 
     // Phase 5: publish new state.

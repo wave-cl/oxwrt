@@ -441,12 +441,41 @@ impl Net {
     pub async fn create_veth_pair(&self, svc_name: &str) -> Result<(String, String), Error> {
         let host_name = format!("veth-{svc_name}");
         let peer_name = format!("veth-{svc_name}-p");
-        self.handle
-            .link()
-            .add(LinkVeth::new(&host_name, &peer_name).build())
-            .execute()
-            .await?;
-        Ok((host_name, peer_name))
+
+        // On reload-induced respawn the OLD pair's state is asymmetric:
+        // the peer end lived in the old child's netns and was torn down
+        // when the netns was destroyed, but the host end SURVIVES in
+        // the host netns (DOWN state). A naive EEXIST=ok path reuses
+        // the zombie host end — but veth-<svc>-p no longer exists, so
+        // the next attach_netns call fails with "No such device". Fix:
+        // when link_add returns EEXIST, explicitly delete the existing
+        // host-side device first, then retry the pair creation. This
+        // guarantees both ends exist in the host netns post-return.
+        let mut attempted_cleanup = false;
+        loop {
+            match self
+                .handle
+                .link()
+                .add(LinkVeth::new(&host_name, &peer_name).build())
+                .execute()
+                .await
+            {
+                Ok(()) => return Ok((host_name, peer_name)),
+                Err(e) if is_exists(&e) && !attempted_cleanup => {
+                    tracing::debug!(
+                        %host_name,
+                        "veth host end survived previous child (peer dead with netns); \
+                         deleting orphan and recreating pair"
+                    );
+                    if let Ok(idx) = self.link_index(&host_name).await {
+                        let _ = self.handle.link().del(idx).execute().await;
+                    }
+                    attempted_cleanup = true;
+                    // fall through to retry
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// Full host-side veth setup: create the pair, assign `host_ip/prefix`

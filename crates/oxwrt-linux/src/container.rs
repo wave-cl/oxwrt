@@ -1229,7 +1229,18 @@ impl Supervisor {
                     existing.spec = new_spec.clone();
                     existing.state = ServiceState::Stopped;
                     existing.backoff = BACKOFF_INITIAL;
-                    existing.next_restart = None;
+                    // Defer the respawn by one tick interval. For
+                    // isolated-netns services, reload's post-reconcile
+                    // phase needs to re-create the host-side veth pair
+                    // (killed together with the old child's netns) —
+                    // we must give it time to run before the tick
+                    // fires spawn(), otherwise attach_netns gets
+                    // "No such device" on veth-<svc>-p and the new
+                    // child lands in an empty netns. 250ms is well
+                    // clear of any realistic setup_host_veth latency
+                    // (~10-50ms observed on-device). For host-netns
+                    // services this is a tiny no-op delay.
+                    existing.next_restart = Some(Instant::now() + Duration::from_millis(250));
                     self.services.push(existing);
                     tracing::info!(service = %new_spec.name, "reconcile: spec changed, restarting");
                 }
