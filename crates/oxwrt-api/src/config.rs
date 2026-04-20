@@ -1042,6 +1042,20 @@ pub struct Wifi {
     /// BSS section. Use for any option not surfaced above.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra: Vec<String>,
+    /// Auto-rotate the passphrase every N hours. When set, oxwrtd
+    /// spawns a task that periodically generates a new 16-char
+    /// alphanumeric passphrase, persists it back into
+    /// `/etc/oxwrt/oxwrt.toml` (via the atomic-write path), runs
+    /// `reload` so hostapd picks up the change, and writes two
+    /// operator-facing sidecar files:
+    ///   /etc/oxwrt/wifi-<ssid>-passphrase.txt  — plain text
+    ///   /etc/oxwrt/wifi-<ssid>-qr.txt          — UTF-8 block QR
+    ///
+    /// Typical use: guest SSID rotating daily or weekly so a
+    /// handed-out passphrase auto-expires. None = no rotation.
+    /// Main-LAN SSIDs should leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate_hours: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

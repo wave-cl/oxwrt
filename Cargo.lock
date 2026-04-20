@@ -1379,6 +1379,7 @@ dependencies = [
  "oxwrt-linux",
  "oxwrt-proto",
  "oxwrtctl-cli",
+ "qrcodegen",
  "quinn",
  "rand_core 0.6.4",
  "reqwest",

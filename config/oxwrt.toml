@@ -769,6 +769,23 @@ security = "wpa2"
 passphrase = "oxwrt-bringup-passphrase"
 network = "lan"
 
+# ── Passphrase auto-rotation ──
+# Set `rotate_hours = N` on a [[wifi]] entry to auto-regenerate
+# a new 16-char alphanumeric passphrase every N hours. oxwrtd
+# rewrites oxwrt.toml atomically, writes operator-facing
+# sidecars at /etc/oxwrt/wifi-<ssid>-{passphrase,qr}.txt, and
+# logs a "run `oxctl reload`" hint. Typical pattern: guest-only
+# SSID rotating daily so handed-out QRs auto-expire. Keep main-
+# LAN SSIDs un-rotated so pinned clients don't re-prompt.
+#
+# [[wifi]]
+# radio = "phy0"
+# ssid = "guest-day"
+# security = "wpa2"
+# passphrase = "replace-at-first-boot"
+# network = "guest"
+# rotate_hours = 24
+
 # ── Multi-BSS example (commented) ──
 # Three SSIDs on the 5 GHz radio:
 #   "home"  — trusted LAN, WPA3 only, 802.11r roaming

@@ -684,6 +684,7 @@ mod tests {
             ft_over_ds: None,
             sae_pwe: None,
             extra: Vec::new(),
+            rotate_hours: None,
         };
         assert!(check_wifi_refs(&wifi, &cfg).is_ok());
     }

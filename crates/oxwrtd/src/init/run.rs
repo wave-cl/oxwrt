@@ -1011,6 +1011,21 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     // kernel."
     crate::vpn_failover::mark_bringup(&state.vpn_bringup, &cfg, true);
 
+    // Guest-WiFi rotation: one tokio task per [[wifi]] entry with
+    // `rotate_hours` set. Each rotates the passphrase on its
+    // schedule, writes sidecars at /etc/oxwrt/wifi-*-passphrase.txt
+    // and -qr.txt, logs a "run `oxctl reload`" hint. v1
+    // operator-triggered reload; auto-reload is a follow-up.
+    //
+    // async_main doesn't receive the config path by parameter;
+    // re-derive from env + the DEFAULT_PATH fallback the outer
+    // run() used (same logic, since env doesn't change between
+    // them).
+    let rotate_cfg_path = std::env::var("OXWRT_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(config::DEFAULT_PATH));
+    crate::wifi_rotate::spawn_all(&cfg, rotate_cfg_path);
+
     if !cfg.vpn_client.is_empty() {
         if let Some(net_handle) = &net {
             let probes =

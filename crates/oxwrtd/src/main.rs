@@ -18,6 +18,8 @@ mod ddns;
 mod init;
 #[cfg(target_os = "linux")]
 mod metrics;
+#[cfg(target_os = "linux")]
+mod wifi_rotate;
 
 use std::process::ExitCode;
 
