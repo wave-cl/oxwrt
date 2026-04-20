@@ -510,10 +510,24 @@ check "diag links (has eth0)" "eth0" "$R"
 R=$(run_cmd diag nft); check "diag nft (has input chain)" "chain input" "$R"
 R=$(run_cmd diag conntrack); check "diag conntrack (runs)" "" "$R"
 
+echo "-- reload dry-run --"
+# Clean config — dry-run must pass before the reload runs it for
+# real in the subsequent assertion.
+R=$(run_cmd reload --dry-run); check_ok "reload --dry-run (clean config)" "$R"
+
+echo "-- rollback --"
+# --confirm gate: bare `rollback` must refuse.
+R=$(run_cmd rollback); check_err "rollback without --confirm rejected" "confirm" "$R"
+# The boot path takes a snapshot after reconcile succeeds, so by
+# now .last-good.toml exists; rollback --confirm should succeed
+# (reverts to itself, reloads).
+R=$(run_cmd rollback --confirm); check_ok "rollback --confirm" "$R"
+
 echo "-- error cases --"
 R=$(run_cmd get nope.key); check_err "get unknown key" "unknown" "$R"
 R=$(run_cmd rule remove doesnotexist); check_err "remove nonexistent" "not found" "$R"
 R=$(run_cmd apply); check_err "apply without confirm" "confirm" "$R"
+R=$(run_cmd reload --froogly); check_err "reload unknown flag rejected" "unknown flag" "$R"
 
 # ── Step 5: teardown + report ──
 echo ""
