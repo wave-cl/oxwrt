@@ -519,9 +519,14 @@ echo "-- rollback --"
 # --confirm gate: bare `rollback` must refuse.
 R=$(run_cmd rollback); check_err "rollback without --confirm rejected" "confirm" "$R"
 # The boot path takes a snapshot after reconcile succeeds, so by
-# now .last-good.toml exists; rollback --confirm should succeed
-# (reverts to itself, reloads).
-R=$(run_cmd rollback --confirm); check_ok "rollback --confirm" "$R"
+# now slot 0 exists; rollback --confirm should succeed (reverts
+# to itself, reloads).
+R=$(run_cmd rollback --confirm); check_ok "rollback --confirm (slot 0)" "$R"
+# rollback-list: pure read, enumerates the ring. Boot-time
+# snapshot means at least one row appears.
+R=$(run_cmd rollback-list); check "rollback-list shows slot 0" "index" "$R"
+# Out-of-range --to is rejected with a clear message.
+R=$(run_cmd rollback --confirm --to 99); check_err "rollback --to out-of-range" "out of range" "$R"
 
 echo "-- error cases --"
 R=$(run_cmd get nope.key); check_err "get unknown key" "unknown" "$R"

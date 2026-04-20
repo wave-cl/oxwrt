@@ -232,21 +232,50 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             Ok(Request::Restore { data_b64, confirm })
         }
         "rollback" => {
-            // Revert the live config pair to the last-good snapshot
-            // oxwrtd took after the most recent successful reload,
-            // then reload. --confirm gate because the current
-            // config is discarded (not saved anywhere else) and
-            // rollback may flap services visibly.
+            // Revert to a snapshot in the ring and reload.
+            // Flags:
+            //   --confirm   required; discards current config.
+            //   --to N      pick ring slot (default 0 = most recent).
             let confirm = args.iter().any(|a| a == "--confirm");
             if !confirm {
                 return Err(
                     "rollback: refusing to roll back without --confirm \
-                     (discards current config; reverts to the last-good snapshot)"
+                     (discards current config; reverts to a snapshot)"
                         .to_string(),
                 );
             }
-            Ok(Request::Rollback { confirm: true })
+            let mut to: Option<u32> = None;
+            let mut i = 0;
+            while i < args.len() {
+                let a = &args[i];
+                if a == "--confirm" {
+                    i += 1;
+                    continue;
+                }
+                if a == "--to" {
+                    let v = args
+                        .get(i + 1)
+                        .ok_or("rollback: --to needs an index")?;
+                    to = Some(
+                        v.parse::<u32>()
+                            .map_err(|_| format!("rollback: --to {v:?} is not a u32"))?,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if let Some(rest) = a.strip_prefix("--to=") {
+                    to = Some(
+                        rest.parse::<u32>()
+                            .map_err(|_| format!("rollback: --to {rest:?} is not a u32"))?,
+                    );
+                    i += 1;
+                    continue;
+                }
+                return Err(format!("rollback: unknown arg {a:?}"));
+            }
+            Ok(Request::Rollback { confirm: true, to })
         }
+        "rollback-list" => Ok(Request::RollbackList),
         "config-push" => {
             let path = args.first().ok_or("config-push: missing TOML file path")?;
             let toml = std::fs::read_to_string(path)

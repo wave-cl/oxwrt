@@ -141,21 +141,31 @@ pub enum Request {
         data_b64: String,
         confirm: bool,
     },
-    /// Revert `/etc/oxwrt/oxwrt.toml` (+ secrets overlay) to the
-    /// last-known-good snapshot oxwrtd captured after the most
-    /// recent successful reload, then reload so the reverted
-    /// config takes effect.
+    /// Revert `/etc/oxwrt/oxwrt.toml` (+ secrets overlay) to a
+    /// last-known-good snapshot oxwrtd captured after a previous
+    /// successful reload, then reload so the reverted config
+    /// takes effect.
+    ///
+    /// `to` picks the ring slot: 0 (default) is the most recent
+    /// known-good, 1 is one before that, up to the ring size
+    /// (5 today). Operators use `--to N` via oxctl; the
+    /// auto-restore on a failed reload always targets slot 0.
     ///
     /// `confirm` MUST be true — rollback discards the current
     /// config (it's not saved anywhere else) and may change the
     /// firewall + services visibly.
     ///
-    /// Fails with a clear error if no last-good snapshot exists
-    /// (fresh flash that never successfully reloaded, or the
-    /// operator deleted `.last-good.toml` by hand).
+    /// Fails with a clear error if no snapshot exists at the
+    /// requested slot.
     Rollback {
         confirm: bool,
+        #[serde(default)]
+        to: Option<u32>,
     },
+    /// Enumerate the snapshot ring: one entry per occupied slot,
+    /// with mtime age, size, and the hostname found in each. Pure
+    /// read — no state change, no confirm needed.
+    RollbackList,
     /// Graceful system reboot. Saves urandom seed, shuts down the
     /// supervisor (stops services in reverse-dep order, reaps
     /// children, removes cgroup leaves), syncs filesystems, then

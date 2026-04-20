@@ -248,8 +248,15 @@ impl Server {
                 continue;
             }
             // Rollback: revert to the last-good snapshot + reload.
-            if let Request::Rollback { confirm } = &request {
-                let resp = rollback::handle_rollback(&self.state, *confirm).await;
+            if let Request::Rollback { confirm, to } = &request {
+                let resp = rollback::handle_rollback(&self.state, *confirm, *to).await;
+                write_frame(&mut send, &resp).await?;
+                send.finish().ok();
+                continue;
+            }
+            // Rollback-list: read-only enumeration of the ring.
+            if let Request::RollbackList = &request {
+                let resp = rollback::handle_rollback_list();
                 write_frame(&mut send, &resp).await?;
                 send.finish().ok();
                 continue;
@@ -451,6 +458,9 @@ fn handle(state: &ControlState, request: Request) -> Vec<Response> {
         }],
         Request::Rollback { .. } => vec![Response::Err {
             message: "BUG: Rollback should be handled async upstream".to_string(),
+        }],
+        Request::RollbackList => vec![Response::Err {
+            message: "BUG: RollbackList should be handled upstream".to_string(),
         }],
         Request::ReloadDryRun => vec![Response::Err {
             message: "BUG: ReloadDryRun should be handled upstream".to_string(),
