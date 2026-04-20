@@ -1456,6 +1456,14 @@ count = 4
 # #   "backup.example.com ssh-ed25519 AAAA…"
 # # copy the portion AFTER the hostname into host_key:
 # host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzFakeButPlausible…"
+# # include_secrets (default true) — whether oxwrt.secrets.toml
+# # rides along in the archive. Set to false for off-router
+# # backups that compliance wants credential-free (Wi-Fi pass-
+# # phrases, DDNS tokens, etc. stay on-box; restoring the
+# # resulting archive onto a fresh flash will need the operator
+# # to re-paste secrets). Defaults to true because the typical
+# # DR scenario needs them.
+# include_secrets = true
 
 # ---------------- Control plane ----------------
 #
@@ -1478,13 +1486,31 @@ listen = ["[::1]:51820", "192.168.50.1:51820"]
 # round-trips it, `oxctl get control.clients` lists it). Both
 # sources are merged and deduplicated — setting one OR both works.
 authorized_keys = "/etc/oxwrt/authorized_keys"
+# Concurrency / rate caps (SECURITY.md P10).
+#
+# max_connections — cap on concurrent sQUIC connections per
+#   listener. Surplus connections are refused at the handshake
+#   (no task spawned), so a WAN scan can't exhaust per-connection
+#   state. Apply per listen addr: two listeners × 32 = 64 total.
+#   Tune down for a single-operator fleet; CLI opens one
+#   connection per RPC and a healthy operator rarely stacks more
+#   than a handful.
+#
+# max_rpcs_per_sec — per-connection token bucket (cap = 2× rate,
+#   refills at `rate` tokens/sec). An authenticated client that
+#   tries to hammer RPCs on a held connection gets backpressured
+#   — acquire sleeps rather than erroring, so a legitimate caller
+#   sees latency instead of a failure. Leave at 20 unless a
+#   dashboard or monitoring agent needs more.
+max_connections = 32
+max_rpcs_per_sec = 20
 
 # Inline ACL. `key` is 64 hex chars = 32-byte ed25519 pubkey, as
 # printed by the client's `oxctl --print-server-key` against its
 # OWN signing seed (SQUIC_CLIENT_KEY on the client side).
 #
 # [[control.clients]]
-# name = "laptop-colin"
+# name = "laptop-c"
 # key = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 #
 # [[control.clients]]
