@@ -169,6 +169,21 @@ impl KmsgMakeWriter {
             .write(true)
             .open("/dev/kmsg")
             .ok()?;
+        // Disable the per-writer rate limit for /dev/kmsg. Default
+        // is "ratelimit" which drops user-space messages above
+        // ~10 per 5 s; that's fine for a conservatively-quiet
+        // daemon, but oxwrtd emits info-level traces from WAN
+        // DHCP + wifi bring-up + coordinator ticks + services,
+        // easily bursting past 10 lines in the first post-boot
+        // second. The drops are silent — no "N messages
+        // suppressed" marker — which we learned the expensive way
+        // chasing a "coordinator stopped logging after 60 s" bug
+        // (it hadn't; kmsg had). Best-effort: failure is logged
+        // but not fatal.
+        if let Err(e) = std::fs::write("/proc/sys/kernel/printk_devkmsg", "on\n") {
+            // Can't use tracing yet — init_tracing hasn't run.
+            eprintln!("oxwrtd: disable kmsg ratelimit: {e}");
+        }
         Some(Self {
             file: std::sync::Arc::new(file),
         })
