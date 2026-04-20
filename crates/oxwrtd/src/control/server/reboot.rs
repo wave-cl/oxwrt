@@ -6,11 +6,12 @@
 //! stack tears down; the client treats that as confirmation.
 //!
 //! Why a real reboot RPC instead of `ssh -p 2222 ... reboot`:
+//!
 //! 1. The ssh dropbear container lacks CAP_SYS_BOOT, so a reboot
 //!    from there either requires sysrq-trigger hacks or doesn't
 //!    work at all (we hit the latter during live verify).
 //! 2. Going through oxwrtd lets us flush one more urandom seed
-//!    + shut down supervisor children cleanly — dropbear-reboot
+//!    and shut down supervisor children cleanly — dropbear-reboot
 //!    leaves zombie containers and a stale seed file.
 //! 3. Auth: the RPC reuses the sQUIC ed25519 key gate, so the
 //!    operator doesn't need a separate ssh key for reboot.

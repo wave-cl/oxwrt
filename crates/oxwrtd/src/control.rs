@@ -116,6 +116,7 @@ pub struct MetricsTask {
 
 #[cfg(target_os = "linux")]
 impl ControlState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         supervisor: Supervisor,

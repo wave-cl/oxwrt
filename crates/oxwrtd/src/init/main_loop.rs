@@ -934,7 +934,9 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
     // means unexpected power-cycles preserve up to 30 min of
     // entropy freshness. Fire-and-forget: task lives for the
     // process lifetime, no explicit abort on shutdown.
-    let _ = crate::urandom_seed::spawn_saver();
+    // JoinHandle intentionally dropped — the task lives for the
+    // process lifetime; no shutdown cleanup to hook.
+    drop(crate::urandom_seed::spawn_saver());
 
     // AP-state watcher. Fires a warn-log if any expected AP iface
     // (one per [[wifi]] entry, named `{phy}-ap0`) is still `down` 90s

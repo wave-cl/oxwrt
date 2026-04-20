@@ -19,11 +19,12 @@
 //! happy.
 //!
 //! The two numbers have to fit the kernel's timeout:
-//!   - HEARTBEAT tick:       1 s
-//!   - STALL_THRESHOLD:     20 s  (we stop petting after 20 s of
-//!                                 no tokio progress)
-//!   - kernel WD timeout:   31 s  (board default — reboots
-//!                                 20+ ms after we stop petting)
+//!
+//! - HEARTBEAT tick:       1 s
+//! - STALL_THRESHOLD:     20 s  (stop petting after 20 s of no tokio
+//!   progress)
+//! - kernel WD timeout:   31 s  (board default — reboots 20+ ms
+//!   after we stop petting)
 //!
 //! Split out of init.rs in step 6.
 

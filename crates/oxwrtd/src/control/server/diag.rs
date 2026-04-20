@@ -240,7 +240,7 @@ pub(super) async fn handle_diag(state: &ControlState, name: &str, args: &[String
                     message: format!("diag ping-many: at most {MAX} IPs per call"),
                 };
             }
-            let targets: Vec<String> = args.iter().cloned().collect();
+            let targets: Vec<String> = args.to_vec();
             let results = ping_many(targets).await;
             let mut out = String::new();
             for (ip, res) in &results {
@@ -532,12 +532,7 @@ async fn diag_devices(state: &ControlState) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    writeln!(
-        out,
-        "{:<16}  {:<17}  {:<10}  {}",
-        "IP", "MAC", "STATE", "IFACE"
-    )
-    .unwrap();
+    writeln!(out, "{:<16}  {:<17}  {:<10}  IFACE", "IP", "MAC", "STATE").unwrap();
     for r in &rows {
         writeln!(
             out,

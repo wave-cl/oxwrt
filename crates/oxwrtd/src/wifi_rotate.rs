@@ -2,17 +2,17 @@
 //! `rotate_hours` set. Spawns one tokio task per rotating SSID;
 //! on each tick the task:
 //!
-//!   1. Generates a 16-char alphanumeric passphrase from
-//!      /dev/urandom.
-//!   2. Reads the on-disk /etc/oxwrt/oxwrt.toml, patches the
-//!      matching `[[wifi]]` entry's `passphrase` via toml_edit
-//!      (preserving operator comments), writes back atomically.
-//!   3. Writes sidecar files:
-//!        /etc/oxwrt/wifi-<ssid>-passphrase.txt  — plaintext
-//!        /etc/oxwrt/wifi-<ssid>-qr.txt          — ASCII-QR for
-//!          phone scanning (`WIFI:T:WPA;S:<ssid>;P:<pw>;;` URI)
-//!   4. Triggers the usual reload path on the control server so
-//!      hostapd regens + restarts.
+//! 1. Generates a 16-char alphanumeric passphrase from
+//!    /dev/urandom.
+//! 2. Reads the on-disk /etc/oxwrt/oxwrt.toml, patches the
+//!    matching `[[wifi]]` entry's `passphrase` via toml_edit
+//!    (preserving operator comments), writes back atomically.
+//! 3. Writes sidecar files:
+//!    - /etc/oxwrt/wifi-<ssid>-passphrase.txt — plaintext
+//!    - /etc/oxwrt/wifi-<ssid>-qr.txt — ASCII-QR for phone
+//!      scanning (`WIFI:T:WPA;S:<ssid>;P:<pw>;;` URI)
+//! 4. Triggers the usual reload path on the control server so
+//!    hostapd regens + restarts.
 //!
 //! Typical operator pattern: guest-SSID rotates daily, printed
 //! QR is taped to the fridge. Main-LAN SSIDs leave

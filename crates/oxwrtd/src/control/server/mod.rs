@@ -169,8 +169,7 @@ impl Server {
                 Ok(p) => p,
                 Err(_) => {
                     tracing::warn!(
-                        cap = self.connection_slots.available_permits() as i32
-                            + self.connection_slots.available_permits() as i32,
+                        available = self.connection_slots.available_permits(),
                         "control: connection-cap reached; refusing new peer"
                     );
                     drop(incoming);

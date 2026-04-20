@@ -171,6 +171,13 @@ action = "accept"
 [control]
 listen = ["0.0.0.0:51820"]
 authorized_keys = "/etc/oxwrt/authorized_keys"
+# QEMU harness polls the control plane aggressively until it
+# comes up, then runs 50+ RPCs in sequence; each one opens a
+# sQUIC connection that lingers past the CLI exit under quinn's
+# idle timeout. Raise the cap and rate ceiling far above
+# production defaults so the test doesn't exhaust them.
+max_connections = 1024
+max_rpcs_per_sec = 1000
 
 # WireGuard: declared here so wg-peer CRUD has somewhere to attach.
 # The iface bring-up fails inside armsr/armv8 (stock image lacks

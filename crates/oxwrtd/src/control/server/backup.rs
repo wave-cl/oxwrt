@@ -281,6 +281,27 @@ fn is_vpn_key_path(rel: &str) -> bool {
     rel == "vpn" || rel.starts_with("vpn/")
 }
 
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    for ent in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let ent = ent.map_err(|e| e.to_string())?;
+        let src_path = ent.path();
+        let name = ent.file_name();
+        let dst_path = dst.join(&name);
+        if src_path.is_dir() {
+            std::fs::create_dir_all(&dst_path).map_err(|e| e.to_string())?;
+            copy_tree(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {src_path:?} → {dst_path:?}: {e}"))?;
+            // Preserve mode.
+            if let Ok(meta) = std::fs::metadata(&src_path) {
+                let _ = std::fs::set_permissions(&dst_path, meta.permissions());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_vpn_key_path;
@@ -301,25 +322,4 @@ mod tests {
         assert!(!is_vpn_key_path("debug-ssh-keys/dropbear_ed25519_host_key"));
         assert!(!is_vpn_key_path("vpnsomething.conf")); // prefix trap
     }
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
-    for ent in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-        let ent = ent.map_err(|e| e.to_string())?;
-        let src_path = ent.path();
-        let name = ent.file_name();
-        let dst_path = dst.join(&name);
-        if src_path.is_dir() {
-            std::fs::create_dir_all(&dst_path).map_err(|e| e.to_string())?;
-            copy_tree(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy {src_path:?} → {dst_path:?}: {e}"))?;
-            // Preserve mode.
-            if let Ok(meta) = std::fs::metadata(&src_path) {
-                let _ = std::fs::set_permissions(&dst_path, meta.permissions());
-            }
-        }
-    }
-    Ok(())
 }
