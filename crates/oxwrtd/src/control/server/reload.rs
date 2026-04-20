@@ -320,6 +320,17 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole(&handle).await {
             tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
         }
+        // Cleanup stale proto-155 /32s: the coordinator is about
+        // to be respawned (see below) and its new prev_endpoint_key
+        // starts None, so without this wipe the old endpoint
+        // exemption (from a prior active profile or endpoint
+        // change) would linger until reboot. Coordinator's first
+        // tick after respawn reinstalls for the current active.
+        if let Err(e) =
+            oxwrt_linux::vpn_routing::cleanup_stale_endpoint_exemptions(&handle).await
+        {
+            tracing::warn!(error = %e, "reload: exemption cleanup failed");
+        }
         // v6 parallel — gated on any profile declaring address_v6.
         if new_cfg.vpn_client.iter().any(|v| v.address_v6.is_some()) {
             if let Err(e) =
