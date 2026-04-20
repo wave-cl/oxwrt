@@ -238,42 +238,38 @@ oxwrtd we shipped. Compromising the overlay (via a bug in our
 code, or physical access) → persistent root. Hardware-level
 secure boot would address this; out of scope v1.
 
-### Known — supervised services share the host PID namespace
+### P11 — PID-namespace isolation opt-in per service
 
-Services spawned via the normal (Command-based) path inherit the
-host PID namespace — `CLONE_NEWPID` is only applied when
-`user_namespace = true` is set, via the clone3 path. In practice
-that means every supervised service (none of which currently opt
-into user_namespace) can see and signal every other host process.
+`SecurityProfile.pid_namespace: bool` (default false for v0
+compatibility, recommended true for any service retaining
+`CAP_KILL` or otherwise exposed to untrusted input). When set,
+the spawn routes through the clone3 path with `CLONE_NEWPID`
+(NEWUSER only when `user_namespace = true` is also set). The
+service is PID 1 inside its own namespace and cannot see or
+signal any host process.
 
-For services whose retained cap set lacks `CAP_KILL`, this is
-largely cosmetic — a service can only signal processes matching
-its own uid, and the default `nobody`-drop in each service
-narrows that to "itself." Only **debug-ssh** retains
-`CAP_KILL`, and in that service the gap is meaningful: a
-compromised dropbear could SIGKILL oxwrtd (the PID-1 supervisor)
-or any supervised sibling, triggering a reboot or service
-outage. Confirmed live (2026-04-20 audit): `kill -0 <pid>`
-from inside the dropbear container succeeds against every
-other service's PID.
+Previously, only `user_namespace = true` triggered the clone3
+path, and the two flags were coupled. That left services with
+`user_namespace = false` (all shipped services today) sharing
+the host PID namespace, which matters for any service retaining
+`CAP_KILL`: a compromised dropbear with KILL could SIGKILL
+oxwrtd (PID 1 on the host) or any sibling. Decoupling
+pid_namespace means operators can get process isolation without
+paying the rootless-uid mapping overhead.
 
-Mitigation today: the other isolation layers (caps bounding-set
-drop, seccomp, mount + UTS + IPC namespaces, landlock) all
-still apply, so the damage is bounded to signal delivery. A
-compromised non-CAP_KILL service (dns, dhcp, hostapd-*, corerad,
-ntp) can enumerate host PIDs but not signal them. Read access
-to `/proc/<other-pid>/*` is the usual DAC gate — most sensitive
-files (`environ`, `root`, `maps`) return EPERM without
-`CAP_SYS_PTRACE`.
+Verified on-device (2026-04-20 audit):
+- Without pid_namespace: shell PID 1202, 108 /proc PIDs visible,
+  `kill -0 <sibling-pid>` succeeds against every service.
+- With pid_namespace: shell PID 3, 5 /proc PIDs visible,
+  `/proc/1/comm = "dropbear"`, every host service PID returns
+  "No such process" on `kill -0`.
 
-**Action items.** (1) Drop `CAP_KILL` from debug-ssh — dropbear
-only needs it if it's signaling another user's processes, which
-our single-user bench setup doesn't do. (2) Consider adding an
-opt-in `pid_namespace` field to `SecurityProfile` decoupled from
-`user_namespace`, so services can gain PID-ns isolation without
-the userns rootless-mapping overhead. Blocked on: figuring out
-how the supervisor collects exit status when the spawned child
-is PID 1 inside its own namespace.
+The debug-ssh example block ships with `pid_namespace = true`
+set (alongside the CAP_KILL drop). Any service author adding
+a new supervised binary should consider setting it on anything
+that handles untrusted input (new SSH surface, new web UI,
+new uPNP/SSDP endpoint) — the cost is one extra clone3 syscall
+at spawn time.
 
 ### Known — host-netns services are MITM-capable if compromised
 

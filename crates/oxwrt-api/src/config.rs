@@ -1660,6 +1660,29 @@ pub struct SecurityProfile {
     #[serde(default)]
     pub user_namespace: bool,
 
+    /// Run the service in a dedicated Linux PID namespace — the
+    /// service sees itself as PID 1 and can only see/signal
+    /// other processes inside its own namespace. Default `false`
+    /// for backward compatibility, but recommended on for any
+    /// service that retains `CAP_KILL` or otherwise might abuse
+    /// visibility into the host PID table.
+    ///
+    /// Closes the gap documented in SECURITY.md "Known —
+    /// supervised services share the host PID namespace":
+    /// without this flag, a compromised service with CAP_KILL
+    /// can SIGKILL oxwrtd (PID 1 on the host) or any sibling
+    /// service. With it, the worst case is signaling its own
+    /// children.
+    ///
+    /// Implicitly true when `user_namespace = true` — the
+    /// existing clone3 path already passes both flags together.
+    /// Setting this alone routes the spawn through clone3
+    /// without the uid-map dance, so there's no rootless-uid
+    /// overhead; the service still runs as root inside the
+    /// container, just without host PID visibility.
+    #[serde(default)]
+    pub pid_namespace: bool,
+
     /// Apply a Landlock LSM sandbox that restricts **writes only**
     /// (reads are unrestricted). Default `true`. With no writable
     /// bind mounts, a service cannot open any new file for writing
@@ -1698,6 +1721,7 @@ impl Default for SecurityProfile {
             seccomp: true,
             seccomp_allow: Vec::new(),
             user_namespace: false, // opt-in for v0
+            pid_namespace: false,  // opt-in for v0 — see field doc
             landlock: true,
         }
     }

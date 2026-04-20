@@ -366,7 +366,15 @@ pub fn spawn(sup: &mut Supervised, logd: &Logd) -> Result<(), Error> {
     sup.state = ServiceState::Starting;
     sup.started_at = Instant::now();
 
-    let (child, stdout_for_drain, stderr_for_drain) = if sup.spec.security.user_namespace {
+    // Route through clone3 if EITHER user_namespace or pid_namespace is
+    // requested. The tokio Command path can't enter NEWPID because
+    // `unshare(NEWPID)` only affects future children of the caller —
+    // we'd need to clone() the child from oxwrtd's own task. clone3
+    // takes the flag at creation time instead, so the child is born
+    // inside the new PID ns. When only pid_namespace is set, we skip
+    // the uid-map dance (the child runs as host-root inside its ns).
+    let use_clone3 = sup.spec.security.user_namespace || sup.spec.security.pid_namespace;
+    let (child, stdout_for_drain, stderr_for_drain) = if use_clone3 {
         spawn_clone3(prepared, &sup.spec)?
     } else {
         spawn_command(prepared, &sup.spec)?
@@ -462,10 +470,17 @@ fn spawn_clone3(
 ) -> Result<(AnyChild, Option<BoxReader>, Option<BoxReader>), Error> {
     use rustix::pipe::PipeFlags;
 
-    // Build clone3 flags: NEWUSER + NEWPID + all the namespace flags.
-    let clone_flags: u64 = libc::CLONE_NEWUSER as u64
-        | libc::CLONE_NEWPID as u64
-        | prepared.unshare_flags.bits() as u64;
+    // Build clone3 flags. NEWPID always — this fn is only reached
+    // when user_namespace OR pid_namespace is set, and both want it.
+    // NEWUSER is conditional on user_namespace: skipping it means
+    // the container runs as host-root inside its PID ns (no uid_map
+    // dance), which is strictly less isolated on the uid axis but
+    // still closes the process-visibility gap.
+    let needs_userns = spec.security.user_namespace;
+    let mut clone_flags: u64 = libc::CLONE_NEWPID as u64 | prepared.unshare_flags.bits() as u64;
+    if needs_userns {
+        clone_flags |= libc::CLONE_NEWUSER as u64;
+    }
 
     // Create stdio pipes (CLOEXEC so they don't leak past execve).
     let (stdout_r, stdout_w) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(errno_to_io)?;
@@ -560,17 +575,22 @@ fn spawn_clone3(
     drop(sync_r);
     drop(devnull);
 
-    // Write uid_map + gid_map for the child. The child is blocked on
-    // the sync pipe until we signal it.
-    if let Err(e) = write_uid_gid_map(child_pid) {
-        // Child is stuck; kill it.
-        unsafe {
-            libc::kill(child_pid, libc::SIGKILL);
+    // Write uid_map + gid_map for the child, but ONLY when a user
+    // namespace was unshared. With pid_namespace-only, the child
+    // runs as host-root and the /proc/<pid>/uid_map file is either
+    // not writable or not meaningful — skip the step and let the
+    // sync pipe advance directly.
+    if needs_userns {
+        if let Err(e) = write_uid_gid_map(child_pid) {
+            // Child is stuck; kill it.
+            unsafe {
+                libc::kill(child_pid, libc::SIGKILL);
+            }
+            return Err(Error::Service {
+                name: spec.name.clone(),
+                message: format!("write_uid_gid_map: {e}"),
+            });
         }
-        return Err(Error::Service {
-            name: spec.name.clone(),
-            message: format!("write_uid_gid_map: {e}"),
-        });
     }
 
     // Signal the child to proceed with rootfs setup.

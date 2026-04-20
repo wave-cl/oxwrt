@@ -1450,6 +1450,13 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 # seccomp = false
 # seccomp_allow = []
 # user_namespace = false
+# # pid_namespace on (2026-04-20) so a dropbear CVE can't see or
+# # signal oxwrtd or any sibling service. Closes SECURITY.md
+# # "Known — supervised services share the host PID namespace"
+# # for this specific service. Routes spawn through the clone3
+# # path without the userns uid-map dance (container still runs
+# # as host-root inside its PID ns).
+# pid_namespace = true
 # landlock = false
 
 # ---------------- UPnP / NAT-PMP ----------------
