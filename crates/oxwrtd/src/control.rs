@@ -217,6 +217,10 @@ mod tests {
         // ping: invalid target
         assert!(build_ping_args(&["not-an-ip".into()]).is_err());
 
+        // ping: IPv6 target accepted (v4 + v6 both valid)
+        let argv = build_ping_args(&["2606:4700:4700::1111".into()]).unwrap();
+        assert!(argv.contains(&"2606:4700:4700::1111".to_string()));
+
         // ping: count out of range
         assert!(build_ping_args(&["1.1.1.1".into(), "99".into()]).is_err());
 

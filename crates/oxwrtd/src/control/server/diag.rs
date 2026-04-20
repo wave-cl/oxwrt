@@ -695,22 +695,22 @@ const DIAG_BINARIES: &[DiagBinary] = &[
     },
 ];
 
-/// Parse `[target, count?]` into an argv for iputils-ping. Target must
-/// be a valid IPv4 (v6 comes with a separate "ping6" entry later).
-/// Count is clamped `1..=10`, default 3. Per-probe timeout is 2s via
-/// `-W 2`; deadline covers the whole invocation via `-w <count*3+5>`
-/// as a belt-and-suspenders on top of our tokio timeout.
+/// Parse `[target, count?]` into an argv for iputils-ping. Target
+/// accepts IPv4 OR IPv6 (iputils-ping auto-detects and picks the
+/// right socket family when given a literal); we validate both
+/// to close off argv injection (`-anything` as a target would
+/// otherwise flow through as a flag).
+///
+/// Count is clamped `1..=10`, default 3. Per-probe timeout is 2s
+/// via `-W 2`; deadline covers the whole invocation via the
+/// tokio timeout and the binary's own `-c`.
 pub fn build_ping_args(args: &[String]) -> Result<Vec<String>, String> {
     let Some(target_s) = args.first() else {
-        return Err("ping: missing target (e.g. 1.1.1.1)".to_string());
+        return Err("ping: missing target (e.g. 1.1.1.1 or 2606:4700:4700::1111)".to_string());
     };
-    // Validate as IPv4 to close off argv injection. A shell/args
-    // injection via the TARGET string is possible in theory (e.g.
-    // `--privileged`) but iputils-ping's argv parser treats anything
-    // starting with `-` as a flag; we reject non-IPv4 up front.
-    let _ = target_s
-        .parse::<std::net::Ipv4Addr>()
-        .map_err(|e| format!("ping: invalid target {target_s:?}: {e}"))?;
+    if target_s.parse::<std::net::IpAddr>().is_err() {
+        return Err(format!("ping: invalid target {target_s:?}: not an IP address"));
+    }
     let count: u16 = match args.get(1).map(|s| s.parse::<u16>()) {
         None => 3,
         Some(Ok(n)) if (1..=10).contains(&n) => n,
@@ -727,14 +727,15 @@ pub fn build_ping_args(args: &[String]) -> Result<Vec<String>, String> {
 }
 
 /// Parse `[target, maxhops?]` into argv for Butskoy's `traceroute`.
-/// Target validated as IPv4, max-hops clamped 1..=30 (default 30).
+/// Target may be v4 or v6 — traceroute picks the right family from
+/// the address literal. Max-hops clamped 1..=30 (default 30).
 pub fn build_traceroute_args(args: &[String]) -> Result<Vec<String>, String> {
     let Some(target_s) = args.first() else {
-        return Err("traceroute: missing target (e.g. 1.1.1.1)".to_string());
+        return Err("traceroute: missing target (e.g. 1.1.1.1 or 2606:4700:4700::1111)".to_string());
     };
-    let _ = target_s
-        .parse::<std::net::Ipv4Addr>()
-        .map_err(|e| format!("traceroute: invalid target {target_s:?}: {e}"))?;
+    if target_s.parse::<std::net::IpAddr>().is_err() {
+        return Err(format!("traceroute: invalid target {target_s:?}: not an IP address"));
+    }
     let max_hops: u8 = match args.get(1).map(|s| s.parse::<u8>()) {
         None => 30,
         Some(Ok(n)) if (1..=30).contains(&n) => n,
