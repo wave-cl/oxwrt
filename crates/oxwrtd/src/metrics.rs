@@ -18,6 +18,10 @@
 //!     2=running 3=crashed
 //!   - `oxwrt_service_restarts_total{service}`
 //!   - `oxwrt_service_uptime_seconds{service}`
+//!   - `oxwrt_service_memory_bytes{service}` — cgroup memory.current
+//!   - `oxwrt_service_memory_peak_bytes{service}` — memory.peak
+//!   - `oxwrt_service_cpu_{user,system}_seconds_total{service}`
+//!   - `oxwrt_service_pids{service}` — pids.current
 //!   - `oxwrt_ap_up{ssid,iface,phy,band}` — 1 if operstate=="up"
 //!   - `oxwrt_wan_lease_seconds{iface}` — full lease length
 //!   - `oxwrt_firewall_rules`
@@ -233,6 +237,71 @@ fn render(state: &ControlState) -> String {
             esc(&s.name),
             s.uptime_secs
         );
+    }
+
+    // Per-service cgroup stats (memory + cpu + pids) ────────────────
+    //
+    // Read directly from /sys/fs/cgroup/svc/<name>/* — see
+    // container::CGROUP_ROOT for the layout. A missing file is
+    // expected when the service hasn't started yet (cgroup isn't
+    // created until the first spawn) or is Crashed (kernel removes
+    // the cgroup when the last proc exits); we skip those rather
+    // than emit zeros. Reading these files is cheap — cgroup v2
+    // exposes them as zero-I/O virtual files backed by live
+    // kernel counters.
+    let _ = writeln!(
+        out,
+        "# HELP oxwrt_service_memory_bytes Current RSS from cgroup memory.current.\n\
+         # TYPE oxwrt_service_memory_bytes gauge\n\
+         # HELP oxwrt_service_memory_peak_bytes Peak RSS from cgroup memory.peak.\n\
+         # TYPE oxwrt_service_memory_peak_bytes gauge\n\
+         # HELP oxwrt_service_cpu_user_seconds_total Cumulative user-mode CPU.\n\
+         # TYPE oxwrt_service_cpu_user_seconds_total counter\n\
+         # HELP oxwrt_service_cpu_system_seconds_total Cumulative kernel-mode CPU.\n\
+         # TYPE oxwrt_service_cpu_system_seconds_total counter\n\
+         # HELP oxwrt_service_pids Number of tasks currently in the cgroup.\n\
+         # TYPE oxwrt_service_pids gauge"
+    );
+    for s in &services {
+        let cg = format!("/sys/fs/cgroup/svc/{}", s.name);
+        if let Some(n) = read_cgroup_u64(&format!("{cg}/memory.current")) {
+            let _ = writeln!(
+                out,
+                "oxwrt_service_memory_bytes{{service=\"{}\"}} {}",
+                esc(&s.name),
+                n
+            );
+        }
+        if let Some(n) = read_cgroup_u64(&format!("{cg}/memory.peak")) {
+            let _ = writeln!(
+                out,
+                "oxwrt_service_memory_peak_bytes{{service=\"{}\"}} {}",
+                esc(&s.name),
+                n
+            );
+        }
+        if let Some((user_usec, system_usec)) = read_cpu_stat(&format!("{cg}/cpu.stat")) {
+            let _ = writeln!(
+                out,
+                "oxwrt_service_cpu_user_seconds_total{{service=\"{}\"}} {:.6}",
+                esc(&s.name),
+                user_usec as f64 / 1_000_000.0
+            );
+            let _ = writeln!(
+                out,
+                "oxwrt_service_cpu_system_seconds_total{{service=\"{}\"}} {:.6}",
+                esc(&s.name),
+                system_usec as f64 / 1_000_000.0
+            );
+        }
+        if let Some(n) = read_cgroup_u64(&format!("{cg}/pids.current")) {
+            let _ = writeln!(
+                out,
+                "oxwrt_service_pids{{service=\"{}\"}} {}",
+                esc(&s.name),
+                n
+            );
+        }
     }
 
     // APs ───────────────────────────────────────────────────────────
@@ -479,6 +548,40 @@ fn render_counters(out: &mut String, m: &crate::metrics_state::MetricsState) {
 /// Escape a label value per Prometheus text format: `\`, `"` and
 /// newline are the only chars that must be quoted. Everything else
 /// (UTF-8 included) passes through unchanged.
+/// Read a cgroup-v2 stats file that holds a single u64 on one
+/// line (`memory.current`, `memory.peak`, `pids.current`). Returns
+/// None for missing-file (cgroup not yet created / service
+/// crashed and cleaned up), unreadable, or unparseable content.
+/// Errors are NOT logged here — per-scrape reads happen every
+/// ~30 s and a noisy warn on a scraped-while-restarting service
+/// would flood the log.
+fn read_cgroup_u64(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Parse cgroup-v2 `cpu.stat`, return (user_usec, system_usec).
+/// File format is key-space-value lines:
+///   usage_usec 12345
+///   user_usec 6789
+///   system_usec 5556
+/// We only need user + system; usage_usec = user + system in
+/// practice, so returning both is redundant but cheap and keeps
+/// the Prometheus view symmetric with /proc/stat's CPU accounting.
+fn read_cpu_stat(path: &str) -> Option<(u64, u64)> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut user = None;
+    let mut system = None;
+    for line in body.lines() {
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some("user_usec"), Some(v)) => user = v.parse().ok(),
+            (Some("system_usec"), Some(v)) => system = v.parse().ok(),
+            _ => {}
+        }
+    }
+    Some((user?, system?))
+}
+
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

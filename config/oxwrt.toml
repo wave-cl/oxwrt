@@ -1125,7 +1125,9 @@ landlock = false
 #
 # Metrics exported today:
 #   oxwrt_supervisor_uptime_seconds
-#   oxwrt_service_{state,restarts_total,uptime_seconds}
+#   oxwrt_service_{state,restarts_total,uptime_seconds,
+#                  memory_bytes,memory_peak_bytes,
+#                  cpu_{user,system}_seconds_total,pids}
 #   oxwrt_ap_up{ssid,iface,phy,band}
 #   oxwrt_wan_lease_seconds, oxwrt_wan_dhcp_acquires_total,
 #     oxwrt_wan_dhcp_last_acquire_seconds

@@ -129,6 +129,28 @@
       "targets": [ { "expr": "rate(oxwrt_service_restarts_total{instance=~\"$instance\"}[5m]) * 300", "legendFormat": "{{name}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
     },
     {
+      "id": 12,
+      "title": "Service memory (RSS)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_service_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{service}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 13,
+      "title": "Service CPU (user + system) per 1m",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [
+        { "expr": "rate(oxwrt_service_cpu_user_seconds_total{instance=~\"$instance\"}[1m]) + rate(oxwrt_service_cpu_system_seconds_total{instance=~\"$instance\"}[1m])", "legendFormat": "{{service}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
       "type": "row",
       "id": 102,
       "title": "WAN",
