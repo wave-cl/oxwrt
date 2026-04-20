@@ -12,5 +12,6 @@
 //! in the daemon crate and borrow these types by reference.
 
 pub mod config;
+pub mod firewall_schedule;
 pub mod rpc;
 pub mod secrets;

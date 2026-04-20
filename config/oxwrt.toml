@@ -55,6 +55,7 @@
 #   networks       WAN + LAN + Simple (guest/iot/VLAN); multi-WAN
 #                  failover via priority/probe_target
 #   firewall       zones + explicit rules (no magic booleans) +
+#                  optional `schedule` field for time-based rules +
 #                  raw_nft escape hatch for unusual rule shapes
 #   ddns           DuckDNS + Cloudflare + Namecheap + dynv6 + HE.net
 #   port_forwards  external WAN port → internal host:port
@@ -413,6 +414,39 @@ name = "lan-ping"
 src = "lan"
 proto = "icmp"
 action = "accept"
+
+# ── Time-based schedules ──
+# Any [[firewall.rules]] entry can carry an optional `schedule`
+# field. The rule only matches packets during the declared
+# window — nft's `meta day` + `meta hour` predicates enforce it
+# in-kernel (no userspace timer).
+#
+# Accepted forms (case-insensitive, whitespace-tolerant):
+#   "daily 22:00-06:00"        nightly, every day
+#   "weekdays 22:00-06:00"     mon-fri nightly
+#   "weekends"                 sat+sun, all day (no hour filter)
+#   "mon-fri 09:00-17:00"      office hours
+#   "sat,sun 10:00-14:00"      explicit comma-separated day list
+#   "22:00-06:00"              daily window, day list omitted
+#   "mon-fri"                  weekdays, all day
+# Windows that cross midnight (start > end) work natively.
+#
+# Scheduled rules render as nft text alongside raw_nft (below) —
+# unscheduled rules stay on the rustables path, so only the
+# window-limited ones pay the text-render cost. DNAT + schedule
+# is not supported in v1.
+#
+# Example: drop streaming video on the IoT zone after 10pm on
+# school nights:
+#
+# [[firewall.rules]]
+# name = "iot-bedtime"
+# src = "iot"
+# dest = "wan"
+# proto = "tcp"
+# dest_port = [80, 443, 1935]        # http/https/rtmp
+# action = "drop"
+# schedule = "sun-thu 22:00-06:00"
 
 # ── Raw-nft escape hatch ──
 # For rules the zone/rule abstraction can't express (rate limits,

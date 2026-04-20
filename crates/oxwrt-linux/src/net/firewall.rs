@@ -635,17 +635,157 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         );
     }
 
+    // Scheduled firewall rules: each [[firewall.rules]] with a
+    // `schedule` field bypasses the rustables path and renders as
+    // nft text, piped through `nft -f -` alongside raw_nft. nft's
+    // `meta day` + `meta hour` predicates enforce the window —
+    // no userspace timer, the kernel flips the rule in/out
+    // naturally.
+    let scheduled_script = build_scheduled_rules_script(cfg);
+
     // Raw-nft escape hatch: pipe every [[firewall.raw_nft]] entry
     // through `nft -f -` once the structured batches have all
     // landed. Non-fatal if nft is missing or a rule fails to
     // parse — we log and continue, because a bad raw-rule line
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
-    if !cfg.firewall.raw_nft.is_empty() {
-        apply_raw_nft(&cfg.firewall.raw_nft);
+    if !cfg.firewall.raw_nft.is_empty() || !scheduled_script.is_empty() {
+        apply_nft_text(&cfg.firewall.raw_nft, &scheduled_script);
     }
 
     Ok(())
+}
+
+/// Build the `nft -f -` script for every rule that carries a
+/// `schedule` field. Rules without schedules go through the
+/// rustables batch in install_firewall; this path only picks up
+/// the scheduled ones.
+///
+/// Rendered to the `inet oxwrt` `forward` chain (the common
+/// zone-crossing chain). DNAT + scheduled is out of scope v1 —
+/// port forwards with time windows would need their own path
+/// into `ip oxwrt-dnat`.
+///
+/// Malformed schedules are skipped with a warn. The reload-dry-
+/// run validator catches them earlier; this is belt + braces for
+/// a reload triggered by an external path.
+pub(crate) fn build_scheduled_rules_script(cfg: &Config) -> String {
+    use oxwrt_api::firewall_schedule::{parse_schedule, render_nft_predicate};
+    let mut out = String::new();
+    for rule in &cfg.firewall.rules {
+        let Some(sched_str) = rule.schedule.as_deref() else {
+            continue;
+        };
+        let sched = match parse_schedule(sched_str) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    rule = %rule.name,
+                    schedule = %sched_str,
+                    error = %e,
+                    "scheduled rule: schedule parse failed; skipping rule"
+                );
+                continue;
+            }
+        };
+        out.push_str("add rule inet oxwrt forward ");
+        out.push_str(&render_nft_predicate(&sched));
+        render_rule_body(&mut out, rule, cfg);
+        out.push('\n');
+    }
+    out
+}
+
+/// Append the nft predicate + action for a rule's non-schedule
+/// fields. Kept narrow for v1: src/dest iifname + proto + dport
+/// + ct_state + action. Unscheduled rules still go through
+/// rustables; this text renderer only sees scheduled ones.
+fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Config) {
+    use oxwrt_api::config::Action;
+    // iifname / oifname from zone → first matching iface. Multi-
+    // iface zones emit an "iifname { a, b, c }" set.
+    if let Some(src) = rule.src.as_deref() {
+        let ifaces = zone_ifaces(cfg, src);
+        if !ifaces.is_empty() {
+            out.push_str(&fmt_iifname(&ifaces, /*oif=*/ false));
+            out.push(' ');
+        }
+    }
+    if let Some(dest) = rule.dest.as_deref() {
+        let ifaces = zone_ifaces(cfg, dest);
+        if !ifaces.is_empty() {
+            out.push_str(&fmt_iifname(&ifaces, /*oif=*/ true));
+            out.push(' ');
+        }
+    }
+    // ct state must precede proto for nft's parser to be happy.
+    if !rule.ct_state.is_empty() {
+        out.push_str("ct state { ");
+        out.push_str(&rule.ct_state.join(", "));
+        out.push_str(" } ");
+    }
+    if let Some(proto) = rule.proto {
+        let proto_s = match proto {
+            oxwrt_api::config::Proto::Tcp => "tcp",
+            oxwrt_api::config::Proto::Udp => "udp",
+            oxwrt_api::config::Proto::Icmp => "icmp",
+            // `Both` = tcp+udp pair. Emit a tcp+udp meta set; nft
+            // doesn't let us say `meta l4proto { tcp, udp } dport N`
+            // without a set helper, so we inline.
+            oxwrt_api::config::Proto::Both => "meta-both",
+        };
+        if proto_s == "meta-both" {
+            if let Some(port) = &rule.dest_port {
+                let port_fragment = match port {
+                    oxwrt_api::config::PortSpec::Single(p) => format!("{p}"),
+                    oxwrt_api::config::PortSpec::List(ps) => format!(
+                        "{{ {} }}",
+                        ps.iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                out.push_str(&format!("meta l4proto {{ tcp, udp }} th dport {port_fragment} "));
+            } else {
+                out.push_str("meta l4proto { tcp, udp } ");
+            }
+        } else if let Some(port) = &rule.dest_port {
+            let port_fragment = match port {
+                oxwrt_api::config::PortSpec::Single(p) => format!("{p}"),
+                oxwrt_api::config::PortSpec::List(ps) => format!(
+                    "{{ {} }}",
+                    ps.iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            out.push_str(&format!("{proto_s} dport {port_fragment} "));
+        } else {
+            out.push_str(&format!("meta l4proto {proto_s} "));
+        }
+    }
+    match rule.action {
+        Action::Accept => out.push_str("accept"),
+        Action::Drop => out.push_str("drop"),
+        Action::Reject => out.push_str("reject"),
+        Action::Dnat => out.push_str("# dnat+schedule unsupported"),
+    }
+}
+
+fn fmt_iifname(ifaces: &[String], oif: bool) -> String {
+    let key = if oif { "oifname" } else { "iifname" };
+    if ifaces.len() == 1 {
+        format!("{key} \"{}\"", ifaces[0])
+    } else {
+        let list = ifaces
+            .iter()
+            .map(|i| format!("\"{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{key} {{ {list} }}")
+    }
 }
 
 /// Render the `nft -f -` script for a slice of raw entries. Split
@@ -659,11 +799,20 @@ pub(crate) fn build_raw_nft_script(entries: &[oxwrt_api::config::RawNft]) -> Str
     s
 }
 
-fn apply_raw_nft(entries: &[oxwrt_api::config::RawNft]) {
+/// Pipe the concatenated (raw-nft + scheduled-rule) script
+/// through `nft -f -`. One invocation for both, so rule ordering
+/// stays deterministic: scheduled-rule lines sit below raw_nft
+/// ones (operators expect their raw escape hatches to land
+/// first).
+fn apply_nft_text(entries: &[oxwrt_api::config::RawNft], scheduled_script: &str) {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let script = build_raw_nft_script(entries);
+    let mut script = build_raw_nft_script(entries);
+    script.push_str(scheduled_script);
+    if script.is_empty() {
+        return;
+    }
 
     let mut child = match Command::new("nft")
         .arg("-f")

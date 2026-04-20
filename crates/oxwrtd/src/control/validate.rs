@@ -151,6 +151,13 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         ));
     }
 
+    // Schedule must parse if set. Catches typos before reload
+    // puts the rule in front of the kernel.
+    if let Some(sched) = rule.schedule.as_deref() {
+        oxwrt_api::firewall_schedule::parse_schedule(sched)
+            .map_err(|e| format!("rule {}: schedule: {e}", rule.name))?;
+    }
+
     Ok(())
 }
 
@@ -388,6 +395,7 @@ mod tests {
                     ct_state: vec![],
                     action: Action::Accept,
                     dnat_target: None,
+                    schedule: None,
                 }],
                 raw_nft: vec![],
             },
@@ -523,6 +531,7 @@ mod tests {
             ct_state: vec!["established".to_string()],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -539,6 +548,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -555,6 +565,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -573,6 +584,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -590,6 +602,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -607,6 +620,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Dnat,
             dnat_target: None,
+                    schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -624,6 +638,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Dnat,
             dnat_target: Some("not-an-ip-port".to_string()),
+            schedule: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -640,6 +655,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: Some("10.0.0.1:80".to_string()),
+            schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -660,6 +676,7 @@ mod tests {
             ct_state: vec![],
             action: Action::Accept,
             dnat_target: None,
+                    schedule: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(

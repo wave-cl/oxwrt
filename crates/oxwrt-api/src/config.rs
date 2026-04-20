@@ -1081,6 +1081,28 @@ pub struct Rule {
     pub action: Action,
     #[serde(default)]
     pub dnat_target: Option<String>,
+    /// Time-of-day / day-of-week scheduling. When set, this rule
+    /// only matches packets during the declared window. Rendered
+    /// via nft's `meta day` + `meta hour` predicates — so the
+    /// kernel, not a userspace timer, enforces the window.
+    ///
+    /// Accepted forms (all case-insensitive, whitespace-tolerant):
+    ///   `"daily 22:00-06:00"`         nightly, every day
+    ///   `"weekdays 22:00-06:00"`      mon-fri nightly
+    ///   `"weekends"`                  sat+sun, all day
+    ///   `"mon-fri 09:00-17:00"`       office hours
+    ///   `"sat,sun 10:00-14:00"`       explicit day list
+    ///   `"22:00-06:00"`               daily window (day list omitted)
+    ///   `"mon-fri"`                   weekdays, all day
+    ///
+    /// Windows that cross midnight (start > end) are honored by
+    /// nft's hour range natively.
+    ///
+    /// Validation runs at reload-time via the parser in
+    /// `crate::firewall_schedule::parse_schedule`; malformed
+    /// strings reject the config.
+    #[serde(default)]
+    pub schedule: Option<String>,
 }
 
 /// A single WAN-side port forward. Expanded at install time into
