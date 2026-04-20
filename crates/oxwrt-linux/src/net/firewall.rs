@@ -131,6 +131,25 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         .accept()
         .add_to_batch(&mut batch);
 
+    // ── Baseline defaults (always-on, fire before operator rules) ──
+    //
+    // These cover things no operator should have to remember:
+    //   - ct state established,related → accept (INPUT + FORWARD).
+    //     Without this, every stateful accept rule needs its own
+    //     return-path permit. fw4 does the same implicitly.
+    //   - ct state invalid → drop. Malformed / out-of-window
+    //     packets (TCP segments outside the window, non-RST after
+    //     a RST, etc.) serve no legitimate purpose.
+    //   - ICMPv6 NDP / MLD / packet-too-big → accept on INPUT +
+    //     FORWARD. v6 is broken without NDP; PMTU-D breaks the
+    //     web on >1500-MTU paths without packet-too-big.
+    //
+    // Emitted in text because rustables has no clean builder for
+    // ct state + icmpv6 type matches. Appended to the raw_nft +
+    // scheduled-rule pipe later in install_firewall.
+
+    // DHCPv4 OFFER/ACK on WAN (legacy comment preserved above).
+
     // Accept DHCPv4 OFFER/ACK on the WAN iface. Our DHCP client sends
     // DISCOVER/REQUEST via AF_PACKET raw socket (bypasses iptables)
     // but RECEIVES via a UDP socket bound 0.0.0.0:68. The replies land
@@ -863,17 +882,81 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // naturally.
     let scheduled_script = build_scheduled_rules_script(cfg);
 
+    // Baseline defaults: ct state, ICMPv6 NDP/MLD, ICMP echo —
+    // these are unconditional and emitted in text (rustables has
+    // no clean builder for ct-state or icmpv6 type). Prepended
+    // so they land before operator rules in the chain order.
+    let baseline_script = build_baseline_defaults_script();
+
     // Raw-nft escape hatch: pipe every [[firewall.raw_nft]] entry
     // through `nft -f -` once the structured batches have all
     // landed. Non-fatal if nft is missing or a rule fails to
     // parse — we log and continue, because a bad raw-rule line
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
-    if !cfg.firewall.raw_nft.is_empty() || !scheduled_script.is_empty() {
-        apply_nft_text(&cfg.firewall.raw_nft, &scheduled_script);
+    let combined = format!("{baseline_script}{scheduled_script}");
+    if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
+        apply_nft_text(&cfg.firewall.raw_nft, &combined);
     }
 
     Ok(())
+}
+
+/// Baseline nft rules every oxwrt firewall installs, regardless
+/// of config. Rendered as text because ct-state and icmpv6-type
+/// matches have no clean rustables builder. Emitted BEFORE the
+/// operator's text rules so they land first in each chain —
+/// nft evaluates top-down and first verdict wins.
+pub(crate) fn build_baseline_defaults_script() -> String {
+    let mut s = String::new();
+    // ct state established,related → accept. fw4-equivalent of
+    // "option input ACCEPT but only for return traffic".
+    for chain in ["input", "forward", "output"] {
+        s.push_str(&format!(
+            "add rule inet oxwrt {chain} ct state established,related accept\n"
+        ));
+    }
+    // ct state invalid → drop. TCP out-of-window, post-RST
+    // noise, unexpected ACKs — nothing legitimate matches.
+    for chain in ["input", "forward"] {
+        s.push_str(&format!(
+            "add rule inet oxwrt {chain} ct state invalid drop\n"
+        ));
+    }
+    // ICMPv6 NDP: neighbour + router discovery. Without these,
+    // v6 neighbor resolution breaks and nothing works.
+    let ndp_types = [
+        "nd-neighbor-solicit",
+        "nd-neighbor-advert",
+        "nd-router-solicit",
+        "nd-router-advert",
+        "nd-redirect",
+    ];
+    for chain in ["input", "forward", "output"] {
+        for t in &ndp_types {
+            s.push_str(&format!(
+                "add rule inet oxwrt {chain} icmpv6 type {t} accept\n"
+            ));
+        }
+        // MLD (multicast listener discovery): essential for IPv6
+        // multicast group joins — SSDP, mDNS-over-v6, RA-consuming
+        // hosts all need it.
+        s.push_str(&format!(
+            "add rule inet oxwrt {chain} icmpv6 type {{ mld-listener-query, mld-listener-report, mld-listener-done, mld2-listener-report }} accept\n"
+        ));
+        // PMTU discovery. Silently dropping packet-too-big is a
+        // classic "the web is slow over this VPN" footgun.
+        s.push_str(&format!(
+            "add rule inet oxwrt {chain} icmpv6 type packet-too-big accept\n"
+        ));
+    }
+    // ICMP echo-request (ping). Accept on INPUT so the router
+    // answers pings from anywhere — diagnostic value > noise.
+    // Operators who want to drop WAN pings add an explicit rule
+    // with higher-priority iifname=wan drop ahead of this.
+    s.push_str("add rule inet oxwrt input icmp type echo-request accept\n");
+    s.push_str("add rule inet oxwrt input icmpv6 type echo-request accept\n");
+    s
 }
 
 /// Build the `nft -f -` script for every rule that carries a

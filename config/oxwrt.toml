@@ -276,6 +276,13 @@ name = "lan"
 networks = ["lan"]
 default_input = "accept"
 default_forward = "drop"
+# default_output gates kernel-originated traffic on this zone's
+# ifaces — the daemon's own DNS lookups, outbound firmware updates,
+# etc. Defaults to "accept"; set to "drop" for a containment zone
+# where a hijacked local process must NOT be able to egress via
+# this zone's member ifaces. Rare — leave unset unless you have a
+# concrete reason.
+# default_output = "accept"
 
 [[firewall.zones]]
 name = "guest"
@@ -302,7 +309,11 @@ default_input = "drop"
 default_forward = "drop"
 masquerade = true
 
-# Established/related — visible, not hidden in net.rs
+# Established/related is installed as a baseline default now (no
+# operator rule required) along with `ct state invalid drop`,
+# ICMPv6 NDP/MLD/packet-too-big, and ICMP/ICMPv6 echo-request on
+# INPUT. Keeping this rule is harmless — the baseline fires first
+# and this one just re-asserts the same verdict.
 [[firewall.rules]]
 name = "ct-established"
 action = "accept"
@@ -448,6 +459,113 @@ action = "accept"
 # action = "drop"
 # schedule = "sun-thu 22:00-06:00"
 
+# ── Advanced rule primitives ──
+# Any rule using these fields (src_ip, dest_ip, src_mac, src_port,
+# icmp_type, family, limit, log) renders via the nft-text path
+# instead of the rustables batch — same chain placement, same
+# semantics, richer matching vocabulary. Basic rules (zone +
+# proto + dport + ct_state) stay on the fast path.
+#
+# `enabled = false` leaves a rule around for documentation or
+# future re-enable without emitting anything. The reload
+# validator still checks its zone refs — typos trip at reload,
+# not at re-enable time.
+#
+# Source / destination IP match. v4 and v6 CIDRs are accepted
+# and auto-split: a mixed list emits `ip saddr { ... }` + `ip6
+# saddr { ... }` under one rule. `family` pins a rule to one
+# family; leave default `any` for dual-stack.
+#
+# [[firewall.rules]]
+# name = "allow-mgmt-ssh"
+# src = "lan"
+# src_ip = ["192.168.50.10/32", "192.168.50.11/32"]
+# proto = "tcp"
+# dest_port = 22
+# action = "accept"
+#
+# [[firewall.rules]]
+# name = "block-known-bad"
+# src = "wan"
+# src_ip = ["203.0.113.0/24", "2001:db8:bad::/48"]
+# action = "drop"
+# log = "wan-blocked "                  # rate-limit the log line:
+# limit = "10/minute"                   #   10 matches per minute max
+#
+# Source MAC match. Rarely the right tool (MAC spoofing is trivial
+# on LAN), but useful for "this exact printer gets a bypass" rules.
+#
+# [[firewall.rules]]
+# name = "printer-bypass"
+# src = "iot"
+# dest = "lan"
+# src_mac = ["aa:bb:cc:dd:ee:ff"]
+# action = "accept"
+#
+# Source port match (by contrast dest_port matches the destination
+# port). Pairs with proto. Common use: accept DHCPv6 replies
+# from a specific upstream server port.
+#
+# [[firewall.rules]]
+# name = "accept-dhcp-replies"
+# src = "wan"
+# proto = "udp"
+# src_port = 67
+# dest_port = 68
+# action = "accept"
+#
+# ICMP type match. Name matches nftables' parser: "echo-request",
+# "destination-unreachable", "time-exceeded" (IPv4); "nd-neighbor-
+# solicit", "mld-listener-query", "packet-too-big" (IPv6). v6
+# names auto-set family="ipv6".
+#
+# [[firewall.rules]]
+# name = "allow-traceroute"
+# src = "wan"
+# proto = "icmp"
+# icmp_type = "time-exceeded"
+# action = "accept"
+#
+# Per-rule rate limit. Accepts "N/second", "/minute", "/hour",
+# "/day". When the bucket is empty, the rule DOESN'T match — the
+# next rule in the chain gets a chance. Common pattern: rate-
+# limit + log the first N, then a trailing drop-all for the rest.
+#
+# [[firewall.rules]]
+# name = "ssh-brute-limit"
+# src = "wan"
+# proto = "tcp"
+# dest_port = 22
+# limit = "3/minute"
+# log = "ssh-slow "
+# action = "accept"
+# [[firewall.rules]]
+# name = "ssh-brute-drop"
+# src = "wan"
+# proto = "tcp"
+# dest_port = 22
+# action = "drop"
+#
+# IPv6-only restriction. Without `family`, a rule with no
+# address carriers applies to both families. `family = "ipv6"`
+# emits `meta nfproto ipv6` on the way in.
+#
+# [[firewall.rules]]
+# name = "block-v6-telnet"
+# family = "ipv6"
+# proto = "tcp"
+# dest_port = 23
+# action = "drop"
+#
+# Temporarily parked: keep the rule around, don't emit it.
+#
+# [[firewall.rules]]
+# name = "legacy-pptp"
+# enabled = false
+# proto = "tcp"
+# dest_port = 1723
+# action = "accept"
+
 # ── Raw-nft escape hatch ──
 # For rules the zone/rule abstraction can't express (rate limits,
 # custom hook priorities, third-party modules, experimental
@@ -539,6 +657,11 @@ action = "accept"
 # internal = "192.168.50.50:25565"
 # src = "wan"                      # default "wan"
 # dest = "lan"                     # default auto-detected from internal IP
+# reflection = true                # default true — hairpin NAT so a LAN
+#                                  # client resolving DDNS → WAN IP still
+#                                  # reaches the internal target. Set to
+#                                  # false only if double-NAT causes
+#                                  # trouble on the same broadcast domain.
 
 # ---------------- Static routes ----------------
 #

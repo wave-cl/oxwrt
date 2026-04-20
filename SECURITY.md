@@ -112,10 +112,23 @@ Confirm gates (`reset`, `reboot`, `apply`, `restore`,
 ### P4 — WAN surface defaults to deny-all
 
 `install_firewall` creates the `inet oxwrt` table with INPUT +
-FORWARD policy = DROP. The only accepts on WAN are: `ct state
-established/related`, `lo`, and (when WAN is DHCP) a narrowly-
-predicated bypass for the DISCOVER-cookie response. Control
-plane listens on loopback + LAN, never `0.0.0.0` in the shipped
+FORWARD policy = DROP. Baseline defaults emitted unconditionally
+(no operator rule required):
+
+- `ct state established,related accept` on INPUT/FORWARD/OUTPUT
+- `ct state invalid drop` on INPUT/FORWARD
+- ICMPv6 NDP (`nd-neighbor-*`, `nd-router-*`, `nd-redirect`)
+  accept on all chains — IPv6 breaks without it
+- ICMPv6 MLD (`mld-listener-*`, `mld2-*`) accept on all chains
+- ICMPv6 `packet-too-big` accept on all chains — PMTU-D
+- ICMP + ICMPv6 `echo-request` accept on INPUT (router answers
+  pings). Operators who want to drop WAN pings add a higher-
+  priority `src = "wan"` drop rule ahead.
+
+Operator rules land AFTER the baseline in chain order (nft
+first-match-wins), so they can ADD further accepts but can't
+accidentally delete the safe-by-default set. Control plane
+listens on loopback + LAN, never `0.0.0.0` in the shipped
 default or the wizard output.
 
 ### P5 — supervised services are sandboxed
@@ -224,6 +237,32 @@ Nothing cryptographically verifies that `/sbin/init` is the
 oxwrtd we shipped. Compromising the overlay (via a bug in our
 code, or physical access) → persistent root. Hardware-level
 secure boot would address this; out of scope v1.
+
+### Known — firewall feature-set vs OpenWrt fw4
+
+The zone/rule abstraction covers the common deployments but
+doesn't match fw4 feature-for-feature. Gaps that remain after
+the fw4-parity pass:
+
+- **IPv6 DNAT / port-forwards to v6 targets.** `oxwrt-nat6`
+  (MASQUERADE66) is installed when dual-stack zones have
+  `masquerade = true`, but `PortForward.internal` still parses
+  only IPv4 `ip:port`. Operators exposing a v6 service hand-roll
+  via `[[firewall.raw_nft]]` against `ip6 filter` / `ip6
+  oxwrt-nat6` until the schema grows a v6 target variant.
+- **IPsets.** No `[[firewall.ipsets]]` with `match_set` in
+  rules. Country-block / threat-intel workflows need raw_nft
+  sets + manual member management.
+- **Connection-tracking helpers (SIP ALG, FTP active mode, PPTP
+  GRE, RTSP).** Not auto-loaded. Operators who need these load
+  the modules manually and express them via raw_nft.
+- **`target = "NOTRACK"` / CT zones.** Absent. Rare (high-
+  throughput forwarding paths or CGNAT-facing ISP setups).
+
+Everything else from the mainstream fw4 surface landed in the
+parity pass: zone `default_output`, rule `src_ip`/`dest_ip`/
+`src_mac`/`src_port`/`icmp_type`/`family`/`limit`/`log`/
+`enabled`, port-forward `reflection`, IPv6 MASQUERADE66.
 
 ### Known — no passphrase strength enforcement
 
