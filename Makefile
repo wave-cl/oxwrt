@@ -132,22 +132,21 @@ $(BUILD_SERVICES)/hostapd/sbin/hostapd:
 
 # ── miniupnpd (UPnP IGD + NAT-PMP daemon) ───────────────────────────
 #
-# Alpine ships only the iptables-backend miniupnpd package —
-# `miniupnpd` (default) and `miniupnpd-iptables` are both iptables,
-# there's no aarch64 nftables variant in 3.20 or 3.21. Since our
-# firewall is pure nftables, the two don't compose (miniupnpd
-# would install into iptables; oxwrt lives in nftables; nft_compat
-# can bridge but the "single source of truth" property breaks).
+# Build from source because Alpine's packaged miniupnpd is
+# compiled with the iptables backend and oxwrt's firewall is
+# pure nftables. The two don't compose — miniupnpd would install
+# into iptables, oxwrt lives in nftables, and nft_compat bridges
+# but breaks the "single source of truth" property.
 #
-# Staged as a placeholder so operators who compile their own
-# nftables-backend miniupnpd from source can drop the binary in
-# and wire up [[services]] upnpd. Follow-up: source-build target
-# pulling libnftnl-dev + libmnl-dev from Alpine and running
-# `./configure --firewall=nftables` against miniupnpd 2.3.x.
+# Source: upstream tarball, miniupnpd 2.3.7 (Aug 2024). Pinned
+# because `./configure --firewall=nftables` is stable across
+# that release and we want the resulting binary to be
+# deterministic across operator builds.
 #
-# miniupnpd also links against libuuid for its device-uuid
-# generation; we pull it alongside so the container rootfs is
-# self-contained.
+# Build deps: libnftnl-dev + libmnl-dev (for nftables rule
+# emission), util-linux-dev (libuuid, for the device-uuid
+# generation), plus the usual gcc/make/musl-dev toolchain. All
+# pulled from Alpine 3.20 inside the build container.
 #
 # Output layout (build-services/upnpd/):
 #   sbin/miniupnpd
@@ -155,21 +154,42 @@ $(BUILD_SERVICES)/hostapd/sbin/hostapd:
 #   lib/libmnl.so.*
 #   lib/libuuid.so.1
 #   lib/ld-musl-aarch64.so.1
+#
+# After bump: verify `strings sbin/miniupnpd | grep -i nft`
+# shows nftables symbols, not iptables. Stock Alpine package
+# would show "iptables" / "xtables" strings.
+MINIUPNPD_VERSION  ?= 2.3.7
+MINIUPNPD_TARBALL  := miniupnpd-$(MINIUPNPD_VERSION).tar.gz
+MINIUPNPD_URL      := https://miniupnp.tuxfamily.org/files/$(MINIUPNPD_TARBALL)
+
 services-upnpd: $(BUILD_SERVICES)/upnpd/sbin/miniupnpd
 $(BUILD_SERVICES)/upnpd/sbin/miniupnpd:
 	mkdir -p $(BUILD_SERVICES)/upnpd/sbin $(BUILD_SERVICES)/upnpd/lib
 	docker run --rm --platform linux/arm64 \
 		-v $(CURDIR)/$(BUILD_SERVICES)/upnpd:/out \
 		alpine:3.20 sh -c '\
-		apk add --no-cache miniupnpd libuuid && \
-		cp /usr/sbin/miniupnpd /out/sbin/miniupnpd && \
-		cp /lib/ld-musl-aarch64.so.1 /out/lib/ld-musl-aarch64.so.1 && \
-		for lib in $$(ldd /usr/sbin/miniupnpd 2>/dev/null | awk "/=>/{print \$$3}"); do \
+		set -eu; \
+		apk add --no-cache --quiet \
+			build-base linux-headers bsd-compat-headers \
+			libnftnl-dev libmnl-dev util-linux-dev openssl-dev \
+			curl tar; \
+		cd /tmp && curl -fsSL $(MINIUPNPD_URL) -o $(MINIUPNPD_TARBALL); \
+		tar xzf $(MINIUPNPD_TARBALL); \
+		cd miniupnpd-$(MINIUPNPD_VERSION); \
+		./configure --firewall=nftables --disable-fork \
+			--strict --leasefile --igd2 --ipv6; \
+		make -j$$(nproc); \
+		cp miniupnpd /out/sbin/miniupnpd; \
+		strip /out/sbin/miniupnpd; \
+		cp /lib/ld-musl-aarch64.so.1 /out/lib/ld-musl-aarch64.so.1; \
+		for lib in $$(ldd /out/sbin/miniupnpd 2>/dev/null | awk "/=>/{print \$$3}"); do \
 			case "$$lib" in \
 				/lib/ld-musl-*|/lib/libc.musl-*) ;; \
 				*) [ -f "$$lib" ] && cp -n "$$lib" /out/lib/ || true ;; \
 			esac; \
-		done'
+		done; \
+		echo "--- sanity: nft symbols present? ---"; \
+		strings /out/sbin/miniupnpd | grep -iE "nft_|nftables" | head -5'
 	@echo ""
 	@echo "Staged miniupnpd under $(BUILD_SERVICES)/upnpd/:"
 	@find $(BUILD_SERVICES)/upnpd -type f -ls

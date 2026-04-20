@@ -108,10 +108,19 @@ fn render(u: &UpnpConfig, uuid: &str) -> String {
          listening_ip={lan}\n\
          enable_upnp=yes\n\
          enable_natpmp={natpmp}\n\
-         # Transient mappings stay in oxwrt-upnpd (separate from\n\
-         # the main oxwrt table) so reloads don't collide.\n\
-         upnp_nftables_family=inet\n\
-         upnp_nftables_table=oxwrt-upnpd\n\
+         # Transient mappings stay in dedicated upnpd-owned nftables\n\
+         # objects (filter + nat chains in miniupnpd's own tables) so\n\
+         # oxwrt's firewall reloads don't collide with miniupnpd's\n\
+         # runtime rule churn. Option names match miniupnpd 2.3.x\n\
+         # (verified against options.c):\n\
+         #   upnp_table_name           — NAT table name (default 'filter')\n\
+         #   upnp_nat_chain            — NAT input/redirect chain\n\
+         #   upnp_nat_postrouting_chain — NAT postrouting chain\n\
+         #   upnp_forward_chain        — FILTER forward chain\n\
+         upnp_table_name=oxwrt-upnpd\n\
+         upnp_nat_chain=prerouting_upnpd\n\
+         upnp_nat_postrouting_chain=postrouting_upnpd\n\
+         upnp_forward_chain=forward_upnpd\n\
          # Port range miniupnpd is allowed to map on the WAN side.\n\
          # Ports below min_port stay exclusive to [[port_forwards]]\n\
          # declared statically — prevents clients from grabbing\n\
@@ -151,7 +160,7 @@ mod tests {
         assert!(out.contains("listening_ip=br-lan"));
         assert!(out.contains("enable_upnp=yes"));
         assert!(out.contains("enable_natpmp=yes"));
-        assert!(out.contains("upnp_nftables_table=oxwrt-upnpd"));
+        assert!(out.contains("upnp_table_name=oxwrt-upnpd"));
         assert!(out.contains("allow 1024-65535"));
     }
 
@@ -206,16 +215,20 @@ lan = "br-lan"
         );
     }
 
-    /// Separate nftables table isolates miniupnpd's transient
-    /// mappings from the main oxwrt rules. Regression here (e.g.
-    /// dropping the `upnp_nftables_table=` directive) means
-    /// miniupnpd's DNATs would land in the wrong table and the
-    /// main firewall reload would wipe them.
+    /// Separate nftables table + chains isolate miniupnpd's transient
+    /// mappings from the main oxwrt rules. Regression here (wrong
+    /// option names, missing directives) means miniupnpd's DNATs
+    /// would land in the wrong place and the main firewall reload
+    /// would wipe them — or miniupnpd would refuse to start at all
+    /// on "invalid option" in 2.3.x (which is exactly what happened
+    /// during the 2026-04-20 audit before the rename).
     #[test]
-    fn render_points_miniupnpd_at_separate_nftables_table() {
+    fn render_points_miniupnpd_at_separate_nftables_objects() {
         let out = render(&sample(), "00000000-0000-0000-0000-000000000001");
-        assert!(out.contains("upnp_nftables_family=inet"));
-        assert!(out.contains("upnp_nftables_table=oxwrt-upnpd"));
+        assert!(out.contains("upnp_table_name=oxwrt-upnpd"));
+        assert!(out.contains("upnp_nat_chain=prerouting_upnpd"));
+        assert!(out.contains("upnp_nat_postrouting_chain=postrouting_upnpd"));
+        assert!(out.contains("upnp_forward_chain=forward_upnpd"));
     }
 
     /// WAN iface with PPPoE-style name (contains special chars) —

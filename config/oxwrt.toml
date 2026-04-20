@@ -1396,6 +1396,31 @@ pid_namespace = true
 #   - If you need emergency troubleshooting on a production box,
 #     enable, use, disable, reload — don't leave it running.
 #
+# Scope-restriction while enabled. The LAN zone's default_input
+# = "accept" means any br-lan host can reach :2222 by default.
+# To narrow that to one specific workstation (recommended when
+# the LAN has more than a bench laptop on it), add a rule
+# pair BEFORE the LAN blanket-accept using the src_ip primitive:
+#
+#   [[firewall.rules]]
+#   name = "debug-ssh-from-admin"
+#   src = "lan"
+#   src_ip = ["192.168.50.10/32"]    # your workstation
+#   proto = "tcp"
+#   dest_port = 2222
+#   action = "accept"
+#   [[firewall.rules]]
+#   name = "debug-ssh-drop-everyone-else"
+#   src = "lan"
+#   proto = "tcp"
+#   dest_port = 2222
+#   action = "drop"
+#
+# nftables evaluates rules top-down and takes the first verdict,
+# so the whitelist rule wins for 192.168.50.10 and the drop-all
+# catches every other LAN host before the blanket-accept sees
+# the packet.
+#
 # COMMENTED OUT DELIBERATELY. oxwrt's supported management surface is
 # the sQUIC control plane (`oxctl`); shipping an always-on SSH daemon
 # widens the attack surface for the appliance model and pushes the
@@ -1484,18 +1509,17 @@ pid_namespace = true
 # DNAT rules into a dedicated `oxwrt-upnpd` nftables table so its
 # transient mappings never collide with static forwards.
 #
-# Scaffolding is in place — `make services-upnpd` cross-builds
-# miniupnpd from Alpine, the oxwrt-linux renderer generates
-# /etc/oxwrt/miniupnpd.conf, and UUID persists at
-# /etc/oxwrt/miniupnpd.uuid. BUT Alpine ships miniupnpd with the
-# iptables backend only, which doesn't compose with our pure-
-# nftables firewall. Enabling the service today fails with
-# "invalid option ... upnp_nftables_family=inet".
+# Pipeline: `make services-upnpd` cross-builds miniupnpd 2.3.7
+# from source with `--firewall=nftables` against libnftnl +
+# libmnl (Alpine 3.20 build container). The resulting binary
+# writes transient DNAT rules into `oxwrt-upnpd` — a dedicated
+# nftables table kept separate from oxwrt-dnat so a firewall
+# reload doesn't wipe active UPnP mappings. oxwrt-linux's
+# miniupnpd renderer generates /etc/oxwrt/miniupnpd.conf from
+# `[upnp]` below, and UUID persists at /etc/oxwrt/miniupnpd.uuid.
 #
-# To ship: swap the `services-upnpd` target to a from-source build
-# configured with `--firewall=nftables` against libnftnl. Tracked
-# follow-up; the schema + [[services]] template below are ready
-# to flip the moment the binary is.
+# Enable by uncommenting both the `[upnp]` block and the matching
+# `[[services]] name = "upnpd"` block later in this file.
 #
 # [upnp]
 # wan = "eth1"                    # WAN iface (outside)
