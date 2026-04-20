@@ -450,7 +450,7 @@ mod tests {
     }
 
     fn mk_cfg(wans: Vec<Network>) -> Config {
-        use oxwrt_api::config::{ChainPolicy, Control, Firewall};
+        use oxwrt_api::config::{Control, Firewall};
         use std::path::PathBuf;
         Config {
             hostname: "t".into(),

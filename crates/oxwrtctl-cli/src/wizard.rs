@@ -124,8 +124,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         // stdout path: emit merged form (dev / pipe-to-inspection).
         // Leave a header warning the operator that this form
         // includes secrets.
-        print!("# WARNING: merged form (contains secrets). Use `--out PATH`\n");
-        print!("# to split into oxwrt.toml + oxwrt.secrets.toml.\n");
+        println!("# WARNING: merged form (contains secrets). Use `--out PATH`");
+        println!("# to split into oxwrt.toml + oxwrt.secrets.toml.");
         print!("{toml}");
     }
     Ok(())

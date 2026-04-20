@@ -307,7 +307,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                     }
                     // PrivateKey = AAA= — split at FIRST '=' since
                     // base64 can contain trailing '=' padding.
-                    t.splitn(2, '=').nth(1).map(|v| v.trim().to_string())
+                    t.split_once('=').map(|x| x.1).map(|v| v.trim().to_string())
                 })
                 .unwrap_or_else(|| body.trim().to_string());
             if private_key_b64.is_empty() {

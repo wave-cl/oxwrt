@@ -2,6 +2,14 @@
 // subcommand in main.rs now calls oxwrtctl_cli::run_client_sync.
 #[cfg(target_os = "linux")]
 pub mod server;
+// validate's functions are pure (no syscalls, no platform deps)
+// so they compile on every target — but their only non-test callers
+// live in the linux-only server/ CRUD modules. On macOS / other
+// non-linux targets, cargo flags them as "never used" when building
+// the binary. The test module inside validate.rs still exercises
+// them, so we keep the cross-platform compile for `cargo test` on a
+// dev box and silence the dead-code warning on non-linux only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod validate;
 
 #[cfg(target_os = "linux")]

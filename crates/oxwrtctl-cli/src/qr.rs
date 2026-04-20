@@ -110,7 +110,7 @@ mod tests {
         // sees it.
         let cols = out.lines().next().unwrap().chars().count();
         assert!(
-            cols >= 21 + 8 && cols <= 200,
+            (21 + 8..=200).contains(&cols),
             "unexpected col count: {cols}"
         );
     }

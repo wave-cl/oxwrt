@@ -493,8 +493,8 @@ async fn handle_mullvad_relays(rest: &[String]) -> Result<(), Error> {
     // Header + one line per relay. Fixed-width columns so the
     // output pipes into `column -t` / `awk` without surprises.
     println!(
-        "{:<22} {:<3} {:<4} {:<20} {:<6} {}",
-        "hostname", "cc", "city", "ipv4", "active", "pubkey"
+        "{:<22} {:<3} {:<4} {:<20} {:<6} pubkey",
+        "hostname", "cc", "city", "ipv4", "active"
     );
     for r in filtered.iter().take(limit) {
         println!(
