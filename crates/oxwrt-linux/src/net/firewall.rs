@@ -495,7 +495,18 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // the kernel" and the table never appears in `nft list tables`.
 
     let has_masq = cfg.firewall.zones.iter().any(|z| z.masquerade);
-    if has_masq {
+    // Additional postrouting masquerades for port-forward reflection
+    // (hairpin NAT): when a LAN client hits the router's WAN IP on a
+    // port-forward, we want the return path to go back through the
+    // router instead of direct LAN → LAN. SNAT'ing on lan-egress to
+    // the internal target forces that detour. Collected here so the
+    // NAT table is installed if we need it even when no zone has
+    // masquerade=true.
+    let need_reflection = cfg
+        .port_forwards
+        .iter()
+        .any(|pf| pf.reflection && parse_dnat_target(&pf.internal).is_some());
+    if has_masq || need_reflection {
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-nat");
         let mut nat_batch = Batch::new();
         nat_batch.add(&nat_table, MsgType::Add);
@@ -509,10 +520,48 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .with_policy(NfChainPolicy::Accept)
             .add_to_batch(&mut nat_batch);
 
-        Rule::new(&postrouting)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .with_expr(Masquerade::default())
-            .add_to_batch(&mut nat_batch);
+        if has_masq {
+            Rule::new(&postrouting)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .with_expr(Masquerade::default())
+                .add_to_batch(&mut nat_batch);
+        }
+
+        // Hairpin SNAT: for each reflection-enabled port-forward,
+        // install a MASQUERADE on packets egressing the dest-zone's
+        // iface toward the internal target. Narrowed to daddr +
+        // proto + dport so we don't over-apply to unrelated traffic.
+        if need_reflection {
+            for pf in &cfg.port_forwards {
+                if !pf.reflection {
+                    continue;
+                }
+                let Some((target_ip, target_port)) = parse_dnat_target(&pf.internal) else {
+                    continue;
+                };
+                let dest_zone_name = pf
+                    .dest
+                    .clone()
+                    .or_else(|| find_dest_zone_for_ip(cfg, target_ip));
+                let Some(dest_zone_name) = dest_zone_name else {
+                    continue;
+                };
+                let dest_ifaces = zone_ifaces(cfg, &dest_zone_name);
+                let protos = proto_to_nf_list(Some(pf.proto));
+                for &proto in &protos {
+                    for oif in &dest_ifaces {
+                        let mut r = Rule::new(&postrouting)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .oiface(oif)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .daddr(IpAddr::V4(target_ip));
+                        r = r.dport(target_port, proto);
+                        r.with_expr(Masquerade::default())
+                            .add_to_batch(&mut nat_batch);
+                    }
+                }
+            }
+        }
 
         // Error path logs inline: the generic kernel error comes back
         // as a bare io::Error, and losing it to `?` alone means the
@@ -522,7 +571,46 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             tracing::error!(error = %e, "nftables NAT MASQUERADE batch send failed");
             Error::Firewall(e.to_string())
         })?;
-        tracing::info!("nftables NAT MASQUERADE installed");
+        tracing::info!(
+            reflection_forwards = cfg.port_forwards.iter().filter(|p| p.reflection).count(),
+            "nftables NAT MASQUERADE installed"
+        );
+    }
+
+    // ── 2b. ip6 oxwrt-nat6: IPv6 MASQUERADE ──────────────────────────
+    //
+    // Mirror of the v4 NAT table for operators who want NAT66 (e.g.
+    // ISPs that only hand out a /128 or rotate prefixes frequently
+    // and you want stable internal addressing). Gated on ANY zone
+    // with masquerade=true AND ANY LAN/Simple network carrying a v6
+    // address — no point installing an empty table.
+    let any_v6_net = cfg.networks.iter().any(|n| match n {
+        Network::Lan { ipv6_address, .. } | Network::Simple { ipv6_address, .. } => {
+            ipv6_address.is_some()
+        }
+        _ => false,
+    });
+    if has_masq && any_v6_net {
+        let nat6 = Table::new(ProtocolFamily::Ipv6).with_name("oxwrt-nat6");
+        let mut nat6_batch = Batch::new();
+        nat6_batch.add(&nat6, MsgType::Add);
+        nat6_batch.add(&nat6, MsgType::Del);
+        nat6_batch.add(&nat6, MsgType::Add);
+        let postrouting6 = Chain::new(&nat6)
+            .with_name("postrouting")
+            .with_hook(Hook::new(HookClass::PostRouting, 100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut nat6_batch);
+        Rule::new(&postrouting6)
+            .map_err(|e| Error::Firewall(e.to_string()))?
+            .with_expr(Masquerade::default())
+            .add_to_batch(&mut nat6_batch);
+        nat6_batch.send().map_err(|e| {
+            tracing::error!(error = %e, "nftables NAT6 MASQUERADE batch send failed");
+            Error::Firewall(e.to_string())
+        })?;
+        tracing::info!("nftables NAT6 MASQUERADE installed");
     }
 
     // ── 3. ip oxwrt-dnat: DNAT rules ────────────────────────────────
@@ -639,11 +727,11 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                 continue;
             }
             let protos = proto_to_nf_list(Some(pf.proto));
+            let ip_bytes = target_ip.octets().to_vec();
+            let port_bytes = target_port.to_be_bytes().to_vec();
 
             for &proto in &protos {
                 for src_if in &src_ifaces {
-                    let ip_bytes = target_ip.octets().to_vec();
-                    let port_bytes = target_port.to_be_bytes().to_vec();
                     let nat_expr = Nat::default()
                         .with_nat_type(NatType::DNat)
                         .with_family(ProtocolFamily::Ipv4)
@@ -655,13 +743,63 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                         .iiface(src_if)
                         .map_err(|e| Error::Firewall(e.to_string()))?;
                     r = r.dport(pf.external_port, proto);
-                    r.with_expr(Immediate::new_data(ip_bytes, Register::Reg1))
-                        .with_expr(Immediate::new_data(port_bytes, Register::Reg2))
+                    r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                        .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
                         .with_expr(nat_expr)
                         .add_to_batch(&mut dnat_batch);
                 }
             }
-            tracing::info!(pf = %pf.name, external = pf.external_port, target = %pf.internal, "port-forward DNAT emitted");
+
+            // Hairpin/reflection DNAT. When reflection is enabled:
+            //   (a) output chain, dport-only match, DNAT to target —
+            //       covers router-originated traffic to its own WAN
+            //       IP (rare but legitimate, e.g. the daemon's own
+            //       probes).
+            //   (b) prerouting chain, daddr = router's LAN/Simple
+            //       address + dport — catches a LAN client that
+            //       resolved DDNS → WAN IP, sent to router MAC, and
+            //       the router received on the LAN bridge.
+            //   Companion hairpin SNAT in oxwrt-nat postrouting
+            //   forces the return path via the router so the LAN
+            //   client sees the correct source IP.
+            //
+            // Narrowing daddr to listen_addrs avoids catching LAN →
+            // LAN traffic that happens to target the same external
+            // port on an unrelated host.
+            if pf.reflection {
+                for &proto in &protos {
+                    // (a) output chain — router → WAN IP:external
+                    let nat_expr = Nat::default()
+                        .with_nat_type(NatType::DNat)
+                        .with_family(ProtocolFamily::Ipv4)
+                        .with_ip_register(Register::Reg1)
+                        .with_port_register(Register::Reg2);
+                    let mut r = Rule::new(&dnat_output)
+                        .map_err(|e| Error::Firewall(e.to_string()))?;
+                    r = r.dport(pf.external_port, proto);
+                    r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                        .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
+                        .with_expr(nat_expr)
+                        .add_to_batch(&mut dnat_batch);
+                    // (b) prerouting, daddr = listen_addrs
+                    for &laddr in &listen_addrs {
+                        let nat_expr = Nat::default()
+                            .with_nat_type(NatType::DNat)
+                            .with_family(ProtocolFamily::Ipv4)
+                            .with_ip_register(Register::Reg1)
+                            .with_port_register(Register::Reg2);
+                        let mut r = Rule::new(&prerouting)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .daddr(IpAddr::V4(laddr));
+                        r = r.dport(pf.external_port, proto);
+                        r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                            .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
+                            .with_expr(nat_expr)
+                            .add_to_batch(&mut dnat_batch);
+                    }
+                }
+            }
+            tracing::info!(pf = %pf.name, external = pf.external_port, target = %pf.internal, reflection = pf.reflection, "port-forward DNAT emitted");
         }
 
         // Via-VPN DNS DNAT. Rewrite port-53 from via_vpn zones to
