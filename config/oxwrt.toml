@@ -1143,8 +1143,11 @@ source = "/etc/ssl/certs"
 target = "/etc/ssl/certs"
 
 # Hardening defaults are safe for hickory on DoH — the default
-# retain list covers bind(53) + privilege drop to `nobody`.
-# landlock = true
+# retain list covers bind(53) + privilege drop to `nobody`. The
+# one override: pid_namespace = true so a hickory 0-day can't
+# see or signal any host process (see SECURITY.md P11).
+[services.security]
+pid_namespace = true
 
 # --- coredhcp: DHCPv4 server for the LAN + guest subnets ---
 [[services]]
@@ -1182,6 +1185,9 @@ readonly = false             # coredhcp needs to write lease state
 # coredhcp needs NET_RAW + NET_ADMIN for its raw sockets on top of the
 # default four caps. Landlock's writable-bind-mount rule automatically
 # covers /var/lib/coredhcp because of the readonly=false bind above.
+# pid_namespace bounds a coredhcp CVE to its own process view — host
+# netns is still shared (raw AF_PACKET requires it) but at least the
+# compromised service can't enumerate or signal other system services.
 [services.security]
 caps = [
   "SETUID",
@@ -1191,6 +1197,7 @@ caps = [
   "NET_RAW",
   "NET_ADMIN",
 ]
+pid_namespace = true
 # no_new_privs = true   # default
 # seccomp = true        # default
 # landlock = true       # default
@@ -1230,11 +1237,14 @@ target = "/etc/hostapd-5g.conf"
 # etc.) is gated on CAP_NET_ADMIN in the kernel's cfg80211.c. Can't
 # be dropped without the AP failing to start. Both caps audited
 # 2026-04-20 as genuinely required.
+# pid_namespace bounds a hostapd compromise to its own process
+# view — nl80211 is netlink, so PID-ns doesn't affect it.
 [services.security]
 caps = [
   "SETUID", "SETGID", "SETPCAP",
   "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW",
 ]
+pid_namespace = true
 
 # --- hostapd-2g: 2.4 GHz wifi AP on phy0 ---
 #
@@ -1256,12 +1266,14 @@ source = "/etc/oxwrt/hostapd/phy0.conf"
 target = "/etc/hostapd-2g.conf"
 
 # See hostapd-5g note — ctrl socket lives on container tmpfs /tmp.
+# pid_namespace for the same reason as hostapd-5g.
 
 [services.security]
 caps = [
   "SETUID", "SETGID", "SETPCAP",
   "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW",
 ]
+pid_namespace = true
 
 # --- corerad: IPv6 Router Advertisement daemon ---
 #
@@ -1304,6 +1316,7 @@ target = "/etc/corerad.toml"
 # that need NET_ADMIN and restore.
 [services.security]
 caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_RAW"]
+pid_namespace = true
 
 # --- ntpd-rs: NTP client + server ---
 [[services]]
@@ -1323,9 +1336,13 @@ source = "/etc/oxwrt/ntp.toml"
 target = "/etc/ntp.toml"
 
 # ntpd-rs that actually steps the clock needs SYS_TIME; the default
-# retain list doesn't include it, so override here.
+# retain list doesn't include it, so override here. pid_namespace
+# confines a compromised ntpd-rs to its own process view; clock
+# manipulation via SYS_TIME is still possible but no cross-process
+# signaling.
 [services.security]
 caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
+pid_namespace = true
 
 # --- upnpd: UPnP IGD + NAT-PMP daemon (commented, opt-in) ---
 #
