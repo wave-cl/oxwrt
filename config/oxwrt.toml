@@ -1350,6 +1350,23 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 
 # --- debug-ssh: dropbear escape hatch for bring-up (DISABLED by default) ---
 #
+# ⚠️  ENABLING THIS SERVICE DISABLES SANDBOXING.
+#
+# The block below turns off seccomp, landlock, and user_namespace
+# because dropbear is a legacy C codebase that hasn't been policy-
+# audited against our profiles. A single Dropbear CVE while this
+# service is enabled = interactive root on the LAN netns, with
+# `NET_BIND_SERVICE / CHOWN / DAC_OVERRIDE / FOWNER / SYS_CHROOT`
+# retained. That's a materially weaker posture than every other
+# supervised service.
+#
+# Rules of engagement when enabling:
+#   - ONLY on a bench during first-boot bring-up.
+#   - Comment back out before the device faces any untrusted
+#     network (WAN up, guest Wi-Fi enabled, etc.).
+#   - If you need emergency troubleshooting on a production box,
+#     enable, use, disable, reload — don't leave it running.
+#
 # COMMENTED OUT DELIBERATELY. oxwrt's supported management surface is
 # the sQUIC control plane (`oxctl`); shipping an always-on SSH daemon
 # widens the attack surface for the appliance model and pushes the

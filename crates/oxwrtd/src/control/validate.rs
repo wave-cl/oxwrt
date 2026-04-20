@@ -26,7 +26,7 @@
 //! coherent firewall intent) is left to `reload` when it actually
 //! tries to install the new state.
 
-use crate::config::{Config, Network, Rule, Wifi, Zone};
+use crate::config::{Config, NetMode, Network, Rule, Service, Wifi, Zone};
 
 /// Validate VLAN consistency across all networks. A Simple network
 /// with `vlan` set must also set `vlan_parent` — we refuse to infer
@@ -234,6 +234,60 @@ fn ipv4_in_subnet(ip: std::net::Ipv4Addr, subnet: std::net::Ipv4Addr, prefix: u8
     }
     let mask: u32 = u32::MAX.checked_shl(32 - prefix as u32).unwrap_or(0);
     (u32::from(ip) & mask) == (u32::from(subnet) & mask)
+}
+
+/// Cross-field consistency on a [[services]] entry. Checks:
+///
+/// 1. `net_mode = "isolated"` without a `veth` block → the service
+///    spawns in a fresh netns with no network path at all. Almost
+///    never what the operator wants; refuse at validate time.
+/// 2. `net_mode = "host"` with a `veth` block → the veth is
+///    allocated but unused (the service sits on the host netns).
+///    Harmless but wasteful; refuse so the operator notices.
+/// 3. `depends_on` entries must name a real service. A typo here
+///    silently skips the auto-forward rule at firewall-install time.
+/// 4. A service that lists a `depends_on` peer but the peer has no
+///    `veth` configured — the implicit forward rule can't route
+///    anywhere. Refuse so the failure surfaces at reload, not at
+///    first RPC that tries to hit the peer.
+///
+/// Called from CRUD Add/Update on services and (future) from a
+/// reload preflight that iterates every service.
+pub fn check_service(svc: &Service, cfg: &Config) -> Result<(), String> {
+    match svc.net_mode {
+        NetMode::Isolated if svc.veth.is_none() => {
+            return Err(format!(
+                "service {}: net_mode = \"isolated\" requires a [services.veth] block \
+                 (host_ip / peer_ip / prefix); otherwise the service has no network path",
+                svc.name
+            ));
+        }
+        NetMode::Host if svc.veth.is_some() => {
+            return Err(format!(
+                "service {}: [services.veth] is set but net_mode = \"host\" — the veth \
+                 would be allocated and unused. Set net_mode = \"isolated\" or drop the \
+                 veth block",
+                svc.name
+            ));
+        }
+        _ => {}
+    }
+    for dep in &svc.depends_on {
+        let Some(peer) = cfg.services.iter().find(|s| &s.name == dep) else {
+            return Err(format!(
+                "service {}: depends_on references unknown service: {}",
+                svc.name, dep
+            ));
+        };
+        if peer.veth.is_none() {
+            return Err(format!(
+                "service {}: depends_on peer {} has no veth, so the auto-forward rule \
+                 {} → {} can't be installed",
+                svc.name, peer.name, svc.name, peer.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn check_wifi_refs(wifi: &Wifi, cfg: &Config) -> Result<(), String> {
@@ -988,5 +1042,90 @@ mod tests {
         // fields set — this should pass unchanged.
         let cfg = make_test_config();
         assert!(check_vlan_consistency(&cfg).is_ok());
+    }
+
+    // ── check_service ─────────────────────────────────────────────
+
+    fn svc(name: &str, net_mode: NetMode, with_veth: bool) -> Service {
+        use crate::config::VethConfig;
+        Service {
+            name: name.to_string(),
+            rootfs: PathBuf::from(format!("/x/{name}")),
+            entrypoint: vec!["/bin".to_string()],
+            env: BTreeMap::new(),
+            net_mode,
+            veth: with_veth.then(|| VethConfig {
+                host_ip: "10.0.0.1".parse().unwrap(),
+                peer_ip: "10.0.0.2".parse().unwrap(),
+                prefix: 30,
+            }),
+            memory_max: None,
+            cpu_max: None,
+            pids_max: None,
+            binds: vec![],
+            depends_on: vec![],
+            security: Default::default(),
+        }
+    }
+
+    fn cfg_with_services(services: Vec<Service>) -> Config {
+        let mut c = make_test_config();
+        c.services = services;
+        c
+    }
+
+    #[test]
+    fn service_isolated_without_veth_rejected() {
+        let cfg = cfg_with_services(vec![svc("dns", NetMode::Isolated, false)]);
+        let err = check_service(&cfg.services[0], &cfg).unwrap_err();
+        assert!(err.contains("requires a [services.veth] block"), "{err}");
+    }
+
+    #[test]
+    fn service_isolated_with_veth_ok() {
+        let cfg = cfg_with_services(vec![svc("dns", NetMode::Isolated, true)]);
+        assert!(check_service(&cfg.services[0], &cfg).is_ok());
+    }
+
+    #[test]
+    fn service_host_with_veth_rejected() {
+        let cfg = cfg_with_services(vec![svc("dhcp", NetMode::Host, true)]);
+        let err = check_service(&cfg.services[0], &cfg).unwrap_err();
+        assert!(err.contains("allocated and unused"), "{err}");
+    }
+
+    #[test]
+    fn service_host_without_veth_ok() {
+        let cfg = cfg_with_services(vec![svc("dhcp", NetMode::Host, false)]);
+        assert!(check_service(&cfg.services[0], &cfg).is_ok());
+    }
+
+    #[test]
+    fn service_depends_on_unknown_rejected() {
+        let mut s = svc("dns", NetMode::Isolated, true);
+        s.depends_on = vec!["ntp".to_string()];
+        let cfg = cfg_with_services(vec![s]);
+        let err = check_service(&cfg.services[0], &cfg).unwrap_err();
+        assert!(err.contains("unknown service: ntp"), "{err}");
+    }
+
+    #[test]
+    fn service_depends_on_vethless_peer_rejected() {
+        // Two services, B depends on A, but A has no veth.
+        let a = svc("a", NetMode::Host, false);
+        let mut b = svc("b", NetMode::Isolated, true);
+        b.depends_on = vec!["a".to_string()];
+        let cfg = cfg_with_services(vec![a, b]);
+        let err = check_service(&cfg.services[1], &cfg).unwrap_err();
+        assert!(err.contains("has no veth"), "{err}");
+    }
+
+    #[test]
+    fn service_depends_on_veth_peer_ok() {
+        let a = svc("dns", NetMode::Isolated, true);
+        let mut b = svc("ntp", NetMode::Isolated, true);
+        b.depends_on = vec!["dns".to_string()];
+        let cfg = cfg_with_services(vec![a, b]);
+        assert!(check_service(&cfg.services[1], &cfg).is_ok());
     }
 }

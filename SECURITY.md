@@ -238,6 +238,37 @@ oxwrtd we shipped. Compromising the overlay (via a bug in our
 code, or physical access) → persistent root. Hardware-level
 secure boot would address this; out of scope v1.
 
+### Known — host-netns services are MITM-capable if compromised
+
+Four supervised services run in the host netns because their
+jobs require raw sockets on real interfaces and can't be run in
+an isolated veth:
+
+- `dhcp` (coredhcp) — AF_PACKET raw socket for DHCPv4 frames on br-lan.
+- `hostapd-5g` / `hostapd-2g` — 802.11 frame TX/RX via nl80211.
+- `corerad` — ICMPv6 RA TX + rtnetlink subscription on br-lan.
+
+Each retains `NET_RAW` + `NET_ADMIN` plus the default
+`SETUID / SETGID / SETPCAP / NET_BIND_SERVICE`. `NET_RAW` +
+`NET_ADMIN` together are close to unrestricted on the netns:
+a compromised service can inject arbitrary Ethernet / Wi-Fi /
+ICMPv6 frames, poison ARP, redirect default gateways (via RA),
+and DoS the LAN.
+
+Mitigation today: seccomp + landlock + no_new_privs + mount/uts/
+ipc namespaces still apply, so a compromise is bounded to
+network-layer attacks (no filesystem writes outside declared
+binds, no privileged syscalls, no arbitrary execve).
+Consequence: **isolate the router's LAN segment from high-value
+clients**, or accept that a 0-day in any of these four services
+→ LAN-side MITM capability.
+
+Moving these services to isolated netns is blocked by the
+hardware requirement (one bridge, one set of Wi-Fi phys, one
+rtnetlink namespace that matters), not by design choice. The
+`dns` and `ntp` services demonstrate the isolated-netns pattern
+where it's feasible.
+
 ### Known — firewall feature-set vs OpenWrt fw4
 
 The zone/rule abstraction covers the common deployments but

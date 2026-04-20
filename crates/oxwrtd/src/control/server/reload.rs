@@ -55,6 +55,13 @@ pub fn handle_reload_dry_run() -> Response {
             };
         }
     }
+    for svc in &cfg.services {
+        if let Err(e) = crate::control::validate::check_service(svc, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
 
     tracing::info!(
         networks = cfg.networks.len(),
@@ -179,6 +186,13 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         return Response::Err {
             message: format!("reload: {e}"),
         };
+    }
+    for svc in &new_cfg.services {
+        if let Err(e) = crate::control::validate::check_service(svc, &new_cfg) {
+            return Response::Err {
+                message: format!("reload: {e}"),
+            };
+        }
     }
 
     // Control-only mode short-circuit: re-parse + swap the in-memory

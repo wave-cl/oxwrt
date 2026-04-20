@@ -567,6 +567,12 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
                     };
                 }
             }
+            // Cross-field consistency (net_mode vs veth, depends_on
+            // veth presence). Catches "isolated without veth" and
+            // similar shape errors before the entry lands.
+            if let Err(e) = crate::control::validate::check_service(&item, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.services.push(item);
             persist_and_swap(state, new_cfg, &format!("added service {item_name}"))
@@ -605,6 +611,9 @@ pub(super) fn handle_crud_service(state: &ControlState, action: &CrudAction) -> 
                     };
                 }
             };
+            if let Err(e) = crate::control::validate::check_service(&updated, &cfg) {
+                return Response::Err { message: e };
+            }
             let mut new_cfg = (*cfg).clone();
             new_cfg.services[idx] = updated;
             persist_and_swap(state, new_cfg, &format!("updated service {name}"))
