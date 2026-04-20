@@ -713,8 +713,12 @@ pub(super) fn early_mounts() -> Result<(), Error> {
                 tracing::info!(target = target, fstype = fstype, "early_mounts: mounted");
             }
             // EBUSY = target already mounted (upstream or prior run).
+            // On mediatek/filogic /sys and /sys/fs/cgroup are
+            // always pre-mounted by procd-init before we get pid 1,
+            // so this is the steady-state path — demote to debug
+            // rather than shout about it on every boot.
             Err(rustix::io::Errno::BUSY) => {
-                tracing::info!(target = target, "early_mounts: already mounted (EBUSY)");
+                tracing::debug!(target = target, "early_mounts: already mounted (EBUSY)");
             }
             // ENODEV = fs type can't be mounted on this target, e.g.,
             // devtmpfs when the kernel lacks CONFIG_DEVTMPFS. This is
@@ -723,8 +727,14 @@ pub(super) fn early_mounts() -> Result<(), Error> {
             Err(rustix::io::Errno::NODEV) => {
                 // Fallback for /dev: mount tmpfs + populate via mknod.
                 if *target == "/dev" && *fstype == "devtmpfs" {
-                    tracing::warn!(
-                        "early_mounts: devtmpfs unavailable; falling back to tmpfs + mknod"
+                    // MT6000's kernel ships without CONFIG_DEVTMPFS
+                    // (see top-of-function comment), so this is the
+                    // expected path on our primary target, not a
+                    // warning-worthy event. The "populated via mknod"
+                    // info log at the end of the fallback is the
+                    // operator-visible confirmation.
+                    tracing::debug!(
+                        "early_mounts: devtmpfs unavailable on this kernel; using tmpfs + mknod"
                     );
                     let tmpfs_opts = std::ffi::CString::new("mode=0755,size=512K").unwrap();
                     match mount(
