@@ -231,6 +231,11 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     // set first; the coordinator and probes all capture an
     // Arc<Config> at spawn time, so a live probe_target or
     // priority edit wouldn't otherwise take effect until reboot.
+    //
+    // Abort happens inside a sync block (no awaits); the
+    // async-requiring cleanup_stale_endpoint_exemptions call
+    // lives OUTSIDE that block because std::sync::Mutex guards
+    // are !Send and can't cross await points.
     {
         let mut probe_handles = state.vpn_probe_handles.lock().unwrap();
         for h in probe_handles.drain(..) {
@@ -240,17 +245,42 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
             coord.abort();
         }
         // Clear stale health so removed-profile entries don't
-        // linger with a stale `false` that would prevent a fresh
-        // probe from seeding healthy. wan_failover does the same.
+        // linger with a stale `false`.
         if let Ok(mut h) = state.vpn_health.write() {
             h.clear();
         }
+    }
+    // Cleanup stale proto-155 /32s AFTER the old coordinator is
+    // aborted but BEFORE the new one spawns. If the new
+    // coordinator runs first, its initial tick installs a fresh
+    // /32 which a subsequent cleanup would wipe, leaving the
+    // coordinator's prev_endpoint_key tracking a kernel route
+    // that no longer exists — re-install would be skipped for
+    // the rest of the coordinator's life (the bug this commit
+    // addresses).
+    if !new_cfg.vpn_client.is_empty() {
+        let (connection, nl_handle, _messages) = match rtnetlink::new_connection() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "reload: exemption-cleanup rtnetlink failed");
+                return Response::Err {
+                    message: format!("reload: cleanup rtnetlink: {e}"),
+                };
+            }
+        };
+        let conn_task = tokio::spawn(connection);
+        if let Err(e) =
+            oxwrt_linux::vpn_routing::cleanup_stale_endpoint_exemptions(&nl_handle).await
+        {
+            tracing::warn!(error = %e, "reload: exemption cleanup failed");
+        }
+        conn_task.abort();
+    }
+    // Actual spawn of new coordinator + probes. All-sync inside
+    // the lock scope — no awaits — so MutexGuards are safe.
+    {
+        let mut probe_handles = state.vpn_probe_handles.lock().unwrap();
         if !new_cfg.vpn_client.is_empty() {
-            // Same spawn_blocking-avoidance pattern as the boot
-            // path: probes + coordinator are async tasks, so we
-            // can spawn them directly from the async reload
-            // handler. Use a fresh rtnetlink connection so the
-            // coordinator's handle outlives this function.
             let (connection, nl_handle, _messages) = match rtnetlink::new_connection() {
                 Ok(v) => v,
                 Err(e) => {
@@ -320,17 +350,11 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         if let Err(e) = oxwrt_linux::vpn_routing::install_table_51_blackhole(&handle).await {
             tracing::error!(error = %e, "reload: vpn_routing blackhole failed");
         }
-        // Cleanup stale proto-155 /32s: the coordinator is about
-        // to be respawned (see below) and its new prev_endpoint_key
-        // starts None, so without this wipe the old endpoint
-        // exemption (from a prior active profile or endpoint
-        // change) would linger until reboot. Coordinator's first
-        // tick after respawn reinstalls for the current active.
-        if let Err(e) =
-            oxwrt_linux::vpn_routing::cleanup_stale_endpoint_exemptions(&handle).await
-        {
-            tracing::warn!(error = %e, "reload: exemption cleanup failed");
-        }
+        // Stale-exemption cleanup moved into the respawn block
+        // above — it HAS to run before the new coordinator's
+        // first tick or the coordinator's install gets wiped by
+        // the cleanup immediately after (see the reorder commit
+        // that moved this).
         // v6 parallel — gated on any profile declaring address_v6.
         if new_cfg.vpn_client.iter().any(|v| v.address_v6.is_some()) {
             if let Err(e) =
