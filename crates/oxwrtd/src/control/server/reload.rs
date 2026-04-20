@@ -1,5 +1,19 @@
 //! Reload: re-parse config, reconcile netlink addrs + firewall +
 //! supervisor + wifi conf. Split out in step 7.
+//!
+//! Service-respawn-on-spec-change: reload walks the new config
+//! through `Supervisor::reconcile()` (container.rs:1134), which
+//! compares each service's old spec to the new one and, on any
+//! change (security profile, entrypoint, binds, env, ...), stops
+//! the running child and marks the slot Stopped so the next
+//! supervisor tick respawns it with the new spec. This means a
+//! `[services.security]` edit takes effect on reload — no
+//! explicit `oxctl restart <service>` needed. Confirmed by the
+//! `reconcile_replaces_changed_spec` test in container.rs. The
+//! `oxctl restart <service>` RPC exists for the rare case where
+//! an operator wants to force a respawn without touching config
+//! (e.g. to pick up a rotated upstream cert that's read once at
+//! service startup).
 
 use super::*;
 
