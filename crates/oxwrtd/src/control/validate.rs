@@ -442,6 +442,7 @@ mod tests {
             vpn_client: vec![],
             backup_sftp: None,
             dns: None,
+            dhcp: None,
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/etc/oxwrt/authorized_keys"),

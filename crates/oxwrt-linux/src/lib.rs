@@ -30,6 +30,7 @@
 
 pub mod blocklists;
 pub mod container;
+pub mod coredhcp;
 pub mod corerad;
 pub mod hickory;
 pub mod logd;

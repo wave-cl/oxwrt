@@ -527,6 +527,9 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     if let Err(e) = crate::hickory::write_config(&cfg) {
         tracing::error!(error = %e, "hickory config generation failed");
     }
+    if let Err(e) = crate::coredhcp::write_config(&cfg) {
+        tracing::error!(error = %e, "coredhcp config generation failed");
+    }
     if let Ok(Err(e)) = upnp_res {
         tracing::error!(error = %e, "miniupnpd config generation failed");
     }

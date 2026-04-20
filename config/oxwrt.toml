@@ -46,6 +46,8 @@
 #   dns            hickory-dns forwarding resolver (listen, DoH/DoQ
 #                  upstreams) — rendered to /etc/oxwrt/named.toml
 #                  and bind-mounted into the dns service
+#   dhcp           coredhcp server (network, lease_time, pool, dns,
+#                  gateway) — rendered to /etc/oxwrt/coredhcp.yml
 #   services       containerized services (dns, dhcp, hostapd, …)
 #   upnp           miniupnpd renderer (iptables binary staged;
 #                  nftables source-build pending)
@@ -936,7 +938,9 @@ pids_max = 32
 depends_on = []
 
 [[services.binds]]
-source = "/usr/lib/oxwrt/services/dhcp/coredhcp.yml"
+# Daemon-generated from the [dhcp] section below. See [dns] above
+# for the same pattern + backward-compat note.
+source = "/etc/oxwrt/coredhcp.yml"
 target = "/etc/coredhcp.yml"
 # readonly = true (default)
 
@@ -1261,6 +1265,27 @@ ip = "9.9.9.9"
 protocol = "https"
 server_name = "dns.quad9.net"
 path = "/dns-query"
+
+# ---------------- DHCP (coredhcp) ----------------
+#
+# Hands out DHCPv4 leases on a LAN/Simple network. Rendered by
+# oxwrtd into /etc/oxwrt/coredhcp.yml; the dhcp service bind-mounts
+# that file at /etc/coredhcp.yml. Lease state lives separately at
+# /etc/oxwrt/coredhcp/leases.txt (bind-mounted too) — that's runtime
+# state, not config.
+#
+# Pool bounds default to .100–.250 of the network (explicit override
+# via pool_start / pool_end if you want a different range). DNS
+# defaults to [network.address] — the router itself. Gateway
+# defaults to the same.
+
+[dhcp]
+network = "lan"
+lease_time = "12h"
+# pool_start = "192.168.50.100"    # defaults to .100 of the network
+# pool_end   = "192.168.50.250"    # defaults to .250
+# dns_servers = ["192.168.50.1"]   # defaults to [network.address]
+# gateway     = "192.168.50.1"     # defaults to network.address
 
 # ---------------- Off-router config backup (SFTP) ----------------
 #

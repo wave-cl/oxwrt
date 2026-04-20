@@ -154,7 +154,54 @@ pub struct Config {
     /// service falls back to the image-shipped default.
     #[serde(default)]
     pub dns: Option<DnsConfig>,
+    /// DHCPv4 server config for the coredhcp service. When set,
+    /// oxwrtd renders `/etc/oxwrt/coredhcp.yml` at boot/reload;
+    /// when unset, the service falls back to the image-shipped
+    /// default and the operator-visible leases stay unchanged.
+    #[serde(default)]
+    pub dhcp: Option<DhcpConfig>,
     pub control: Control,
+}
+
+/// DHCPv4 server. Binds to one network's bridge/iface and hands
+/// out leases from a pool. v1 covers the knobs 99% of home-router
+/// setups touch; further option overrides (vendor class, custom
+/// options) can land as a `[[dhcp.options]]` array later without
+/// breaking the shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DhcpConfig {
+    /// Name of a `[[networks]]` entry (type `"lan"` or `"simple"`)
+    /// this server binds to. The iface (bridge or iface field) is
+    /// looked up at render time. Required; there's no implicit
+    /// "first LAN" fallback because multi-LAN deployments would
+    /// silently bind to the wrong one.
+    pub network: String,
+    /// coredhcp-style Go duration string ("12h", "1h30m", "7d").
+    /// Clients cache for `lease_time/2` before renewing.
+    #[serde(default = "default_dhcp_lease_time")]
+    pub lease_time: String,
+    /// Pool start. When unset, defaults to `<network>.address + 100`
+    /// clamped to the prefix's usable range (.2 .. .254 for /24).
+    #[serde(default)]
+    pub pool_start: Option<Ipv4Addr>,
+    /// Pool end. When unset, defaults to `<network>.address + 250`
+    /// clamped to the prefix's usable range.
+    #[serde(default)]
+    pub pool_end: Option<Ipv4Addr>,
+    /// DNS servers advertised to clients (option 6). Defaults to
+    /// `[network.address]` — the router itself, via the firewall's
+    /// :53 DNAT rule pointing at hickory.
+    #[serde(default)]
+    pub dns_servers: Vec<Ipv4Addr>,
+    /// Gateway advertised to clients (option 3). Defaults to the
+    /// network's own address; override for topologies where a
+    /// different host on the LAN is the actual gateway (unusual).
+    #[serde(default)]
+    pub gateway: Option<Ipv4Addr>,
+}
+
+fn default_dhcp_lease_time() -> String {
+    "12h".to_string()
 }
 
 /// Forwarding-resolver config. Daemon renders a hickory-dns 0.26
