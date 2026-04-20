@@ -220,6 +220,12 @@ pub enum CrudAction {
     Remove { name: String },
 }
 
+// `Status` carries a fat bundle of per-service / per-WAN / per-AP /
+// per-WG dashboards — the whole `oxctl status` payload lives in one
+// variant. Moving it behind a Box would propagate into every match
+// arm and serialisation path for marginal gain, since the enum is
+// always allocated when sent anyway. Accept the size skew.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Response {

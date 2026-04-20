@@ -14,7 +14,7 @@
 #   2. Overlay-inject oxwrtd in pid1 coexist mode:
 #        /sbin/procd   ← oxwrtd (PID 1 takeover after preinit)
 #        /etc/oxwrt/mode = init
-#        /etc/oxwrt.toml = test config (listen 0.0.0.0:51820)
+#        /etc/oxwrt/oxwrt.toml = test config (listen 0.0.0.0:51820)
 #        /etc/oxwrt/key.ed25519 = fresh random 32-byte seed
 #   3. Boot QEMU with hostfwd udp::51820-:51820 so the host can
 #      reach the control plane via 127.0.0.1:51820.
@@ -233,7 +233,7 @@ chmod 755 /mnt/root/sbin/procd
 
 # Config + secrets
 mkdir -p /mnt/root/etc/oxwrt
-cp /work/test-oxwrt.toml /mnt/root/etc/oxwrt.toml
+cp /work/test-oxwrt.toml /mnt/root/etc/oxwrt/oxwrt.toml
 cp /work/test-key.ed25519 /mnt/root/etc/oxwrt/key.ed25519
 chmod 600 /mnt/root/etc/oxwrt/key.ed25519
 echo init > /mnt/root/etc/oxwrt/mode
@@ -397,13 +397,15 @@ if $CLIENT 127.0.0.1:51820 backup > "$BACKUP_PATH" 2>/dev/null; then
         FAIL=$((FAIL + 1))
         echo "  FAIL backup — wrong file type: $(file "$BACKUP_PATH")"
     fi
-    # Should contain oxwrt.toml.
-    if tar -tzf "$BACKUP_PATH" 2>/dev/null | grep -q "^oxwrt.toml$"; then
+    # Should contain oxwrt/oxwrt.toml. Archive layout was moved
+    # in commit 12e50ef when the legacy /etc/oxwrt.toml path was
+    # dropped — the public config now lives under /etc/oxwrt/.
+    if tar -tzf "$BACKUP_PATH" 2>/dev/null | grep -q "^oxwrt/oxwrt.toml$"; then
         PASS=$((PASS + 1))
-        echo "  OK   backup contains oxwrt.toml"
+        echo "  OK   backup contains oxwrt/oxwrt.toml"
     else
         FAIL=$((FAIL + 1))
-        echo "  FAIL backup missing oxwrt.toml"
+        echo "  FAIL backup missing oxwrt/oxwrt.toml"
     fi
 else
     FAIL=$((FAIL + 2))

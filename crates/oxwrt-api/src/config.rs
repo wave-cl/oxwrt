@@ -3047,12 +3047,15 @@ prefix = 24
 
     // --- Config-level integration: every new field at once ---
 
-    /// A single TOML document exercising routes + blocklists + upnp
-    /// + a VLAN Simple network + metrics + wireguard. Confirms the
-    /// four new top-level fields on Config don't interfere with
-    /// each other under serde's flatten/default machinery — a
-    /// regression here would mean a field collision (e.g. two
-    /// `#[serde(default)]` optionals both matching an unknown key).
+    /// Combined parse test: a single TOML document exercising routes,
+    /// blocklists, upnp, a VLAN Simple network, metrics, and
+    /// wireguard in one go.
+    ///
+    /// Confirms the four newer top-level fields on Config don't
+    /// interfere with each other under serde's flatten/default
+    /// machinery. A regression here would mean a field collision —
+    /// e.g. two `#[serde(default)]` optionals both matching an
+    /// unknown key.
     #[test]
     fn config_all_new_features_together() {
         let toml = r#"

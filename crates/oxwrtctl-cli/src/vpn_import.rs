@@ -4,10 +4,11 @@
 //! its private key.
 //!
 //! Runs three RPCs in sequence on the same sQUIC connection:
-//!   1. VpnKeyUpload — writes /etc/oxwrt/vpn/<name>.key at 0600.
-//!   2. ConfigDump   — pulls the live oxwrt.toml text.
-//!   3. ConfigPush   — sends back the TOML with a `[[vpn_client]]`
-//!                     block for <name> added-or-replaced.
+//!
+//! 1. VpnKeyUpload — writes /etc/oxwrt/vpn/<name>.key at 0600.
+//! 2. ConfigDump — pulls the live oxwrt.toml text.
+//! 3. ConfigPush — sends back the TOML with a `[[vpn_client]]`
+//!    block for <name> added-or-replaced.
 //!
 //! Parsing is pragmatic: the wg-quick `.conf` grammar is an INI
 //! subset, and providers (Mullvad, Proton) write the same fields
@@ -17,10 +18,10 @@
 //! need the follow-up commit that adds routes6 for vpn_client.
 //!
 //! TOML editing uses `toml_edit` so the operator's inline comments
-//! + section ordering survive the round-trip — critical since the
-//! oxwrt.toml shipped as a cookbook has ~900 lines of operator-
-//! facing commentary that a plain `toml` parse-and-reserialize
-//! would wipe.
+//! and section ordering survive the round-trip. That matters
+//! because the oxwrt.toml shipped as a cookbook has ~900 lines of
+//! operator-facing commentary that a plain `toml` parse-and-
+//! reserialize would wipe.
 
 use std::net::Ipv4Addr;
 
