@@ -1191,63 +1191,73 @@ caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "SYS_TIME"]
 # [services.security]
 # caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "NET_ADMIN", "NET_RAW"]
 
-# --- debug-ssh: dropbear escape hatch for bring-up ---
+# --- debug-ssh: dropbear escape hatch for bring-up (DISABLED by default) ---
 #
-# Runs under the same supervisor as any other service so an operator
-# can ssh in when the control plane misbehaves — without it, a bug
-# after the PID-1 takeover means "physical power cycle + rollback".
-# Listens on port 2222 so it doesn't fight stock dropbear while we're
-# running as a side binary. Production builds should omit this entry
-# (or the matching rootfs package) for the appliance model.
+# COMMENTED OUT DELIBERATELY. oxwrt's supported management surface is
+# the sQUIC control plane (`oxctl`); shipping an always-on SSH daemon
+# widens the attack surface for the appliance model and pushes the
+# identity-pinning story to a second channel (dropbear host-key
+# rotation breaks every pinned client).
 #
-# Only spawns when oxwrtd runs in --services-only or --init mode;
-# ignored by --control-only (which keeps the supervisor empty).
-# The rootfs is built by /etc/uci-defaults/97-oxwrt-debug-ssh-rootfs
-# from the stock busybox + dropbear on first boot.
-[[services]]
-name = "debug-ssh"
-rootfs = "/usr/lib/oxwrt/services/debug-ssh/rootfs"
-entrypoint = ["/sbin/dropbear", "-F", "-E", "-R", "-s", "-p", "2222", "-P", "/tmp/dropbear.pid"]
-# `net_mode = host` — dropbear binds on the real LAN bridge. An
-# isolated veth would require exposing port 2222 via DNAT, which is a
-# lot of plumbing for "the operator wants a shell."
-net_mode = "host"
-pids_max = 64
-depends_on = []
-
-# /dev/pts must be bind-mounted writable so dropbear can allocate
-# pseudo-ttys for interactive sessions (ptmx + /dev/pts/N). Everything
-# else in the rootfs is read-only by default.
-[[services.binds]]
-source = "/dev/pts"
-target = "/dev/pts"
-readonly = false
-
-# Host keys at /etc/dropbear/ must be writable (dropbear `-R` auto-
-# generates ed25519/rsa on first start if missing) AND persist across
-# reboots / sysupgrade (clients pin the host key, regen would break
-# every pinned client). Bind-mount a dir under /etc/oxwrt/ — that
-# path is on the overlay and preserved by sysupgrade.conf.
-[[services.binds]]
-source = "/etc/oxwrt/debug-ssh-keys"
-target = "/etc/dropbear"
-readonly = false
-
-# Dropbear is a legacy C codebase that needs more caps than the
-# default four: CHOWN/DAC_OVERRIDE/FOWNER for pty ownership transfer
-# to the logged-in user, SETUID/SETGID/SETPCAP to drop privilege to
-# that user, KILL to signal child shells, SYS_CHROOT for the
-# user-session chroot, NET_BIND_SERVICE just in case the port
-# changes below 1024. Seccomp and landlock off — adds weeks of
-# policy-authoring work for a service that only runs during
-# bring-up. Tighten later.
-[services.security]
-caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SYS_CHROOT"]
-no_new_privs = true
-seccomp = false
-seccomp_allow = []
-user_namespace = false
-landlock = false
+# Uncomment the block below (including the matching [services.binds]
+# and [services.security] tables) if you genuinely need a shell
+# during bring-up — e.g. you're iterating on a new service and the
+# control plane keeps getting broken before you can fix it. When
+# you do:
+#
+#   - Dropbear listens on :2222 (won't fight stock dropbear on :22
+#     if you're still running it side-by-side).
+#   - Host keys land at /etc/oxwrt/debug-ssh-keys/ (persisted across
+#     sysupgrade via the keeplist).
+#   - Turn it off again by re-commenting + `oxctl reload` — the
+#     supervisor stops the container.
+#
+# Production images should leave this commented.
+#
+# [[services]]
+# name = "debug-ssh"
+# rootfs = "/usr/lib/oxwrt/services/debug-ssh/rootfs"
+# entrypoint = ["/sbin/dropbear", "-F", "-E", "-R", "-s", "-p", "2222", "-P", "/tmp/dropbear.pid"]
+# # `net_mode = host` — dropbear binds on the real LAN bridge. An
+# # isolated veth would require exposing port 2222 via DNAT, which is a
+# # lot of plumbing for "the operator wants a shell."
+# net_mode = "host"
+# pids_max = 64
+# depends_on = []
+#
+# # /dev/pts must be bind-mounted writable so dropbear can allocate
+# # pseudo-ttys for interactive sessions (ptmx + /dev/pts/N). Everything
+# # else in the rootfs is read-only by default.
+# [[services.binds]]
+# source = "/dev/pts"
+# target = "/dev/pts"
+# readonly = false
+#
+# # Host keys at /etc/dropbear/ must be writable (dropbear `-R` auto-
+# # generates ed25519/rsa on first start if missing) AND persist across
+# # reboots / sysupgrade (clients pin the host key, regen would break
+# # every pinned client). Bind-mount a dir under /etc/oxwrt/ — that
+# # path is on the overlay and preserved by sysupgrade.conf.
+# [[services.binds]]
+# source = "/etc/oxwrt/debug-ssh-keys"
+# target = "/etc/dropbear"
+# readonly = false
+#
+# # Dropbear is a legacy C codebase that needs more caps than the
+# # default four: CHOWN/DAC_OVERRIDE/FOWNER for pty ownership transfer
+# # to the logged-in user, SETUID/SETGID/SETPCAP to drop privilege to
+# # that user, KILL to signal child shells, SYS_CHROOT for the
+# # user-session chroot, NET_BIND_SERVICE just in case the port
+# # changes below 1024. Seccomp and landlock off — adds weeks of
+# # policy-authoring work for a service that only runs during
+# # bring-up. Tighten later.
+# [services.security]
+# caps = ["SETUID", "SETGID", "SETPCAP", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SYS_CHROOT"]
+# no_new_privs = true
+# seccomp = false
+# seccomp_allow = []
+# user_namespace = false
+# landlock = false
 
 # ---------------- UPnP / NAT-PMP ----------------
 #

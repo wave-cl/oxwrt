@@ -2322,9 +2322,10 @@ mod tests {
         assert_eq!(cfg.wifi.len(), 2);
         assert_eq!(cfg.wifi[0].ssid, "oxwrt");
         assert_eq!(cfg.wifi[0].network, "lan");
-        // 6 services now: dns, dhcp, hostapd-5g, hostapd-2g, corerad,
-        // ntp, debug-ssh. Count might drift as bring-up progresses;
-        // keep this loose check.
+        // 6 services in the example: dns, dhcp, hostapd-5g,
+        // hostapd-2g, corerad, ntp. debug-ssh is commented out by
+        // default (appliance model; see the block in oxwrt.toml).
+        // Loose lower bound to tolerate future additions.
         assert!(cfg.services.len() >= 4);
 
         // The coredhcp service must declare NET_RAW + NET_ADMIN on top
