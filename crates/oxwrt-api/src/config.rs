@@ -160,7 +160,63 @@ pub struct Config {
     /// default and the operator-visible leases stay unchanged.
     #[serde(default)]
     pub dhcp: Option<DhcpConfig>,
+    /// NTP client + server config for the ntpd-rs service. When
+    /// set, oxwrtd renders `/etc/oxwrt/ntp.toml` at boot/reload;
+    /// when unset, the service falls back to the image-shipped
+    /// default.
+    #[serde(default)]
+    pub ntp: Option<NtpConfig>,
     pub control: Control,
+}
+
+/// ntpd-rs config. Runs a client (syncs the router's clock from
+/// upstream pool / server) and optionally an LAN-facing server
+/// that clients on the network can sync from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NtpConfig {
+    /// Upstream time sources. At least one recommended — with zero
+    /// entries the router's clock drifts indefinitely (router-only
+    /// boot mode, no internet yet).
+    #[serde(default)]
+    pub sources: Vec<NtpSource>,
+    /// LAN-facing NTP listen addresses. Empty = no local server
+    /// (clients go direct to pool.ntp.org). Typical value is an
+    /// `0.0.0.0:123` line paired with firewall rules that only
+    /// admit port 123 from trusted zones.
+    #[serde(default)]
+    pub listen: Vec<String>,
+    /// Log₂ of the minimum poll interval in seconds. ntpd-rs
+    /// default 4 → 16s. Lower = faster sync, more upstream load.
+    #[serde(default = "default_ntp_poll_min")]
+    pub poll_min: u8,
+    /// Log₂ of the maximum poll interval in seconds. ntpd-rs
+    /// default 10 → 1024s (~17 min). Higher = less traffic when
+    /// the clock is stable.
+    #[serde(default = "default_ntp_poll_max")]
+    pub poll_max: u8,
+}
+
+/// One NTP upstream. `mode` selects between a single server and
+/// a pool (where ntpd-rs resolves the hostname periodically and
+/// rotates through discovered peers).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NtpSource {
+    /// `"pool"` or `"server"`.
+    pub mode: String,
+    /// Hostname or IP. Pool entries are hostnames that resolve to
+    /// multiple A/AAAA records (e.g. `"pool.ntp.org"`).
+    pub address: String,
+    /// How many peers to keep warm from a pool. Ignored for
+    /// `mode = "server"`. ntpd-rs default 4.
+    #[serde(default)]
+    pub count: Option<u8>,
+}
+
+fn default_ntp_poll_min() -> u8 {
+    4
+}
+fn default_ntp_poll_max() -> u8 {
+    10
 }
 
 /// DHCPv4 server. Binds to one network's bridge/iface and hands

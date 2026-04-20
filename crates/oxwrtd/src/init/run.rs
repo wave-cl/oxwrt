@@ -530,6 +530,9 @@ async fn async_main(cfg: Config) -> Result<(), Error> {
     if let Err(e) = crate::coredhcp::write_config(&cfg) {
         tracing::error!(error = %e, "coredhcp config generation failed");
     }
+    if let Err(e) = crate::ntpd::write_config(&cfg) {
+        tracing::error!(error = %e, "ntpd config generation failed");
+    }
     if let Ok(Err(e)) = upnp_res {
         tracing::error!(error = %e, "miniupnpd config generation failed");
     }

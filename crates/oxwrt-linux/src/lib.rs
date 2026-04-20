@@ -37,6 +37,7 @@ pub mod logd;
 pub mod metrics_state;
 pub mod miniupnpd;
 pub mod net;
+pub mod ntpd;
 pub mod sqm;
 pub mod static_routes;
 pub mod sysupgrade;

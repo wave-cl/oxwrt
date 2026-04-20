@@ -215,6 +215,7 @@ mod tests {
             backup_sftp: None,
             dns: None,
             dhcp: None,
+            ntp: None,
             control: Control {
                 listen: vec![],
                 authorized_keys: PathBuf::from("/x"),

@@ -433,6 +433,10 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
         tracing::error!(error = %e, "reload: coredhcp config write failed");
     }
 
+    if let Err(e) = crate::ntpd::write_config(&new_cfg) {
+        tracing::error!(error = %e, "reload: ntpd config write failed");
+    }
+
     // Reapply SQM — picks up bandwidth/extra_args changes; removes
     // stale qdiscs when sqm goes from Some → None.
     if let Err(e) = crate::sqm::setup_sqm(&new_cfg) {

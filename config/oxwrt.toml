@@ -48,6 +48,8 @@
 #                  and bind-mounted into the dns service
 #   dhcp           coredhcp server (network, lease_time, pool, dns,
 #                  gateway) — rendered to /etc/oxwrt/coredhcp.yml
+#   ntp            ntpd-rs client + LAN server (sources, listen,
+#                  poll intervals) — rendered to /etc/oxwrt/ntp.toml
 #   services       containerized services (dns, dhcp, hostapd, …)
 #   upnp           miniupnpd renderer (iptables binary staged;
 #                  nftables source-build pending)
@@ -1079,7 +1081,9 @@ pids_max = 16
 depends_on = ["dns"]         # needs DNS to resolve pool.ntp.org
 
 [[services.binds]]
-source = "/usr/lib/oxwrt/services/ntp/ntp.toml"
+# Daemon-generated from the [ntp] section below. See [dns] and
+# [dhcp] for the same pattern + backward-compat note.
+source = "/etc/oxwrt/ntp.toml"
 target = "/etc/ntp.toml"
 
 # ntpd-rs that actually steps the clock needs SYS_TIME; the default
@@ -1286,6 +1290,27 @@ lease_time = "12h"
 # pool_end   = "192.168.50.250"    # defaults to .250
 # dns_servers = ["192.168.50.1"]   # defaults to [network.address]
 # gateway     = "192.168.50.1"     # defaults to network.address
+
+# ---------------- NTP (ntpd-rs) ----------------
+#
+# Syncs the router's clock + optionally serves LAN clients.
+# Rendered by oxwrtd into /etc/oxwrt/ntp.toml; the ntp service
+# bind-mounts that file at /etc/ntp.toml.
+#
+# poll_min / poll_max are log₂ seconds (ntpd-rs convention).
+# 4 = 2^4 = 16s minimum poll; 10 = 2^10 = 1024s (~17m) max.
+# listen on :1123 because the service runs unprivileged; firewall
+# DNATs :123 → :1123 on via-router zones.
+
+[ntp]
+poll_min = 4
+poll_max = 10
+listen = ["0.0.0.0:1123"]
+
+[[ntp.sources]]
+mode = "pool"
+address = "pool.ntp.org"
+count = 4
 
 # ---------------- Off-router config backup (SFTP) ----------------
 #

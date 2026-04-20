@@ -1545,6 +1545,7 @@ mod tests {
             backup_sftp: None,
             dns: None,
             dhcp: None,
+            ntp: None,
             control: Control {
                 listen: vec!["[::1]:51820".to_string()],
                 authorized_keys: PathBuf::from("/x"),
