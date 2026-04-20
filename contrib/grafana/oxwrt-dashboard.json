@@ -1,0 +1,278 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "schemaVersion": 39,
+  "tags": ["oxwrt", "router", "wireguard", "openwrt"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(oxwrt_supervisor_uptime_seconds, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": { "qryType": 1, "query": "label_values(oxwrt_supervisor_uptime_seconds, instance)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timezone": "browser",
+  "title": "oxwrt — router overview",
+  "uid": "oxwrt-overview",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Supervisor",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "title": "Supervisor uptime",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red" }, { "color": "yellow", "value": 60 }, { "color": "green", "value": 3600 } ] } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto" },
+      "targets": [ { "expr": "oxwrt_supervisor_uptime_seconds{instance=~\"$instance\"}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 2,
+      "title": "Reload rate (ok / error, per 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 9, "x": 6, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never", "stacking": { "mode": "none" } } }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "expr": "rate(oxwrt_reloads_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}} {{result}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 3,
+      "title": "Last reload duration",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 15, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3, "thresholds": { "mode": "absolute", "steps": [ { "color": "green" }, { "color": "yellow", "value": 2 }, { "color": "red", "value": 5 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "area" },
+      "targets": [ { "expr": "oxwrt_reload_last_duration_seconds{instance=~\"$instance\"}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 4,
+      "title": "Firewall rules installed",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 5, "x": 19, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "none", "graphMode": "none" },
+      "targets": [ { "expr": "oxwrt_firewall_rules{instance=~\"$instance\"}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Services",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 10,
+      "title": "Service state",
+      "description": "1=Running, 0=Stopped, negative values are Crashed / failed states.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "points", "pointSize": 5, "showPoints": "always", "spanNulls": false } }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_service_state{instance=~\"$instance\"}", "legendFormat": "{{name}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 11,
+      "title": "Service restarts (per 5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 30 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "rate(oxwrt_service_restarts_total{instance=~\"$instance\"}[5m]) * 300", "legendFormat": "{{name}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "WAN",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 20,
+      "title": "WAN DHCP lease remaining",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "red" }, { "color": "yellow", "value": 600 }, { "color": "green", "value": 3600 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "textMode": "auto" },
+      "targets": [ { "expr": "oxwrt_wan_lease_seconds{instance=~\"$instance\"}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 21,
+      "title": "DHCP acquire attempts (5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 12, "x": 6, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "expr": "rate(oxwrt_wan_dhcp_acquires_total{instance=~\"$instance\"}[5m]) * 300", "legendFormat": "{{iface}} {{result}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 22,
+      "title": "Last DHCP acquire latency",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3, "thresholds": { "mode": "absolute", "steps": [ { "color": "green" }, { "color": "yellow", "value": 2 }, { "color": "red", "value": 10 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "textMode": "auto" },
+      "targets": [ { "expr": "oxwrt_wan_dhcp_last_acquire_seconds{instance=~\"$instance\"}", "legendFormat": "{{iface}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Wi-Fi",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 30,
+      "title": "Access points — up",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 21 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_ap_up{instance=~\"$instance\"}", "legendFormat": "{{ssid}} on {{iface}} ({{band}})", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "type": "row",
+      "id": 104,
+      "title": "Blocklists",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 40,
+      "title": "Blocklist entries",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_blocklist_entries{instance=~\"$instance\"}", "legendFormat": "{{name}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 41,
+      "title": "Time since last blocklist fetch",
+      "description": "Staleness monitor — flags alerts when a blocklist fails to refresh. Subtracts last-fetch unix timestamp from now.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green" }, { "color": "yellow", "value": 86400 }, { "color": "red", "value": 259200 } ] } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "time() - oxwrt_blocklist_last_fetch_timestamp{instance=~\"$instance\"}", "legendFormat": "{{name}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "type": "row",
+      "id": 105,
+      "title": "WireGuard (server-side roadwarrior)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 50,
+      "title": "Peer — seconds since last handshake",
+      "description": "Time since the most recent handshake per peer. -1 = never seen. A peer that's been away longer than ~300s hasn't completed a rekey.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_wg_peer_last_handshake_seconds{instance=~\"$instance\"}", "legendFormat": "{{iface}}/{{peer}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 51,
+      "title": "Peer rx / tx rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 42 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [
+        { "expr": "rate(oxwrt_wg_peer_rx_bytes_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{iface}}/{{peer}} rx", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } },
+        { "expr": "rate(oxwrt_wg_peer_tx_bytes_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{iface}}/{{peer}} tx", "refId": "B", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 106,
+      "title": "VPN client (outbound)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 60,
+      "title": "Active profile (1 = currently exiting via this tunnel)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 50 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_vpn_active{instance=~\"$instance\"}", "legendFormat": "{{profile}} ({{iface}})", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    },
+    {
+      "id": 61,
+      "title": "Profile healthy (bring-up AND probe passing)",
+      "description": "Useful during failover: a backup profile showing healthy=1 active=0 is standing by, ready to take over.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 50 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [ { "expr": "oxwrt_vpn_healthy{instance=~\"$instance\"}", "legendFormat": "{{profile}} ({{iface}})", "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } } ]
+    }
+  ]
+}
