@@ -304,39 +304,22 @@ where it's feasible.
 
 ### Known — firewall feature-set vs OpenWrt fw4
 
-The zone/rule abstraction covers the common deployments but
-doesn't match fw4 feature-for-feature. Gaps that remain after
-the fw4-parity passes:
+The zone/rule abstraction now matches fw4 feature-for-feature on
+everything a home-router or small-fleet operator routinely
+touches. Two deliberate non-goals remain:
 
-<!-- QoS marks + DSCP landed as rule-level `set_mark` / `set_dscp`.
-     See the implemented list below. Remaining QoS-adjacent work:
-     per-zone connmark/counter aggregation, which isn't in the
-     deferred list. -->
-
-<!-- CT helpers landed as `rule.helper` — see the implemented list below. -->
-- **RTSP helper.** RTSP isn't in mainline nf_conntrack (only in
-  a handful of vendor trees); not offered. FTP, SIP, TFTP, PPTP,
-  H.323, and IRC are all supported.
-<!-- NOTRACK landed as rule-level `notrack = true`. Companion rule
-     in a priority-(-301) prerouting chain that emits `notrack`
-     before the helper chain (so notrack'd packets skip helper
-     attachment too). Validator rejects `notrack + helper` as
-     incompatible. CT zones per se aren't in scope — individual
-     rules can opt out, which covers the same use case. -->
-
-<!-- Absolute-date schedules landed via `from DATE` / `until DATE`
-     prefixes on the existing schedule field. Renders as nft
-     `meta time >= "DATE 00:00:00"` / `meta time <= "DATE 23:59:59"`
-     comparisons. Combines with the existing day/hour spec for
-     holiday-window patterns. -->
+- **RTSP conntrack helper.** Not in mainline `nf_conntrack` (only
+  in a handful of vendor trees); not shipped. FTP, SIP, TFTP,
+  PPTP, H.323, and IRC are all supported.
 - **Includes.** fw4 sources external rule files via `config
   include`. oxwrt's config is single-file by design (plus the
   secrets overlay); the raw_nft escape hatch covers the
   "insert arbitrary rules" use case.
 - **Hardware flow offloading.** fw4 exposes `flow_offloading`
   + `flow_offloading_hw` toggles. Not safe to enable by default
-  (benchmarking needed on each target); omitted until a
-  dedicated perf pass.
+  (benchmarking needed per target); omitted until a dedicated
+  perf pass. Operators who need it on a specific iface can
+  install the rule via `[[firewall.raw_nft]]`.
 
 Everything else from the mainstream fw4 surface is implemented:
 zone `default_output`, zone `mtu_fix` (TCP MSS clamping), rule
