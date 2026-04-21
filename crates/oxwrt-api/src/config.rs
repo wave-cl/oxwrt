@@ -1338,6 +1338,30 @@ pub struct Rule {
     /// Forces the text path.
     #[serde(default)]
     pub device: Option<String>,
+    /// Netfilter mark to set on matching packets. Rendered as
+    /// `meta mark set 0x<hex>` in a priority-mangle chain. Use
+    /// for downstream policy routing (`ip rule fwmark 0x10 lookup
+    /// 100`) or tc-based QoS (`tc filter ... handle 0x10 fw`).
+    /// Non-verdict — does NOT terminate rule evaluation; the
+    /// rule's normal accept/drop still fires. Operators setting
+    /// a mark-without-accept have a decorative config the
+    /// validator warns on.
+    #[serde(default)]
+    pub set_mark: Option<u32>,
+    /// DSCP class to stamp on the IP header of matching packets.
+    /// Accepts nft's class names: `"cs0"`..`"cs7"`, `"af11"`
+    /// through `"af43"`, `"ef"`, `"be"`, `"va"`, `"le"`, or a raw
+    /// 6-bit integer (`"46"` for EF). Rendered as `ip dscp set
+    /// <v>` + `ip6 dscp set <v>` (guarded by `meta nfproto` when
+    /// the rule is dual-family, single emission when pinned).
+    ///
+    /// DSCP drives downstream tc shaping on the upstream ISP's
+    /// edge and on local egress queues that honour the DiffServ
+    /// code point. Set in combination with `set_mark` for full
+    /// QoS hooks (mark drives local queue selection, DSCP
+    /// advertises the class to everyone else).
+    #[serde(default)]
+    pub set_dscp: Option<String>,
     /// Attach a conntrack helper to matching packets so the
     /// kernel parses the application-layer control channel and
     /// creates expected conntrack entries for the data channel.

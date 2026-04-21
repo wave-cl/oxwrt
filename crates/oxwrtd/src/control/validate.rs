@@ -268,6 +268,39 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         }
     }
 
+    // set_mark + set_dscp don't prevent a verdict — they're
+    // mangle-chain actions that land on accepted packets.
+    // Combined with action=drop they're wasted work (the packet
+    // gets dropped in the filter chain before the mangle chain
+    // mutates it). Catch the obvious paste-bug here.
+    if (rule.set_mark.is_some() || rule.set_dscp.is_some()) && rule.action == Action::Drop {
+        return Err(format!(
+            "rule {}: set_mark/set_dscp with action=drop is a no-op \
+             (packet is dropped before the mangle chain runs)",
+            rule.name
+        ));
+    }
+    // DSCP string sanity: accept nft class names + raw integers.
+    // nft rejects anything else at parse time; catch early with a
+    // clearer error.
+    if let Some(dscp) = rule.set_dscp.as_deref() {
+        let v = dscp.trim().to_ascii_lowercase();
+        const CLASSES: &[&str] = &[
+            "be", "ef", "va", "le", "cs0", "cs1", "cs2", "cs3", "cs4", "cs5", "cs6", "cs7", "af11",
+            "af12", "af13", "af21", "af22", "af23", "af31", "af32", "af33", "af41", "af42", "af43",
+        ];
+        let is_class = CLASSES.contains(&v.as_str());
+        // Raw integer 0..=63 (DSCP field is 6 bits).
+        let is_int = v.parse::<u8>().ok().filter(|n| *n <= 63).is_some();
+        if !is_class && !is_int {
+            return Err(format!(
+                "rule {}: set_dscp {:?} must be a DSCP class name \
+                 (cs0..cs7, af11..af43, ef, be, va, le) or an integer 0..=63",
+                rule.name, dscp
+            ));
+        }
+    }
+
     // CT helper must name a known helper in the static registry.
     // Unknown names would render as `ct helper set "typo"` which
     // nft refuses to parse (the helper object isn't declared),
@@ -758,6 +791,8 @@ mod tests {
                     reject_with: None,
                     device: None,
                     helper: None,
+                    set_mark: None,
+                    set_dscp: None,
                 }],
                 raw_nft: vec![],
                 defaults: Default::default(),
@@ -920,6 +955,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -952,6 +989,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -984,6 +1023,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -1018,6 +1059,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -1051,6 +1094,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -1084,6 +1129,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -1117,6 +1164,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -1149,6 +1198,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1185,6 +1236,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1221,6 +1274,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         }
     }
 
@@ -1335,6 +1390,55 @@ listen = ["[::1]:51820"]
 authorized_keys = "/x"
 "#;
         toml::from_str(toml).unwrap()
+    }
+
+    // ── QoS mangle: set_mark + set_dscp ────────────────────────────
+
+    #[test]
+    fn rule_set_mark_with_drop_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bad-mark-drop");
+        r.set_mark = Some(0x10);
+        r.action = Action::Drop;
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_set_mark_with_accept_ok() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("mark-accept");
+        r.set_mark = Some(0x10);
+        r.action = Action::Accept;
+        assert!(check_rule_zone_refs(&r, &cfg).is_ok());
+    }
+
+    #[test]
+    fn rule_set_dscp_bad_class_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bad-dscp");
+        r.set_dscp = Some("not-a-class".to_string());
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("DSCP"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_set_dscp_class_and_integer_accepted() {
+        let cfg = make_test_config();
+        for v in ["ef", "cs4", "af31", "be", "le", "0", "46", "63", "EF"] {
+            let mut r = build_basic_rule_for_test("ok-dscp");
+            r.set_dscp = Some(v.to_string());
+            assert!(check_rule_zone_refs(&r, &cfg).is_ok(), "failed for {v:?}");
+        }
+    }
+
+    #[test]
+    fn rule_set_dscp_out_of_range_integer_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("oob");
+        r.set_dscp = Some("64".to_string()); // DSCP is 6 bits → 0..=63
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("DSCP"), "got: {err}");
     }
 
     // ── rule.helper ────────────────────────────────────────────────

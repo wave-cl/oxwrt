@@ -655,6 +655,34 @@ action = "accept"
 # action = "accept"
 # helper = "sip"                # tracks RTP/RTCP data channels
 #
+# QoS: netfilter mark + DSCP. `set_mark` stamps a packet fwmark
+# for downstream `ip rule fwmark` / tc policy routing. `set_dscp`
+# writes the 6-bit DiffServ code point for downstream shapers
+# (local tc queues + the upstream ISP's edge). Both are emitted
+# in a separate priority-mangle chain; they don't terminate
+# filter evaluation — pair with `action = "accept"`, not `drop`
+# (validator rejects mark+drop as a no-op).
+#
+# DSCP classes: cs0..cs7, af11..af43, ef, be, va, le, or a raw
+# 0..63 integer. EF for voice, cs5 for interactive, cs1 for bulk.
+#
+# [[firewall.rules]]
+# name = "voip-priority"
+# src = "lan"
+# proto = "udp"
+# dest_port = 5060
+# action = "accept"
+# set_dscp = "ef"               # Expedited Forwarding
+# set_mark = 0x10               # tc filter … handle 0x10 fw …
+#
+# [[firewall.rules]]
+# name = "bulk-downloads"
+# src = "lan"
+# proto = "tcp"
+# dest_port = "6881-6889"       # BitTorrent range
+# action = "accept"
+# set_dscp = "cs1"              # bulk/scavenger class
+#
 # IPv6-only restriction. Without `family`, a rule with no
 # address carriers applies to both families. `family = "ipv6"`
 # emits `meta nfproto ipv6` on the way in.

@@ -308,10 +308,11 @@ The zone/rule abstraction covers the common deployments but
 doesn't match fw4 feature-for-feature. Gaps that remain after
 the fw4-parity passes:
 
-- **QoS primitives: `set_mark`, `set_dscp`.** Netfilter marks
-  + DSCP rewriting for downstream policy routing / tc shaping.
-  Not implemented. Operators needing QoS write raw_nft against
-  a custom mangle chain.
+<!-- QoS marks + DSCP landed as rule-level `set_mark` / `set_dscp`.
+     See the implemented list below. Remaining QoS-adjacent work:
+     per-zone connmark/counter aggregation, which isn't in the
+     deferred list. -->
+
 <!-- CT helpers landed as `rule.helper` — see the implemented list below. -->
 - **RTSP helper.** RTSP isn't in mainline nf_conntrack (only in
   a handful of vendor trees); not offered. FTP, SIP, TFTP, PPTP,
@@ -338,7 +339,12 @@ zone `default_output`, zone `mtu_fix` (TCP MSS clamping), rule
 `device`, rule `helper` (CT helpers — FTP, SIP, TFTP, PPTP,
 H.323, IRC; rendered as `ct helper` objects in `inet oxwrt` +
 companion rules in a priority-raw prerouting chain; kernel
-modules shipped in every image), port-forward `reflection`,
+modules shipped in every image), **rule-level QoS mangle**
+(`set_mark` for netfilter fwmark, `set_dscp` for DiffServ code
+point — nft class names cs0..cs7 / af11..af43 / ef / be / va /
+le or a raw 0..63 integer; both emitted into a dedicated
+priority-mangle chain, dual-family rules auto-emit one rule
+per family gated by `meta nfproto`), port-forward `reflection`,
 IPv6 MASQUERADE66,
 **IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
 (installed into a dedicated `oxwrt-dnat6` nftables table with

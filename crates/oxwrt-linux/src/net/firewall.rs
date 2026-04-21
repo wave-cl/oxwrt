@@ -61,6 +61,11 @@ pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
         || r.limit_burst.is_some()
         || r.reject_with.is_some()
         || r.device.is_some()
+        // QoS mangle primitives — companion rule rendered in the
+        // priority-mangle chain. Routing the filter rule through
+        // the text path too keeps the pair co-located in output.
+        || r.set_mark.is_some()
+        || r.set_dscp.is_some()
 }
 
 use super::Error;
@@ -1171,6 +1176,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     let scheduled_script = build_scheduled_rules_script(cfg);
     let forwardings_script = build_forwardings_script(cfg);
     let ct_helpers_script = build_ct_helpers_script(cfg);
+    let mangle_script = build_mangle_script(cfg);
 
     // Baseline defaults: ct state, ICMPv6 NDP/MLD, ICMP echo —
     // these are unconditional and emitted in text (rustables has
@@ -1193,8 +1199,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
     let combined = format!(
-        "{ipsets_prologue}{ct_helpers_script}{baseline_script}\
-         {forwardings_script}{scheduled_script}"
+        "{ipsets_prologue}{ct_helpers_script}{mangle_script}\
+         {baseline_script}{forwardings_script}{scheduled_script}"
     );
     if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
         apply_nft_text(&cfg.firewall.raw_nft, &combined);
@@ -1452,6 +1458,137 @@ pub(crate) fn build_ct_helpers_script(cfg: &Config) -> String {
             "add rule inet oxwrt helper_prerouting {iif_frag}{l4proto} dport {port_frag} \
              ct helper set \"{helper}\"\n"
         ));
+    }
+    out
+}
+
+/// Render mangle-hook rules for `set_mark` / `set_dscp`. Emitted
+/// in a dedicated `mangle_forward` chain at priority mangle
+/// (-150), which runs AFTER filter (priority 0 with our convention
+/// of rule evaluation) but BEFORE routing rewrites the packet —
+/// marks and DSCP land on packets that have already been accepted
+/// by the filter chain, which is what downstream tc + `ip rule`
+/// expect.
+///
+/// One companion rule per main rule with set_mark and/or set_dscp.
+/// The match portion (iifname / oifname / proto / dport / src_ip /
+/// dest_ip / family) is re-rendered directly here instead of
+/// reusing render_rule_body — limit / log / counter / verdict
+/// don't belong on mangle rules.
+///
+/// DSCP emission is family-aware: in a dual-family rule
+/// (family = any) we emit one rule per family gated by `meta
+/// nfproto`, since `ip dscp set` requires v4 packets and
+/// `ip6 dscp set` requires v6. Pinned-family rules emit one.
+pub(crate) fn build_mangle_script(cfg: &Config) -> String {
+    use oxwrt_api::config::Family;
+    let has_mangle = cfg
+        .firewall
+        .rules
+        .iter()
+        .any(|r| r.enabled && (r.set_mark.is_some() || r.set_dscp.is_some()));
+    if !has_mangle {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    // Declare the mangle chain once. `type filter hook forward
+    // priority mangle` lands us at the classic -150 mangle slot —
+    // consistent with fw4's mangle_forward.
+    out.push_str(
+        "add chain inet oxwrt mangle_forward \
+         { type filter hook forward priority mangle; policy accept; }\n",
+    );
+
+    for rule in &cfg.firewall.rules {
+        if !rule.enabled {
+            continue;
+        }
+        if rule.set_mark.is_none() && rule.set_dscp.is_none() {
+            continue;
+        }
+        // Minimal match prefix: iif + oif + proto + dport. We
+        // intentionally skip src_ip / dest_ip / src_mac / ct_state /
+        // icmp_type / limit / log — those are concerns of the
+        // filter rule, not the mangle rule. Keeping mangle rules
+        // narrow avoids double-counting and keeps nft list output
+        // scannable.
+        let mut prefix = String::new();
+        if let Some(dev) = rule.device.as_deref() {
+            prefix.push_str(&format!("iifname \"{dev}\" "));
+        } else if let Some(src) = rule.src.as_deref() {
+            let ifaces = zone_ifaces(cfg, src);
+            if !ifaces.is_empty() {
+                prefix.push_str(&fmt_iifname(&ifaces, /*oif=*/ false));
+                prefix.push(' ');
+            }
+        }
+        if let Some(dest) = rule.dest.as_deref() {
+            let ifaces = zone_ifaces(cfg, dest);
+            if !ifaces.is_empty() {
+                prefix.push_str(&fmt_iifname(&ifaces, /*oif=*/ true));
+                prefix.push(' ');
+            }
+        }
+        // Inline proto+dport fragment (subset of render_proto_port).
+        if let Some(proto) = rule.proto {
+            let proto_s = match proto {
+                Proto::Tcp => "tcp",
+                Proto::Udp => "udp",
+                Proto::Icmp => "icmp",
+                Proto::Both => "meta-both",
+            };
+            if proto_s == "meta-both" {
+                if let Some(port) = &rule.dest_port {
+                    prefix.push_str(&format!(
+                        "meta l4proto {{ tcp, udp }} th dport {} ",
+                        render_port_fragment(port)
+                    ));
+                } else {
+                    prefix.push_str("meta l4proto { tcp, udp } ");
+                }
+            } else if let Some(port) = &rule.dest_port {
+                prefix.push_str(&format!("{proto_s} dport {} ", render_port_fragment(port)));
+            } else if proto != Proto::Icmp {
+                prefix.push_str(&format!("meta l4proto {proto_s} "));
+            }
+        }
+
+        // set_mark: one rule regardless of family — `meta mark`
+        // is nfproto-agnostic.
+        if let Some(mark) = rule.set_mark {
+            out.push_str(&format!(
+                "add rule inet oxwrt mangle_forward {prefix}meta mark set 0x{mark:x}\n"
+            ));
+        }
+        // set_dscp: family-aware emission. Any → two rules with
+        // nfproto gates. Ipv4 / Ipv6 → one rule using the right
+        // prefix directly.
+        if let Some(dscp) = rule.set_dscp.as_deref() {
+            let v = dscp.trim();
+            match rule.family {
+                Family::Ipv4 => {
+                    out.push_str(&format!(
+                        "add rule inet oxwrt mangle_forward {prefix}ip dscp set {v}\n"
+                    ));
+                }
+                Family::Ipv6 => {
+                    out.push_str(&format!(
+                        "add rule inet oxwrt mangle_forward {prefix}ip6 dscp set {v}\n"
+                    ));
+                }
+                Family::Any => {
+                    out.push_str(&format!(
+                        "add rule inet oxwrt mangle_forward {prefix}\
+                         meta nfproto ipv4 ip dscp set {v}\n"
+                    ));
+                    out.push_str(&format!(
+                        "add rule inet oxwrt mangle_forward {prefix}\
+                         meta nfproto ipv6 ip6 dscp set {v}\n"
+                    ));
+                }
+            }
+        }
     }
     out
 }
@@ -2381,6 +2518,8 @@ mod tests {
             reject_with: None,
             device: None,
             helper: None,
+            set_mark: None,
+            set_dscp: None,
         }
     }
 
@@ -3098,6 +3237,91 @@ authorized_keys = "/x"
             !s.contains("maxseg size set rt mtu"),
             "MSS clamp leaked when mtu_fix is off: {s}"
         );
+    }
+
+    // ── QoS: set_mark + set_dscp mangle chain ──────────────────────
+
+    #[test]
+    fn mangle_script_empty_when_no_rules_mangle() {
+        let cfg = minimal_config();
+        assert!(build_mangle_script(&cfg).is_empty());
+    }
+
+    #[test]
+    fn mangle_set_mark_renders_hex() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("qos-http");
+        r.src = Some("trusted".into());
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(80));
+        r.set_mark = Some(0x10);
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_mangle_script(&cfg);
+        assert!(s.contains("mangle_forward"), "{s}");
+        assert!(s.contains("priority mangle"), "{s}");
+        assert!(s.contains("meta mark set 0x10"), "{s}");
+        assert!(s.contains("tcp dport 80"), "{s}");
+    }
+
+    #[test]
+    fn mangle_set_dscp_v4_v6_emission_dual_family() {
+        // Dual-family rule emits one rule per family with the
+        // nfproto gate — nft's `ip dscp set` wants v4 packets
+        // and `ip6 dscp set` wants v6; guarded so each rule
+        // only matches its family.
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("voip-ef");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(PortSpec::Single(5060));
+        r.set_dscp = Some("ef".into());
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_mangle_script(&cfg);
+        assert!(s.contains("meta nfproto ipv4 ip dscp set ef"), "{s}");
+        assert!(s.contains("meta nfproto ipv6 ip6 dscp set ef"), "{s}");
+    }
+
+    #[test]
+    fn mangle_set_dscp_v4_only_single_emission() {
+        use oxwrt_api::config::Family;
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("v4-only");
+        r.family = Family::Ipv4;
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(443));
+        r.set_dscp = Some("cs4".into());
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_mangle_script(&cfg);
+        assert!(s.contains("ip dscp set cs4"), "{s}");
+        assert!(!s.contains("ip6 dscp"), "{s}");
+        assert!(!s.contains("nfproto"), "no nfproto gate when pinned: {s}");
+    }
+
+    #[test]
+    fn mangle_combined_mark_and_dscp_both_emit() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("tag-bulk");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(80));
+        r.set_mark = Some(0x20);
+        r.set_dscp = Some("cs1".into());
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_mangle_script(&cfg);
+        assert!(s.contains("meta mark set 0x20"), "{s}");
+        assert!(s.contains("dscp set cs1"), "{s}");
+    }
+
+    #[test]
+    fn mangle_rules_force_text_path_for_main_rule() {
+        let mut r = basic_rule("t");
+        r.set_mark = Some(0x10);
+        assert!(rule_needs_text_path(&r));
+        let mut r = basic_rule("t");
+        r.set_dscp = Some("cs4".into());
+        assert!(rule_needs_text_path(&r));
     }
 
     // ── CT helpers ─────────────────────────────────────────────────
