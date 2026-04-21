@@ -324,10 +324,11 @@ the fw4-parity passes:
      incompatible. CT zones per se aren't in scope — individual
      rules can opt out, which covers the same use case. -->
 
-- **Absolute-date schedules.** Current `schedule` field covers
-  day-of-week + hour-of-day recurring windows. Absolute ranges
-  (`start_date`/`stop_date` for "block until 2026-06-01") would
-  need a separate parser pass.
+<!-- Absolute-date schedules landed via `from DATE` / `until DATE`
+     prefixes on the existing schedule field. Renders as nft
+     `meta time >= "DATE 00:00:00"` / `meta time <= "DATE 23:59:59"`
+     comparisons. Combines with the existing day/hour spec for
+     holiday-window patterns. -->
 - **Includes.** fw4 sources external rule files via `config
   include`. oxwrt's config is single-file by design (plus the
   secrets overlay); the raw_nft escape hatch covers the
@@ -354,7 +355,11 @@ per family gated by `meta nfproto`), rule `notrack`
 a priority-(-301) prerouting chain that emits nft's `notrack`
 before the filter hook runs; validator rejects notrack+helper as
 incompatible since notrack disables the conntrack the helper
-needs to attach to), port-forward `reflection`, IPv6 MASQUERADE66,
+needs to attach to), **absolute-date schedules** (`from
+YYYY-MM-DD` / `until YYYY-MM-DD` prefixes on the existing
+schedule field; combines with the day/hour recurring spec for
+holiday windows, rendered as nft `meta time >= / <=`
+comparisons), port-forward `reflection`, IPv6 MASQUERADE66,
 **IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
 (installed into a dedicated `oxwrt-dnat6` nftables table with
 reflection + hairpin SNAT in `oxwrt-nat6`), **declarative

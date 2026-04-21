@@ -12,7 +12,9 @@
 //!
 //! v1 grammar (case-insensitive, whitespace-collapsed):
 //!
-//!   schedule := days hours | days | hours
+//!   schedule := [date-window] (days hours | days | hours)?
+//!   date-window := ("from" DATE)? ("until" DATE)?
+//!   DATE     := YYYY-MM-DD
 //!   days     := "daily"
 //!             | "weekdays"
 //!             | "weekends"
@@ -22,8 +24,24 @@
 //!   day      := "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun"
 //!   hours    := HH:MM "-" HH:MM   (each HH ∈ 0..=23, MM ∈ 0..=59)
 //!
-//! Future extensions (out of scope v1): date ranges, one-off
-//! windows, holiday calendars. The structured schema makes those
+//! Date-window extends the recurring day/hour match with absolute
+//! calendar bounds. `from DATE` and `until DATE` are each optional;
+//! together they gate the rule to a specific calendar window,
+//! useful for parental-control countdowns, season-bound policies,
+//! and temporary guest-zone access. Renders as nft `meta time >=`
+//! / `meta time <=` comparisons.
+//!
+//! Combined examples:
+//!
+//!   "from 2026-01-01 until 2026-03-31"        absolute window only
+//!   "until 2026-12-31 weekdays 22:00-06:00"   recurring inside a
+//!                                             calendar cap
+//!   "from 2026-11-25 until 2026-12-26 daily 22:00-06:00"
+//!                                             holiday-themed
+//!                                             nightly window
+//!
+//! Future extensions (holiday calendars, one-off specific-
+//! weekday-in-month). The structured schema makes those
 //! adds additive.
 
 /// Day-of-week bitmask, bit N = day N where Sunday=0 matching
@@ -63,12 +81,38 @@ impl std::fmt::Display for HourMinute {
     }
 }
 
-/// Parsed schedule. At least one of `days` or `hours` is set;
+/// A calendar date — year + month + day. Month 1..=12, day 1..=31
+/// (shallow range check; leap-year / month-length validation is
+/// left to nft at match time, which falls through to "no match"
+/// for an impossible date — the right fail-open behaviour for a
+/// scheduling primitive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Date {
+    pub y: u16,
+    pub m: u8,
+    pub d: u8,
+}
+
+impl std::fmt::Display for Date {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.y, self.m, self.d)
+    }
+}
+
+/// Parsed schedule. At least one of the four fields is set;
 /// "empty" schedules reject at parse time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule {
+    /// Day-of-week bitmask (recurring weekly).
     pub days: Option<DayMask>,
+    /// Hour-of-day window (recurring daily).
     pub hours: Option<(HourMinute, HourMinute)>,
+    /// Absolute calendar lower bound. Rule fires only on/after
+    /// this date.
+    pub start_date: Option<Date>,
+    /// Absolute calendar upper bound. Rule fires only on/before
+    /// this date (inclusive; the full day is covered).
+    pub stop_date: Option<Date>,
 }
 
 pub fn parse_schedule(s: &str) -> Result<Schedule, String> {
@@ -77,41 +121,121 @@ pub fn parse_schedule(s: &str) -> Result<Schedule, String> {
         return Err("schedule: empty string".to_string());
     }
 
-    // Split on whitespace into at most two tokens: "<days> <hours>",
-    // "<days>" alone, or "<hours>" alone. The first char of each
-    // token determines which — a digit starts an hour range.
-    let mut parts = s.split_whitespace();
-    let first = parts.next().unwrap_or("");
-    let second = parts.next();
-    if parts.next().is_some() {
-        return Err(format!(
-            "schedule {s:?}: too many tokens (expected `<days> <hours>`, `<days>`, or `<hours>`)"
-        ));
+    // Two-pass: first scan for `from DATE` / `until DATE` prefix
+    // tokens and consume them, then fall through to the legacy
+    // days/hours parse on the remainder. Keeps the date-window
+    // additive — a schedule with just "weekdays" still parses
+    // unchanged through the original code path.
+    let mut tokens: Vec<&str> = s.split_whitespace().collect();
+    let mut start_date: Option<Date> = None;
+    let mut stop_date: Option<Date> = None;
+    while tokens.len() >= 2 {
+        let kw = tokens[0].to_ascii_lowercase();
+        if kw == "from" {
+            let date = parse_date(tokens[1]).map_err(|e| format!("schedule {s:?}: from: {e}"))?;
+            if start_date.is_some() {
+                return Err(format!("schedule {s:?}: `from` specified twice"));
+            }
+            start_date = Some(date);
+            tokens.drain(..2);
+        } else if kw == "until" {
+            let date = parse_date(tokens[1]).map_err(|e| format!("schedule {s:?}: until: {e}"))?;
+            if stop_date.is_some() {
+                return Err(format!("schedule {s:?}: `until` specified twice"));
+            }
+            stop_date = Some(date);
+            tokens.drain(..2);
+        } else {
+            break;
+        }
     }
-
-    // Is the first token an hour-range or a day-spec? Hour ranges
-    // always start with a digit and contain a ':' before the '-'.
-    let first_is_hours = first.chars().next().is_some_and(|c| c.is_ascii_digit());
-
-    let (days_tok, hours_tok) = if first_is_hours {
-        if second.is_some() {
+    // Consistency: from > until is nonsense (rule would never
+    // match). Catch explicitly rather than letting nft silently
+    // emit a never-matching rule.
+    if let (Some(a), Some(b)) = (start_date, stop_date) {
+        if (a.y, a.m, a.d) > (b.y, b.m, b.d) {
             return Err(format!(
-                "schedule {s:?}: hour range must come AFTER the day spec (got `hours days`)"
+                "schedule {s:?}: from ({a}) is after until ({b}); rule would never match"
             ));
         }
-        (None, Some(first))
+    }
+
+    // Remaining tokens (if any) form the days/hours spec. At
+    // most two: "<days> <hours>", "<days>", or "<hours>".
+    let (days, hours) = if tokens.is_empty() {
+        (None, None)
     } else {
-        (Some(first), second)
+        if tokens.len() > 2 {
+            return Err(format!(
+                "schedule {s:?}: too many tokens after date window \
+                 (expected `<days> <hours>`, `<days>`, or `<hours>`)"
+            ));
+        }
+        let first = tokens[0];
+        let second = tokens.get(1).copied();
+        let first_is_hours = first.chars().next().is_some_and(|c| c.is_ascii_digit());
+        let (days_tok, hours_tok) = if first_is_hours {
+            if second.is_some() {
+                return Err(format!(
+                    "schedule {s:?}: hour range must come AFTER the day spec \
+                     (got `hours days`)"
+                ));
+            }
+            (None, Some(first))
+        } else {
+            (Some(first), second)
+        };
+        let d = days_tok.map(parse_days).transpose()?;
+        let h = hours_tok.map(parse_hour_range).transpose()?;
+        (d, h)
     };
 
-    let days = days_tok.map(parse_days).transpose()?;
-    let hours = hours_tok.map(parse_hour_range).transpose()?;
-
-    if days.is_none() && hours.is_none() {
+    if days.is_none() && hours.is_none() && start_date.is_none() && stop_date.is_none() {
         return Err(format!("schedule {s:?}: empty after parse"));
     }
 
-    Ok(Schedule { days, hours })
+    Ok(Schedule {
+        days,
+        hours,
+        start_date,
+        stop_date,
+    })
+}
+
+/// Parse a `YYYY-MM-DD` date literal. Shallow range check —
+/// month 1..=12, day 1..=31. Month-length / leap-year checks are
+/// left to nft (invalid dates simply never match; not a security
+/// hole since the rule then falls through to the next rule).
+fn parse_date(s: &str) -> Result<Date, String> {
+    let mut parts = s.split('-');
+    let y_str = parts
+        .next()
+        .ok_or_else(|| format!("date {s:?}: missing year"))?;
+    let m_str = parts
+        .next()
+        .ok_or_else(|| format!("date {s:?}: missing month"))?;
+    let d_str = parts
+        .next()
+        .ok_or_else(|| format!("date {s:?}: missing day"))?;
+    if parts.next().is_some() {
+        return Err(format!("date {s:?}: expected YYYY-MM-DD, got extra tokens"));
+    }
+    let y: u16 = y_str
+        .parse()
+        .map_err(|_| format!("date {s:?}: year {y_str:?} not a number"))?;
+    let m: u8 = m_str
+        .parse()
+        .map_err(|_| format!("date {s:?}: month {m_str:?} not a number"))?;
+    let d: u8 = d_str
+        .parse()
+        .map_err(|_| format!("date {s:?}: day {d_str:?} not a number"))?;
+    if !(1..=12).contains(&m) {
+        return Err(format!("date {s:?}: month {m} out of range (1..=12)"));
+    }
+    if !(1..=31).contains(&d) {
+        return Err(format!("date {s:?}: day {d} out of range (1..=31)"));
+    }
+    Ok(Date { y, m, d })
 }
 
 fn parse_days(s: &str) -> Result<DayMask, String> {
@@ -219,6 +343,15 @@ fn parse_hm(s: &str) -> Result<HourMinute, String> {
 /// prepends this to the rest of the rule.
 pub fn render_nft_predicate(sched: &Schedule) -> String {
     let mut out = String::new();
+    // Absolute date window: nft's `meta time` accepts ISO
+    // timestamp comparisons. Render start as midnight and stop
+    // as end-of-day so the window is inclusive on both ends.
+    if let Some(d) = sched.start_date {
+        out.push_str(&format!("meta time >= \"{d} 00:00:00\" "));
+    }
+    if let Some(d) = sched.stop_date {
+        out.push_str(&format!("meta time <= \"{d} 23:59:59\" "));
+    }
     if let Some(mask) = sched.days {
         let names: Vec<String> = mask.iter().map(|d| day_name(d).to_string()).collect();
         out.push_str("meta day { ");
@@ -394,5 +527,131 @@ mod tests {
         let s = parse_schedule("fri,mon,wed").unwrap();
         let days: Vec<u8> = s.days.unwrap().iter().collect();
         assert_eq!(days, vec![1, 3, 5]); // mon=1, wed=3, fri=5
+    }
+
+    // ── absolute-date windows ──────────────────────────────────────
+
+    #[test]
+    fn parse_until_alone() {
+        let s = parse_schedule("until 2026-12-31").unwrap();
+        assert_eq!(
+            s.stop_date,
+            Some(Date {
+                y: 2026,
+                m: 12,
+                d: 31
+            })
+        );
+        assert_eq!(s.start_date, None);
+        assert_eq!(s.days, None);
+        assert_eq!(s.hours, None);
+    }
+
+    #[test]
+    fn parse_from_alone() {
+        let s = parse_schedule("from 2026-01-01").unwrap();
+        assert_eq!(
+            s.start_date,
+            Some(Date {
+                y: 2026,
+                m: 1,
+                d: 1
+            })
+        );
+        assert_eq!(s.stop_date, None);
+    }
+
+    #[test]
+    fn parse_from_until_window() {
+        let s = parse_schedule("from 2026-01-01 until 2026-03-31").unwrap();
+        assert_eq!(
+            s.start_date,
+            Some(Date {
+                y: 2026,
+                m: 1,
+                d: 1
+            })
+        );
+        assert_eq!(
+            s.stop_date,
+            Some(Date {
+                y: 2026,
+                m: 3,
+                d: 31
+            })
+        );
+    }
+
+    #[test]
+    fn parse_combined_window_with_days_and_hours() {
+        // The real use case: holiday nightly window.
+        let s = parse_schedule("from 2026-11-25 until 2026-12-26 daily 22:00-06:00").unwrap();
+        assert_eq!(s.start_date.unwrap().m, 11);
+        assert_eq!(s.stop_date.unwrap().d, 26);
+        assert_eq!(s.days.unwrap().0, DayMask::ALL);
+        assert_eq!(
+            s.hours,
+            Some((HourMinute { h: 22, m: 0 }, HourMinute { h: 6, m: 0 }))
+        );
+    }
+
+    #[test]
+    fn parse_window_rejects_from_after_until() {
+        // from after until is a logic typo; the rule would never
+        // match. Catch explicitly so the operator fixes it.
+        let err = parse_schedule("from 2026-06-01 until 2026-01-01").unwrap_err();
+        assert!(err.contains("never match"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_window_rejects_bad_date() {
+        assert!(parse_schedule("until 2026-13-01").is_err());
+        assert!(parse_schedule("from 2026-01-32").is_err());
+        assert!(parse_schedule("until 2026-01").is_err());
+        assert!(parse_schedule("from not-a-date").is_err());
+    }
+
+    #[test]
+    fn parse_window_rejects_duplicate_keyword() {
+        assert!(parse_schedule("from 2026-01-01 from 2026-02-01").is_err());
+        assert!(parse_schedule("until 2026-12-31 until 2026-06-01").is_err());
+    }
+
+    #[test]
+    fn render_predicate_window_emits_meta_time() {
+        let s = parse_schedule("from 2026-01-01 until 2026-03-31").unwrap();
+        let out = render_nft_predicate(&s);
+        assert!(
+            out.contains(r#"meta time >= "2026-01-01 00:00:00""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"meta time <= "2026-03-31 23:59:59""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_predicate_window_order_time_then_day_hour() {
+        // Date bounds come BEFORE the day/hour predicates so nft
+        // short-circuits cheapest-first: dates are integer
+        // comparisons vs a struct read for day/hour.
+        let s = parse_schedule("until 2026-06-01 weekdays 22:00-06:00").unwrap();
+        let out = render_nft_predicate(&s);
+        let t_pos = out.find("meta time").unwrap();
+        let d_pos = out.find("meta day").unwrap();
+        let h_pos = out.find("meta hour").unwrap();
+        assert!(t_pos < d_pos, "time should precede day: {out}");
+        assert!(d_pos < h_pos, "day should precede hour: {out}");
+    }
+
+    #[test]
+    fn date_display_pads_zeros() {
+        let d = Date {
+            y: 2026,
+            m: 1,
+            d: 5,
+        };
+        assert_eq!(format!("{d}"), "2026-01-05");
     }
 }

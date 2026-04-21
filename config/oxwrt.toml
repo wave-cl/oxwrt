@@ -482,6 +482,14 @@ action = "accept"
 #   "mon-fri"                  weekdays, all day
 # Windows that cross midnight (start > end) work natively.
 #
+# Absolute calendar bounds: prefix with `from DATE` and/or `until
+# DATE` (YYYY-MM-DD). Combine with the recurring spec to build
+# holiday-nightly windows, time-limited guest access, etc.
+#   "until 2026-12-31"
+#   "from 2026-01-01"
+#   "from 2026-01-01 until 2026-03-31"
+#   "from 2026-11-25 until 2026-12-26 daily 22:00-06:00"
+#
 # Scheduled rules render as nft text alongside raw_nft (below) —
 # unscheduled rules stay on the rustables path, so only the
 # window-limited ones pay the text-render cost. DNAT + schedule
