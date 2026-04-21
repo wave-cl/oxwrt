@@ -350,12 +350,34 @@ pub fn check_port_forward(pf: &crate::config::PortForward, cfg: &Config) -> Resu
     // We defer to `SocketAddr::from_str` which accepts both shapes
     // — same parser the installer uses, so validation can't drift
     // from install.
-    let sa: std::net::SocketAddr = pf.internal.parse().map_err(|_| {
-        format!(
-            "port-forward {}: internal must be 'ip:port' or '[ipv6]:port' (got {:?})",
-            pf.name, pf.internal
-        )
-    })?;
+    //
+    // Error-message discipline: the QEMU integration suite asserts
+    // "invalid internal IP" on a v4-shaped input with a bad host
+    // part (`not.an.ip:8080`). Preserve that contract by checking
+    // the v4 shape first and emitting the specific error when the
+    // host part fails to parse; fall through to the generic
+    // "must be ip:port or [ipv6]:port" only for inputs that don't
+    // match either shape (e.g. "nope", empty string).
+    let sa: std::net::SocketAddr = match pf.internal.parse() {
+        Ok(sa) => sa,
+        Err(_) => {
+            // v4 shape: no leading `[`, one `:` separating host and port.
+            if !pf.internal.starts_with('[') {
+                if let Some((host, _port)) = pf.internal.rsplit_once(':') {
+                    if host.parse::<std::net::Ipv4Addr>().is_err() {
+                        return Err(format!(
+                            "port-forward {}: invalid internal IP {:?}",
+                            pf.name, host
+                        ));
+                    }
+                }
+            }
+            return Err(format!(
+                "port-forward {}: internal must be 'ip:port' or '[ipv6]:port' (got {:?})",
+                pf.name, pf.internal
+            ));
+        }
+    };
     // If dest zone is auto-detected (not provided), a LAN/Simple
     // network must contain the internal IP — otherwise install
     // can't emit the companion FORWARD rule. Same rule applies to
@@ -1239,6 +1261,87 @@ mod tests {
         };
         let err = check_forwarding(&fwd, &cfg).unwrap_err();
         assert!(err.contains("same"), "got: {err}");
+    }
+
+    // ── check_port_forward: error-message contract ─────────────────
+    //
+    // The QEMU integration suite greps for "invalid internal IP" on
+    // a v4-shaped input with a bad host part. Make sure we preserve
+    // that wording here — a regression in the validator error would
+    // only surface at integration-test time otherwise.
+
+    fn minimal_pf_cfg() -> Config {
+        let toml = r#"
+hostname = "t"
+[[networks]]
+name = "lan"
+type = "lan"
+bridge = "br-lan"
+address = "192.168.50.1"
+prefix = 24
+[[firewall.zones]]
+name = "wan"
+[[firewall.zones]]
+name = "lan"
+networks = ["lan"]
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/x"
+"#;
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn port_forward_bad_v4_ip_says_invalid_internal_ip() {
+        let cfg = minimal_pf_cfg();
+        let pf = crate::config::PortForward {
+            name: "bad".into(),
+            proto: oxwrt_api::config::Proto::Tcp,
+            external_port: 80,
+            internal: "not.an.ip:8080".into(),
+            src: "wan".into(),
+            dest: None,
+            reflection: true,
+        };
+        let err = check_port_forward(&pf, &cfg).unwrap_err();
+        assert!(
+            err.contains("invalid internal IP"),
+            "expected 'invalid internal IP' in error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn port_forward_malformed_input_says_ip_port_or_ipv6_port() {
+        let cfg = minimal_pf_cfg();
+        let pf = crate::config::PortForward {
+            name: "bad".into(),
+            proto: oxwrt_api::config::Proto::Tcp,
+            external_port: 80,
+            internal: "nope".into(), // no colon at all
+            src: "wan".into(),
+            dest: None,
+            reflection: true,
+        };
+        let err = check_port_forward(&pf, &cfg).unwrap_err();
+        assert!(
+            err.contains("ip:port") || err.contains("[ipv6]:port"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn port_forward_v6_internal_parses() {
+        let cfg = minimal_pf_cfg();
+        let pf = crate::config::PortForward {
+            name: "ok6".into(),
+            proto: oxwrt_api::config::Proto::Tcp,
+            external_port: 80,
+            internal: "[fd00::50]:80".into(),
+            src: "wan".into(),
+            dest: Some("lan".into()), // pin dest so subnet check skips
+            reflection: true,
+        };
+        assert!(check_port_forward(&pf, &cfg).is_ok());
     }
 
     // ── check_wifi_refs ────────────────────────────────────────────
