@@ -312,10 +312,10 @@ the fw4-parity passes:
   + DSCP rewriting for downstream policy routing / tc shaping.
   Not implemented. Operators needing QoS write raw_nft against
   a custom mangle chain.
-- **Connection-tracking helpers (SIP ALG, FTP active mode, PPTP
-  GRE, RTSP).** Not auto-loaded. Operators who need these load
-  the modules manually and express them via raw_nft. Requires
-  kernel-module-coordination work beyond firewall rules.
+<!-- CT helpers landed as `rule.helper` — see the implemented list below. -->
+- **RTSP helper.** RTSP isn't in mainline nf_conntrack (only in
+  a handful of vendor trees); not offered. FTP, SIP, TFTP, PPTP,
+  H.323, and IRC are all supported.
 - **`target = "NOTRACK"` / CT zones.** Absent. Rare (high-
   throughput forwarding paths or CGNAT-facing ISP setups).
 - **Absolute-date schedules.** Current `schedule` field covers
@@ -335,7 +335,11 @@ Everything else from the mainstream fw4 surface is implemented:
 zone `default_output`, zone `mtu_fix` (TCP MSS clamping), rule
 `src_ip`/`dest_ip`/`src_mac`/`src_port`/`icmp_type`/`family`/
 `limit`/`log`/`enabled`/`counter`/`limit_burst`/`reject_with`/
-`device`, port-forward `reflection`, IPv6 MASQUERADE66,
+`device`, rule `helper` (CT helpers — FTP, SIP, TFTP, PPTP,
+H.323, IRC; rendered as `ct helper` objects in `inet oxwrt` +
+companion rules in a priority-raw prerouting chain; kernel
+modules shipped in every image), port-forward `reflection`,
+IPv6 MASQUERADE66,
 **IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
 (installed into a dedicated `oxwrt-dnat6` nftables table with
 reflection + hairpin SNAT in `oxwrt-nat6`), **declarative

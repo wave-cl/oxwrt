@@ -355,6 +355,12 @@ IMAGEBUILDER_PACKAGES := \
 	nftables \
 	drill \
 	ss \
+	kmod-nf-conntrack-ftp \
+	kmod-nf-conntrack-sip \
+	kmod-nf-conntrack-tftp \
+	kmod-nf-conntrack-pptp \
+	kmod-nf-conntrack-h323 \
+	kmod-nf-conntrack-irc \
 	-netifd \
 	-uci \
 	-uclient-fetch \
@@ -417,6 +423,12 @@ IMAGEBUILDER_PACKAGES := \
 #
 # kmod-veth: needed for container::spawn's isolated netns.
 # kmod-nft-nat: needed for MASQUERADE + DNAT chains.
+# kmod-nf-conntrack-{ftp,sip,tftp,pptp,h323,irc}: application-layer
+#   conntrack helpers referenced by `[[firewall.rules]] helper = "…"`.
+#   nftables auto-loads these when a `ct helper` object of the matching
+#   type is created; the kmod package just has to be present in the
+#   image. Small (~10KB each), worth shipping all six so operators can
+#   enable a helper via a rule-level toggle without a custom image.
 
 .PHONY: imagebuilder-stage imagebuilder-image \
         imagebuilder-stage-bare imagebuilder-stage-init \

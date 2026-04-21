@@ -1338,6 +1338,25 @@ pub struct Rule {
     /// Forces the text path.
     #[serde(default)]
     pub device: Option<String>,
+    /// Attach a conntrack helper to matching packets so the
+    /// kernel parses the application-layer control channel and
+    /// creates expected conntrack entries for the data channel.
+    /// Values from the well-known set: `"ftp"`, `"sip"`,
+    /// `"tftp"`, `"pptp"`, `"h323"`, `"irc"`. Unknown names are
+    /// rejected at reload.
+    ///
+    /// Semantics: a rule with `helper = "ftp"` keeps its normal
+    /// accept/drop verdict in the filter chain AND a companion
+    /// rule lands in a dedicated priority-raw prerouting chain
+    /// that emits `ct helper set "ftp"` before conntrack runs.
+    /// Operators author one coherent rule; the renderer splits
+    /// the two effects.
+    ///
+    /// Requires the matching `kmod-nf-conntrack-<helper>` kernel
+    /// module in the image (auto-included via IMAGEBUILDER_PACKAGES
+    /// for the helpers listed above).
+    #[serde(default)]
+    pub helper: Option<String>,
 }
 
 /// Reference from a firewall rule to an `[[ipsets]]` entry.

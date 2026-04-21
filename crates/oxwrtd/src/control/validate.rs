@@ -268,6 +268,41 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         }
     }
 
+    // CT helper must name a known helper in the static registry.
+    // Unknown names would render as `ct helper set "typo"` which
+    // nft refuses to parse (the helper object isn't declared),
+    // rejecting the whole script and surfacing as a cryptic
+    // reload failure. Catch here with a specific error listing
+    // the supported helpers. Also requires dest_port — a helper
+    // without an anchor would attach to every packet of its l4
+    // proto, which is never what the operator intends.
+    if let Some(helper) = rule.helper.as_deref() {
+        // List of supported helpers kept in sync with firewall.rs
+        // CT_HELPERS (we can't import across the cfg-gate without
+        // pulling oxwrt-linux into cross-platform validation).
+        const SUPPORTED: &[&str] = &["ftp", "sip", "tftp", "pptp", "h323", "irc"];
+        if !SUPPORTED.contains(&helper) {
+            return Err(format!(
+                "rule {}: unknown helper {:?}; supported: {}",
+                rule.name,
+                helper,
+                SUPPORTED.join(", ")
+            ));
+        }
+        if rule.dest_port.is_none() {
+            return Err(format!(
+                "rule {}: helper {:?} requires dest_port (no anchor would attach to all {} traffic)",
+                rule.name,
+                helper,
+                match helper {
+                    "ftp" | "pptp" | "irc" => "TCP",
+                    "sip" | "tftp" | "h323" => "UDP",
+                    _ => "L4",
+                }
+            ));
+        }
+    }
+
     // match_set must name an existing [[ipsets]] entry. Family
     // mismatches would surface as an nft parse error at install
     // time ("type ipv4_addr can't match ip6 saddr") — catching them
@@ -722,6 +757,7 @@ mod tests {
                     limit_burst: None,
                     reject_with: None,
                     device: None,
+                    helper: None,
                 }],
                 raw_nft: vec![],
                 defaults: Default::default(),
@@ -883,6 +919,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -914,6 +951,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -945,6 +983,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -978,6 +1017,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -1010,6 +1050,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -1042,6 +1083,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -1074,6 +1116,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -1105,6 +1148,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1140,6 +1184,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1175,6 +1220,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         }
     }
 
@@ -1289,6 +1335,42 @@ listen = ["[::1]:51820"]
 authorized_keys = "/x"
 "#;
         toml::from_str(toml).unwrap()
+    }
+
+    // ── rule.helper ────────────────────────────────────────────────
+
+    #[test]
+    fn rule_helper_unknown_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bad-helper");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(oxwrt_api::config::PortSpec::Single(21));
+        r.helper = Some("nope".to_string());
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("unknown helper"), "got: {err}");
+        assert!(err.contains("ftp"), "list not shown: {err}");
+    }
+
+    #[test]
+    fn rule_helper_requires_dest_port() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("ftp-no-port");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.helper = Some("ftp".to_string());
+        // no dest_port
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("dest_port"), "got: {err}");
+        assert!(err.contains("ftp"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_helper_known_with_port_ok() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("ftp-ok");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(oxwrt_api::config::PortSpec::Single(21));
+        r.helper = Some("ftp".to_string());
+        assert!(check_rule_zone_refs(&r, &cfg).is_ok());
     }
 
     #[test]

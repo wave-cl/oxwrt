@@ -1170,6 +1170,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // naturally.
     let scheduled_script = build_scheduled_rules_script(cfg);
     let forwardings_script = build_forwardings_script(cfg);
+    let ct_helpers_script = build_ct_helpers_script(cfg);
 
     // Baseline defaults: ct state, ICMPv6 NDP/MLD, ICMP echo —
     // these are unconditional and emitted in text (rustables has
@@ -1191,8 +1192,10 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // parse — we log and continue, because a bad raw-rule line
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
-    let combined =
-        format!("{ipsets_prologue}{baseline_script}{forwardings_script}{scheduled_script}");
+    let combined = format!(
+        "{ipsets_prologue}{ct_helpers_script}{baseline_script}\
+         {forwardings_script}{scheduled_script}"
+    );
     if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
         apply_nft_text(&cfg.firewall.raw_nft, &combined);
     }
@@ -1316,6 +1319,143 @@ pub(crate) fn build_baseline_defaults_script(cfg: &Config) -> String {
 /// "<src>" oifname "<dest>" meta nfproto ipv4 accept` per
 /// (src-iface, dest-iface) pair. Zones with multiple ifaces
 /// expand the cartesian product.
+///
+/// Well-known conntrack helpers oxwrt knows how to wire up. Each
+/// tuple is `(helper name, nft object type, l4 protocol)`. The
+/// helper name is what operators write in `rule.helper`; the nft
+/// object type is the kernel's helper identifier (most match the
+/// name; H.323 is the oddball with the dot); the l4 proto is what
+/// nft's `ct helper` object needs for the `protocol` field.
+///
+/// Adding a new helper here is three steps: extend this slice,
+/// add the matching `kmod-nf-conntrack-<name>` to
+/// IMAGEBUILDER_PACKAGES in the top-level Makefile so the kernel
+/// module ships in the image, and list it in the RELEASING.md /
+/// example-config tables.
+pub(crate) const CT_HELPERS: &[(&str, &str, &str)] = &[
+    ("ftp", "ftp", "tcp"),
+    ("sip", "sip", "udp"),
+    ("tftp", "tftp", "udp"),
+    ("pptp", "pptp", "tcp"),
+    ("h323", "H.323", "udp"),
+    ("irc", "irc", "tcp"),
+];
+
+/// Look up a helper by name. Returns `(nft_type, l4proto)` or
+/// `None` for unknown names. Used by the validator + renderer.
+pub(crate) fn lookup_ct_helper(name: &str) -> Option<(&'static str, &'static str)> {
+    CT_HELPERS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, t, p)| (*t, *p))
+}
+
+/// Build the prologue that declares ct helper objects + the
+/// priority-raw prerouting chain that attaches them to matching
+/// packets. Emitted only when at least one rule has `helper`
+/// set — avoids cluttering `nft list ruleset` for operators who
+/// don't need helpers at all.
+///
+/// nftables chain priority `raw` (-300) runs BEFORE `filter` (0),
+/// which is where conntrack's own hook lives — helpers must be
+/// attached before conntrack creates the flow, otherwise the
+/// helper never sees the control-channel payload.
+pub(crate) fn build_ct_helpers_script(cfg: &Config) -> String {
+    // Collect distinct helpers referenced by enabled rules.
+    let mut referenced: Vec<&str> = cfg
+        .firewall
+        .rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| r.helper.as_deref())
+        .collect();
+    referenced.sort();
+    referenced.dedup();
+    if referenced.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    // Declare ct helper objects. Unknown names are filtered out
+    // by the validator; defensively skip here too so a rogue
+    // entry can't produce an nft parse error that rejects the
+    // whole script.
+    for name in &referenced {
+        let Some((nft_type, l4proto)) = lookup_ct_helper(name) else {
+            tracing::warn!(helper = %name, "unknown ct helper; skipping");
+            continue;
+        };
+        out.push_str(&format!(
+            "add ct helper inet oxwrt {name} {{ type \"{nft_type}\" protocol {l4proto}; }}\n"
+        ));
+    }
+    // Priority-raw prerouting chain: conntrack helpers must be
+    // attached before conntrack's own hook fires (priority
+    // filter = 0). raw = -300.
+    out.push_str(
+        "add chain inet oxwrt helper_prerouting \
+         { type filter hook prerouting priority raw; policy accept; }\n",
+    );
+    // Companion output chain for router-originated traffic
+    // (e.g. an FTP client running on the router itself).
+    out.push_str(
+        "add chain inet oxwrt helper_output \
+         { type filter hook output priority raw; policy accept; }\n",
+    );
+
+    // One companion rule per enabled rule with `helper`. Match
+    // on iifname (from src zone or device) + proto + dport;
+    // attach the helper. The operator's original rule still
+    // emits its normal accept/drop in the filter chain via the
+    // standard path — this rule adds the helper-attachment
+    // effect without competing for a verdict.
+    for rule in &cfg.firewall.rules {
+        if !rule.enabled {
+            continue;
+        }
+        let Some(helper) = rule.helper.as_deref() else {
+            continue;
+        };
+        if lookup_ct_helper(helper).is_none() {
+            continue;
+        }
+        // iif match: device wins if set, else src zone.
+        let iif_frag = if let Some(dev) = rule.device.as_deref() {
+            format!("iifname \"{dev}\" ")
+        } else if let Some(src) = rule.src.as_deref() {
+            let ifaces = zone_ifaces(cfg, src);
+            if ifaces.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", fmt_iifname(&ifaces, /*oif=*/ false))
+            }
+        } else {
+            String::new()
+        };
+        // Port match — helpers only make sense with a specific
+        // port anchor (FTP=21, SIP=5060, etc.). Render the
+        // rule's dest_port via the shared helper; if no dport
+        // is set, skip with a warn (helper with no anchor would
+        // attach to ALL tcp/udp traffic, which is not what
+        // anyone wants).
+        let Some(spec) = &rule.dest_port else {
+            tracing::warn!(
+                rule = %rule.name,
+                helper = %helper,
+                "rule with helper but no dest_port; skipping helper attachment"
+            );
+            continue;
+        };
+        let port_frag = render_port_fragment(spec);
+        let (_, l4proto) = lookup_ct_helper(helper).unwrap();
+        out.push_str(&format!(
+            "add rule inet oxwrt helper_prerouting {iif_frag}{l4proto} dport {port_frag} \
+             ct helper set \"{helper}\"\n"
+        ));
+    }
+    out
+}
+
 pub(crate) fn build_forwardings_script(cfg: &Config) -> String {
     use oxwrt_api::config::Family;
     let mut out = String::new();
@@ -2240,6 +2380,7 @@ mod tests {
             limit_burst: None,
             reject_with: None,
             device: None,
+            helper: None,
         }
     }
 
@@ -2956,6 +3097,118 @@ authorized_keys = "/x"
         assert!(
             !s.contains("maxseg size set rt mtu"),
             "MSS clamp leaked when mtu_fix is off: {s}"
+        );
+    }
+
+    // ── CT helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn ct_helpers_script_empty_when_no_rules_use_helpers() {
+        let cfg = minimal_config();
+        assert!(build_ct_helpers_script(&cfg).is_empty());
+    }
+
+    #[test]
+    fn ct_helpers_script_renders_ftp_object_and_rule() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("ftp-server");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(21));
+        r.action = oxwrt_api::config::Action::Accept;
+        r.helper = Some("ftp".to_string());
+        cfg.firewall.rules.push(r);
+        let s = build_ct_helpers_script(&cfg);
+        // Helper object declaration.
+        assert!(
+            s.contains(r#"add ct helper inet oxwrt ftp { type "ftp" protocol tcp; }"#),
+            "{s}"
+        );
+        // Both hooked chains (prerouting + output) at raw priority.
+        assert!(s.contains("helper_prerouting"), "{s}");
+        assert!(s.contains("helper_output"), "{s}");
+        assert!(s.contains("priority raw"), "{s}");
+        // The companion rule attaches the helper.
+        assert!(s.contains("tcp dport 21 ct helper set \"ftp\""), "{s}");
+    }
+
+    #[test]
+    fn ct_helpers_script_dedupes_objects() {
+        // Two rules, same helper — only one `add ct helper` object
+        // should land (nft rejects duplicate declarations).
+        let mut cfg = minimal_config();
+        for name in ["wan-ftp", "lan-ftp"] {
+            let mut r = basic_rule(name);
+            r.proto = Some(oxwrt_api::config::Proto::Tcp);
+            r.dest_port = Some(PortSpec::Single(21));
+            r.action = oxwrt_api::config::Action::Accept;
+            r.helper = Some("ftp".to_string());
+            cfg.firewall.rules.push(r);
+        }
+        let s = build_ct_helpers_script(&cfg);
+        let object_count = s.matches("add ct helper inet oxwrt ftp").count();
+        assert_eq!(object_count, 1, "{s}");
+        // But both companion rules should appear.
+        assert_eq!(s.matches("ct helper set \"ftp\"").count(), 2, "{s}");
+    }
+
+    #[test]
+    fn ct_helpers_script_uses_correct_l4_proto() {
+        // SIP is UDP by default; verify the object declaration
+        // matches so nft doesn't reject the rule as proto-mismatched.
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("sip-phone");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(PortSpec::Single(5060));
+        r.action = oxwrt_api::config::Action::Accept;
+        r.helper = Some("sip".to_string());
+        cfg.firewall.rules.push(r);
+        let s = build_ct_helpers_script(&cfg);
+        assert!(s.contains(r#"type "sip" protocol udp"#), "{s}");
+        assert!(s.contains("udp dport 5060"), "{s}");
+    }
+
+    #[test]
+    fn ct_helpers_h323_uses_dotted_nft_type() {
+        // H.323's kernel helper type is "H.323" (with dot),
+        // distinct from the short "h323" operators type.
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("voip");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(PortSpec::Single(1720));
+        r.action = oxwrt_api::config::Action::Accept;
+        r.helper = Some("h323".to_string());
+        cfg.firewall.rules.push(r);
+        let s = build_ct_helpers_script(&cfg);
+        assert!(s.contains(r#"type "H.323""#), "{s}");
+    }
+
+    #[test]
+    fn lookup_ct_helper_covers_all_registered() {
+        for (name, _, _) in CT_HELPERS {
+            assert!(lookup_ct_helper(name).is_some(), "{name} lookup failed");
+        }
+        assert!(lookup_ct_helper("nope").is_none());
+    }
+
+    #[test]
+    fn ct_helpers_script_skips_rules_without_dport() {
+        // Helpers require a port anchor; rules that miss it get
+        // skipped with a warn rather than attaching to all L4
+        // traffic (would silently break non-FTP flows).
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("ftp-broken");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        // no dest_port
+        r.action = oxwrt_api::config::Action::Accept;
+        r.helper = Some("ftp".to_string());
+        cfg.firewall.rules.push(r);
+        let s = build_ct_helpers_script(&cfg);
+        // Helper object still gets declared (an operator might add
+        // the port later), but no companion rule should appear.
+        assert!(s.contains("add ct helper inet oxwrt ftp"), "{s}");
+        assert!(
+            !s.contains("ct helper set"),
+            "companion rule leaked despite missing dport: {s}"
         );
     }
 
