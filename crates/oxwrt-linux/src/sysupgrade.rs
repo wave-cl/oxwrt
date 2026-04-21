@@ -326,7 +326,7 @@ fn parse_fwtool_trailer(path: &Path) -> Result<(u64, FwtoolMeta), Error> {
 /// Implementation note: we don't do the full shell-driven file-list
 /// resolution that stock sysupgrade does (uci conffiles, per-package
 /// keep.d, etc.). Our image has a small, predictable list —
-/// /etc/oxwrt/, /etc/dropbear/, /etc/oxwrt.toml. If operators need
+/// /etc/oxwrt/ (which contains oxwrt.toml) and /etc/dropbear/. If operators need
 /// to extend it, /etc/sysupgrade.conf is the hook and we read it.
 /// Recursively archive a directory into a tar::Builder, skipping any
 /// entry that isn't a regular file, directory, or symlink.

@@ -454,7 +454,7 @@ IMAGEBUILDER_PACKAGES := \
 #
 # Populates files/ with:
 #   /usr/bin/oxwrtd
-#   /etc/oxwrt.toml
+#   /etc/oxwrt/oxwrt.toml
 #   /etc/oxwrt/mode                (= "control-only" default)
 #   /etc/oxwrt/authorized_keys     (empty — accept all MAC1 clients)
 #   /etc/dropbear/authorized_keys  (operator's ~/.ssh/id_ed25519.pub)
@@ -559,13 +559,12 @@ define imagebuilder_stage_bare
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin $(IMAGEBUILDER_DIR)/files/etc/dropbear \
 	         $(IMAGEBUILDER_DIR)/files/lib/preinit
-	# Install at /etc/oxwrt/oxwrt.toml (NEW canonical path) because
-	# preinit's 80_mount_root silently extracts a sysupgrade.tgz
-	# over /etc on every boot, wiping operator config-push
-	# changes to /etc/oxwrt.toml. Files under /etc/oxwrt/ are not
-	# in that extract and persist. Config::load reads the new
-	# path first, falls back to legacy /etc/oxwrt.toml on devices
-	# flashed before this migration.
+	# Install at /etc/oxwrt/oxwrt.toml (canonical path — see
+	# DEFAULT_PATH in crates/oxwrt-api/src/config.rs). Preinit's
+	# 80_mount_root silently extracts a sysupgrade.tgz over /etc
+	# on every boot, wiping operator config-push changes to
+	# anything at /etc/*; files under /etc/oxwrt/ survive because
+	# the dir is not in that extract.
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt
 	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.toml
 	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
@@ -581,7 +580,7 @@ define imagebuilder_stage_bare
 	#     prompts on every boot.
 	#   81_urandom_seed         — drops the stock `uci -q get
 	#     system.@system[0].urandom_seed` call. oxwrtd replaces
-	#     UCI with /etc/oxwrt.toml, and without uci on $PATH the
+	#     UCI with /etc/oxwrt/oxwrt.toml, and without uci on $PATH the
 	#     stock script hit "uci: Permission denied" noise.
 	cp openwrt-packages/imagebuilder-overlay/files/lib/preinit/*  \
 	   $(IMAGEBUILDER_DIR)/files/lib/preinit/
@@ -638,13 +637,12 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	# because macOS BSD install lacks -D.)
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc $(IMAGEBUILDER_DIR)/files/etc/oxwrt \
 	         $(IMAGEBUILDER_DIR)/files/usr/bin
-	# Install at /etc/oxwrt/oxwrt.toml (NEW canonical path) because
-	# preinit's 80_mount_root silently extracts a sysupgrade.tgz
-	# over /etc on every boot, wiping operator config-push
-	# changes to /etc/oxwrt.toml. Files under /etc/oxwrt/ are not
-	# in that extract and persist. Config::load reads the new
-	# path first, falls back to legacy /etc/oxwrt.toml on devices
-	# flashed before this migration.
+	# Install at /etc/oxwrt/oxwrt.toml (canonical path — see
+	# DEFAULT_PATH in crates/oxwrt-api/src/config.rs). Preinit's
+	# 80_mount_root silently extracts a sysupgrade.tgz over /etc
+	# on every boot, wiping operator config-push changes to
+	# anything at /etc/*; files under /etc/oxwrt/ survive because
+	# the dir is not in that extract.
 	mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt
 	cp config/oxwrt.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.toml
 	cp $(RUST_TARGET_DIR)/oxwrtd $(IMAGEBUILDER_DIR)/files/usr/bin/oxwrtd
@@ -982,7 +980,7 @@ imagebuilder-stage-pid1: imagebuilder-stage
 #
 # Safety changes vs stage-pid1:
 #   - NO procd-init failsafe net. If our mount_root bugs out, the
-#     device can't read /etc/oxwrt.toml, can't start the control
+#     device can't read /etc/oxwrt/oxwrt.toml, can't start the control
 #     plane, can't be recovered over LAN.
 #   - debug-ssh is still built into the rootfs, but it only spawns
 #     AFTER mount_root (its rootfs lives in /usr/lib/oxwrt/services/

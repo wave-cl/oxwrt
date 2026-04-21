@@ -6,7 +6,8 @@
 //!   2. Builds an in-memory backup tarball (delegating to the
 //!      same `backup::build_tarball` that the Backup RPC uses —
 //!      /etc/oxwrt/* minus the vpn/ subtree for the
-//!      private-key-leak reason, plus /etc/oxwrt.toml).
+//!      private-key-leak reason; oxwrt.toml itself lives under
+//!      /etc/oxwrt/ and is included naturally by that walk).
 //!   3. Streams the bytes via `ssh -i <key> user@host "cat >
 //!      remote_dir/oxwrt-<timestamp>.tar.gz"`.
 //!   4. Lists + prunes older files: `ssh ... "ls -1t remote_dir/

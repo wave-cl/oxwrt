@@ -30,7 +30,7 @@ PROG=/usr/bin/oxwrtd
 #                  the sQUIC control plane. Safe side-binary coexistence
 #                  with stock OpenWrt — will not touch live network
 #                  state even on reload.
-#   services-only  supervisor populated from /etc/oxwrt.toml and spawns
+#   services-only  supervisor populated from /etc/oxwrt/oxwrt.toml and spawns
 #                  declared services (including debug-ssh on port 2222),
 #                  but no network/firewall reconcile. Use this once
 #                  you've validated the per-service rootfs layouts.

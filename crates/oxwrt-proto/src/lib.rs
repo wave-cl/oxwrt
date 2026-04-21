@@ -118,7 +118,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
             let confirm = args.iter().any(|a| a == "--confirm");
             if !confirm {
                 return Err(
-                    "reset: refusing to reset without --confirm (this wipes /etc/oxwrt.toml)"
+                    "reset: refusing to reset without --confirm (this wipes /etc/oxwrt/oxwrt.toml)"
                         .to_string(),
                 );
             }
@@ -188,7 +188,7 @@ pub fn parse_request(cmd: &str, args: &[String]) -> Result<Request, String> {
                 );
             }
             // --clean = discard all settings (sysupgrade -n).
-            // Default (no --clean) = keep /etc/oxwrt.toml + keys.
+            // Default (no --clean) = keep /etc/oxwrt/oxwrt.toml + keys.
             let keep_settings = !args.iter().any(|a| a == "--clean");
             Ok(Request::FwApply {
                 confirm: true,

@@ -64,7 +64,8 @@ docker run --rm \
     # expected since the CRUD refactor. An older copy of this file
     # shipped with the pre-refactor `[wan]` + `[lan]` separate-section
     # layout, which now fails parse with "missing field `networks`".
-    cat > $INITRD/etc/oxwrt.toml << "TOML"
+    mkdir -p $INITRD/etc/oxwrt
+    cat > $INITRD/etc/oxwrt/oxwrt.toml << "TOML"
 hostname = "qemu-test"
 
 [[networks]]

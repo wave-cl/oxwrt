@@ -1036,7 +1036,7 @@ pub(super) async fn async_main(cfg: Config) -> Result<(), Error> {
                 // Runs the same five-phase pipeline as the sQUIC Reload
                 // RPC: parse → reconcile netlink → reinstall firewall →
                 // rebuild supervisor → publish new state. Useful when an
-                // operator edits /etc/oxwrt.toml via TFTP/serial
+                // operator edits /etc/oxwrt/oxwrt.toml via TFTP/serial
                 // recovery and wants to apply without a reboot.
                 tracing::info!("oxwrtd: SIGHUP → reload");
                 let resp = control::server::handle_reload_async(&state).await;

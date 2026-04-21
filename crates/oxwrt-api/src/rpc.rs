@@ -31,7 +31,7 @@ pub enum Request {
     Restart {
         service: String,
     },
-    /// Factory reset: overwrite `/etc/oxwrt.toml` with a stock default
+    /// Factory reset: overwrite `/etc/oxwrt/oxwrt.toml` with a stock default
     /// config and reload. The `[control]` block (listen addrs +
     /// authorized keys path) is preserved across the reset so the
     /// operator can never lock themselves out — without that
@@ -77,7 +77,7 @@ pub enum Request {
     /// gate as Reset). The sQUIC connection drops on reboot — the
     /// client interprets this as "update applied, router rebooting."
     ///
-    /// `keep_settings`: if true, preserves `/etc/oxwrt.toml` and
+    /// `keep_settings`: if true, preserves `/etc/oxwrt/oxwrt.toml` and
     /// `/etc/oxwrt/authorized_keys` across the upgrade (sysupgrade
     /// default). If false, wipes everything (`sysupgrade -n`) — a
     /// clean flash. The client defaults to `true` (keep settings);
@@ -131,7 +131,7 @@ pub enum Request {
     /// The client's private key is returned in the response and NOT
     /// persisted on the router — if the operator loses it the only
     /// fix is re-enroll (which regenerates).
-    /// Bundle `/etc/oxwrt.toml` + everything under `/etc/oxwrt/`
+    /// Bundle `/etc/oxwrt/oxwrt.toml` + everything under `/etc/oxwrt/`
     /// into a gzipped tar and return it in the response. Lets an
     /// operator grab a point-in-time snapshot before risky changes
     /// (new firmware, config experiments) and restore it later. The
@@ -140,7 +140,7 @@ pub enum Request {
     /// the same device recovers full identity; restoring to a fresh
     /// device impersonates the original.
     Backup,
-    /// Replace `/etc/oxwrt.toml` + `/etc/oxwrt/` with the contents
+    /// Replace `/etc/oxwrt/oxwrt.toml` + `/etc/oxwrt/` with the contents
     /// of a backup tarball. Extracts to a staging dir first, then
     /// atomically replaces the live tree. Triggers a reload so the
     /// new config takes effect without a reboot. `confirm` MUST be

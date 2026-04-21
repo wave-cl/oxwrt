@@ -345,7 +345,7 @@ impl Server {
                 continue;
             }
 
-            // Backup: stream /etc/oxwrt/ + /etc/oxwrt.toml as a
+            // Backup: stream /etc/oxwrt/ (including /etc/oxwrt/oxwrt.toml) as a
             // base64-encoded tar.gz.
             if let Request::Backup = &request {
                 let resp = backup::handle_backup();

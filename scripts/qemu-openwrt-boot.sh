@@ -1,7 +1,7 @@
 #!/bin/sh
 # qemu-openwrt-boot.sh — boot OpenWrt 25.12.2 armsr/armv8 in QEMU with
 # our overlay injected. Used to verify that our overlay (oxwrtd
-# binary + /etc/init.d + /etc/uci-defaults + /etc/oxwrt.toml) doesn't
+# binary + /etc/init.d + /etc/uci-defaults + /etc/oxwrt/oxwrt.toml) doesn't
 # introduce a boot-blocking bug.
 #
 # Complementary to qemu-boot.sh, which smoke-tests `oxwrtd --init`
@@ -93,7 +93,7 @@ mount -o loop,offset=$OFFSET img-with-overlay.img /mnt/root
 mkdir -p /mnt/root/etc/oxwrt /mnt/root/usr/bin
 cp /repo/target/aarch64-unknown-linux-musl/release/oxwrtd /mnt/root/usr/bin/oxwrtd
 chmod 755 /mnt/root/usr/bin/oxwrtd
-cp /repo/config/oxwrt.toml /mnt/root/etc/oxwrt.toml
+cp /repo/config/oxwrt.toml /mnt/root/etc/oxwrt/oxwrt.toml
 echo control-only > /mnt/root/etc/oxwrt/mode
 touch /mnt/root/etc/oxwrt/authorized_keys
 

@@ -1727,7 +1727,7 @@ count = 4
 #
 # When set, oxwrtd spawns a tokio task that every interval_hours
 # builds the same in-memory tarball `oxctl backup` returns (all
-# of /etc/oxwrt/* except vpn/ private keys, plus /etc/oxwrt.toml)
+# of /etc/oxwrt/* including oxwrt.toml, except vpn/ private keys)
 # and streams it over SSH to a remote host. Uses the system `ssh`
 # binary (OpenSSH or dropbear's dbclient). Older backups past
 # `keep` are pruned after each successful push.

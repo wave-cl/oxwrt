@@ -222,7 +222,7 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     // Control-only mode short-circuit: re-parse + swap the in-memory
     // config but skip every reconcile phase (netlink, sethostname,
     // firewall, supervisor). This preserves the ability to hand-edit
-    // /etc/oxwrt.toml and have `reload` validate + publish the result
+    // /etc/oxwrt/oxwrt.toml and have `reload` validate + publish the result
     // for subsequent Get/CRUD reads, without violating the
     // --control-only contract of "don't touch live network state."
     if state.control_only {

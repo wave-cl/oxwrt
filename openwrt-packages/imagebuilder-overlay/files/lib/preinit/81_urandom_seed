@@ -3,7 +3,7 @@
 # that skips the `uci -q get system.@system[0].urandom_seed` call.
 #
 # oxwrtd replaces OpenWrt's UCI with a TOML config at
-# /etc/oxwrt.toml, so the `uci` binary is not shipped in our
+# /etc/oxwrt/oxwrt.toml, so the `uci` binary is not shipped in our
 # image. The stock script's uci invocation produced a noisy
 # "uci: not found" or "uci: Permission denied" on every boot —
 # purely cosmetic because the script already falls back to

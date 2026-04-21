@@ -54,7 +54,7 @@ define Package/oxwrtd/install
 	# Default configuration. The operator customizes this over the
 	# sQUIC control plane; it's never edited by hand on the device.
 	$(INSTALL_DIR) $(1)/etc $(1)/etc/oxwrt
-	$(INSTALL_DATA) $(OXWRT_ROOT)/config/oxwrt.toml $(1)/etc/oxwrt.toml
+	$(INSTALL_DATA) $(OXWRT_ROOT)/config/oxwrt.toml $(1)/etc/oxwrt/oxwrt.toml
 	touch $(1)/etc/oxwrt/authorized_keys
 endef
 

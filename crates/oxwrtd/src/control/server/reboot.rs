@@ -47,7 +47,7 @@ pub(super) async fn handle_reboot(state: &ControlState, confirm: bool) -> Respon
     // 3. sync(2) — flush every pending filesystem write so the
     //    overlay/f2fs upper layer is on disk before the kernel
     //    cuts power to the eMMC. Without this, a reboot 100 ms
-    //    after a config-push can leave /etc/oxwrt.toml empty
+    //    after a config-push can leave /etc/oxwrt/oxwrt.toml empty
     //    (dirty pages never flushed).
     //
     //    Two syncs with a short gap — the first commits the
