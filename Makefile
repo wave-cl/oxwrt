@@ -925,6 +925,31 @@ imagebuilder-stage: rust-oxwrtd services-stage services-debug-ssh
 	else \
 	    echo "No provisioning/release-pubkey.ed25519 — FwUpdate falls back to SHA-only (dev-mode)"; \
 	fi
+	# Pre-provisioned secrets overlay (Wi-Fi passphrases, WG peer PSKs,
+	# DDNS tokens, PPPoE password). When present at
+	# provisioning/oxwrt.secrets.toml on the build host, bake it into
+	# the image at /etc/oxwrt/oxwrt.secrets.toml mode 0600. Operator
+	# authors it once off-device from oxwrt.secrets.toml.example and
+	# lives with the other provisioning artefacts (gitignored).
+	#
+	# Why: without this bake, every reflash (U-Boot recovery, factory
+	# reset, clean sysupgrade) drops back to the example stub and Wi-Fi
+	# stops working until the operator re-enters the real passphrase
+	# over the control plane. For a bench router that's a bench-access
+	# annoyance; for a deployed router it means the LAN is unreachable
+	# while you hunt for the passphrase note.
+	#
+	# Co-located with the sQUIC seed + release pubkey baking above —
+	# same "if the file exists on the build host, put it in the image"
+	# pattern so all three credentials land or don't land together.
+	if [ -f provisioning/oxwrt.secrets.toml ]; then \
+	    mkdir -p $(IMAGEBUILDER_DIR)/files/etc/oxwrt; \
+	    cp provisioning/oxwrt.secrets.toml $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.secrets.toml; \
+	    chmod 0600 $(IMAGEBUILDER_DIR)/files/etc/oxwrt/oxwrt.secrets.toml; \
+	    echo "Baked provisioning/oxwrt.secrets.toml → /etc/oxwrt/ (mode 0600)"; \
+	else \
+	    echo "No provisioning/oxwrt.secrets.toml — image ships without operator secrets"; \
+	fi
 	@echo ""
 	@echo "Staged $(IMAGEBUILDER_DIR)/files/ — inspect before running 'make imagebuilder-image'."
 
