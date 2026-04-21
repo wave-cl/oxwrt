@@ -1116,7 +1116,7 @@ verity-test:
 # as production), but requires a ~30s VM boot per run. Prefer the
 # Docker one while developing; run QEMU before flashing.
 
-.PHONY: test-docker test-qemu ci-check ci-check-image
+.PHONY: test-docker test-qemu ci-check ci-check-image install-hooks uninstall-hooks
 
 test-docker: rust-oxwrtd
 	cargo build --release -p oxwrtctl-cli
@@ -1197,6 +1197,43 @@ ci-check: ci-check-image
 			cargo test --workspace --all-targets $(CI_TEST_ARGS); \
 			echo "--- ci-check: all green ---"; \
 		'
+
+# ── Git hooks: opt-in pre-push runs `make ci-check` ──────────────────
+#
+# Prevents the CI-drift pain documented in the ci-check target doc —
+# 40 commits of silent clippy/test regressions accumulated between
+# the times we actually looked at CI. Installing this hook runs the
+# same fmt+clippy+test suite CI does, in ~30s on warm cache, before
+# every push. `git push --no-verify` or `OXWRT_SKIP_CI_CHECK=1 git
+# push` skips it for emergencies.
+#
+# Implemented as a symlink rather than a copy so edits to
+# `scripts/pre-push.sh` take effect immediately without re-installing.
+# Refuses to clobber an existing custom hook — operator must remove
+# it manually (diff against scripts/pre-push.sh first if unsure).
+
+HOOK_SRC  := scripts/pre-push.sh
+HOOK_DEST := .git/hooks/pre-push
+
+install-hooks:
+	@if [ -e $(HOOK_DEST) ] && [ ! -L $(HOOK_DEST) ]; then \
+		echo "refuse: $(HOOK_DEST) exists and is not a symlink"; \
+		echo "        review + remove it first, then re-run 'make install-hooks'"; \
+		exit 1; \
+	fi
+	@mkdir -p $(dir $(HOOK_DEST))
+	@ln -sf $(CURDIR)/$(HOOK_SRC) $(HOOK_DEST)
+	@echo "installed: $(HOOK_DEST) -> $(CURDIR)/$(HOOK_SRC)"
+	@echo "skip once:  git push --no-verify"
+	@echo "skip env:   OXWRT_SKIP_CI_CHECK=1 git push"
+
+uninstall-hooks:
+	@if [ -L $(HOOK_DEST) ]; then \
+		rm $(HOOK_DEST); \
+		echo "removed: $(HOOK_DEST)"; \
+	else \
+		echo "no symlink at $(HOOK_DEST); nothing to remove"; \
+	fi
 
 # ── Clean ────────────────────────────────────────────────────────────
 
