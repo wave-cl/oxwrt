@@ -1398,11 +1398,54 @@ pub enum Proto {
     Icmp,
 }
 
+/// How a firewall rule expresses its port match. Three TOML shapes:
+///
+/// ```toml
+/// dest_port = 22              # Single
+/// dest_port = [22, 53, 80]    # List (rendered as an anonymous set)
+/// dest_port = "22-80"         # Range (inclusive, nft `22-80` syntax)
+/// ```
+///
+/// Ranges go through the text path (rustables has no builder for
+/// port ranges; emitting 58 individual rules for 22-80 would bloat
+/// the batch and hurt lookup). `Range` is a string rather than
+/// a tuple because TOML integer-pair parsing produces `[22, 80]`
+/// which collides with `List(Vec<u16>)` under serde untagged —
+/// a string disambiguates cleanly and matches how operators
+/// actually type it (`"22-80"` in UCI, fw4, iptables docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
     Single(u16),
     List(Vec<u16>),
+    /// Inclusive range `"START-END"`, both u16. Validated at
+    /// reload time; `parse_range` is the canonical parser.
+    Range(String),
+}
+
+impl PortSpec {
+    /// Parse a `Range` variant's string into `(start, end)` with
+    /// start <= end. Returns an error string for any malformed
+    /// input (missing `-`, non-u16 endpoints, start > end). Only
+    /// meaningful when the variant IS `Range`; `Single`/`List`
+    /// callers should branch before invoking.
+    pub fn parse_range(s: &str) -> Result<(u16, u16), String> {
+        let (a, b) = s
+            .split_once('-')
+            .ok_or_else(|| format!("port range {s:?}: expected 'START-END' with a single '-'"))?;
+        let start: u16 = a
+            .trim()
+            .parse()
+            .map_err(|_| format!("port range {s:?}: start {:?} not a u16", a.trim()))?;
+        let end: u16 = b
+            .trim()
+            .parse()
+            .map_err(|_| format!("port range {s:?}: end {:?} not a u16", b.trim()))?;
+        if start > end {
+            return Err(format!("port range {s:?}: start > end ({start} > {end})"));
+        }
+        Ok((start, end))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

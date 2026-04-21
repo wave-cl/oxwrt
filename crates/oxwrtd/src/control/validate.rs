@@ -223,6 +223,18 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         ));
     }
 
+    // Port-range strings: validate at reload time so a typo like
+    // "22--80" or "22-abc" fails here rather than as an nft parse
+    // error deep in the install phase (where the whole ruleset
+    // rejects and the operator loses context). Applies to both
+    // src_port and dest_port.
+    use oxwrt_api::config::PortSpec;
+    for (which, spec) in [("dest_port", &rule.dest_port), ("src_port", &rule.src_port)] {
+        if let Some(PortSpec::Range(s)) = spec {
+            PortSpec::parse_range(s).map_err(|e| format!("rule {}: {which}: {e}", rule.name))?;
+        }
+    }
+
     // Schedule must parse if set. Catches typos before reload
     // puts the rule in front of the kernel.
     if let Some(sched) = rule.schedule.as_deref() {

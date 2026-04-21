@@ -26,7 +26,20 @@ use oxwrt_api::config::{
 /// logging, ICMP-type matching, or a schedule. Basic rules (zone+
 /// proto+dport+ct_state) stay on the fast rustables path.
 pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
-    use oxwrt_api::config::Family;
+    use oxwrt_api::config::{Family, PortSpec, Proto};
+    // Port ranges on either src_port or dest_port: rustables has
+    // no range builder, so render `tcp dport 22-80` via text.
+    let dport_is_range = matches!(r.dest_port, Some(PortSpec::Range(_)));
+    let sport_is_range = matches!(r.src_port, Some(PortSpec::Range(_)));
+    // Proto-only rules (proto = tcp/udp/both, no dest_port).
+    // The rustables path's emit-rule closure only knows how to
+    // add `.dport()` pairs — without a port it silently skips,
+    // which was a latent bug ("accept all UDP" rules vanished).
+    // Route to text so render_proto_port emits `meta l4proto tcp`.
+    // ICMP stays on the rustables path (handled specially via
+    // .accept/.drop without a port).
+    let proto_only =
+        r.dest_port.is_none() && matches!(r.proto, Some(Proto::Tcp | Proto::Udp | Proto::Both));
     !r.src_ip.is_empty()
         || !r.dest_ip.is_empty()
         || !r.src_mac.is_empty()
@@ -37,6 +50,9 @@ pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
         || r.schedule.is_some()
         || r.family != Family::Any
         || r.match_set.is_some()
+        || dport_is_range
+        || sport_is_range
+        || proto_only
 }
 
 use super::Error;
@@ -1418,16 +1434,7 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
     // `meta l4proto { tcp, udp } th sport ...` for Both.
     if let Some(sport) = &rule.src_port {
         let proto = rule.proto.unwrap_or(oxwrt_api::config::Proto::Tcp);
-        let port_fragment = match sport {
-            PortSpec::Single(p) => format!("{p}"),
-            PortSpec::List(ps) => format!(
-                "{{ {} }}",
-                ps.iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
+        let port_fragment = render_port_fragment(sport);
         match proto {
             Proto::Tcp => out.push_str(&format!("tcp sport {port_fragment} ")),
             Proto::Udp => out.push_str(&format!("udp sport {port_fragment} ")),
@@ -1538,16 +1545,7 @@ fn render_proto_port(out: &mut String, rule: &oxwrt_api::config::Rule) {
         };
         if proto_s == "meta-both" {
             if let Some(port) = &rule.dest_port {
-                let port_fragment = match port {
-                    PortSpec::Single(p) => format!("{p}"),
-                    PortSpec::List(ps) => format!(
-                        "{{ {} }}",
-                        ps.iter()
-                            .map(|p| p.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                };
+                let port_fragment = render_port_fragment(port);
                 out.push_str(&format!(
                     "meta l4proto {{ tcp, udp }} th dport {port_fragment} "
                 ));
@@ -1555,21 +1553,46 @@ fn render_proto_port(out: &mut String, rule: &oxwrt_api::config::Rule) {
                 out.push_str("meta l4proto { tcp, udp } ");
             }
         } else if let Some(port) = &rule.dest_port {
-            let port_fragment = match port {
-                PortSpec::Single(p) => format!("{p}"),
-                PortSpec::List(ps) => format!(
-                    "{{ {} }}",
-                    ps.iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            };
+            let port_fragment = render_port_fragment(port);
             out.push_str(&format!("{proto_s} dport {port_fragment} "));
         } else if proto != Proto::Icmp {
             // ICMP doesn't need the meta prefix — icmp type match
             // handles it. Emit meta l4proto only for tcp/udp.
+            // This branch is the "proto-only" rule: rustables path
+            // silently skipped these (firewall.rs "Proto but no port
+            // — skip silently"), so rule_needs_text_path routes them
+            // here to get `meta l4proto tcp` / `… udp` rendered.
             out.push_str(&format!("meta l4proto {proto_s} "));
+        }
+    }
+}
+
+/// Render a port match value to the nft syntax fragment. `Single` =
+/// bare integer, `List` = `{ 22, 53, 80 }` anonymous set, `Range` =
+/// `22-80` native nft range syntax.
+///
+/// Range strings are assumed pre-validated (by `check_rule_zone_refs`
+/// calling `PortSpec::parse_range`). A malformed range that reaches
+/// here emits the literal string — nft will reject the whole script
+/// and the error lands in the operator's reload log.
+fn render_port_fragment(spec: &PortSpec) -> String {
+    match spec {
+        PortSpec::Single(p) => format!("{p}"),
+        PortSpec::List(ps) => format!(
+            "{{ {} }}",
+            ps.iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PortSpec::Range(s) => {
+            // Re-parse into canonical `A-B` form so stray whitespace
+            // doesn't leak into the nft script (`"22 - 80"` works in
+            // config, but nft wants `22-80`).
+            match PortSpec::parse_range(s) {
+                Ok((a, b)) => format!("{a}-{b}"),
+                Err(_) => s.clone(),
+            }
         }
     }
 }
@@ -1953,6 +1976,15 @@ fn port_spec_to_list(spec: &Option<PortSpec>) -> Vec<u16> {
         None => vec![],
         Some(PortSpec::Single(p)) => vec![*p],
         Some(PortSpec::List(ps)) => ps.clone(),
+        // Range on the rustables path: `rule_needs_text_path` is
+        // supposed to shunt these to text rendering (nft accepts
+        // `tcp dport A-B` natively; rustables has no range builder
+        // and expanding would emit hundreds of rules). Reaching
+        // here means either a caller forgot to filter or a new
+        // call-site was added without the guard — return empty so
+        // the rustables emit loop skips cleanly rather than
+        // fabricating bogus single-port rules.
+        Some(PortSpec::Range(_)) => vec![],
     }
 }
 
@@ -2404,6 +2436,181 @@ mod tests {
             negate: false,
         });
         assert!(rule_needs_text_path(&r));
+    }
+
+    // ── find_dest_zone_for_ipv6 ────────────────────────────────────
+
+    // ── port ranges + proto-only rules ─────────────────────────────
+
+    #[test]
+    fn range_port_forces_text_path() {
+        let mut r = basic_rule("t");
+        assert!(!rule_needs_text_path(&r));
+        r.dest_port = Some(PortSpec::Range("22-80".into()));
+        assert!(rule_needs_text_path(&r), "range dest_port should take text");
+        // src_port Range should also trigger.
+        let mut r = basic_rule("t");
+        r.src_port = Some(PortSpec::Range("1024-65535".into()));
+        assert!(rule_needs_text_path(&r));
+    }
+
+    #[test]
+    fn proto_only_rule_forces_text_path() {
+        // "accept all UDP from lan to wan" — used to silently
+        // vanish on the rustables path. Now routes to text.
+        let mut r = basic_rule("allow-udp");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        assert!(
+            rule_needs_text_path(&r),
+            "proto=udp without dest_port must take text path"
+        );
+        // Same for TCP.
+        let mut r = basic_rule("t");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        assert!(rule_needs_text_path(&r));
+        // Same for Both.
+        let mut r = basic_rule("t");
+        r.proto = Some(oxwrt_api::config::Proto::Both);
+        assert!(rule_needs_text_path(&r));
+        // Proto::Icmp stays on the rustables path (handled by the
+        // is_icmp special-case there).
+        let mut r = basic_rule("t");
+        r.proto = Some(oxwrt_api::config::Proto::Icmp);
+        assert!(!rule_needs_text_path(&r));
+        // Proto + port stays on rustables (the common case).
+        let mut r = basic_rule("t");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(22));
+        assert!(!rule_needs_text_path(&r));
+    }
+
+    #[test]
+    fn render_range_dest_port_tcp() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("allow-dev-ports");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Range("3000-3010".into()));
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("tcp dport 3000-3010"), "{s}");
+        assert!(s.contains(" accept"), "{s}");
+    }
+
+    #[test]
+    fn render_range_src_port_udp() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("dhcp-reply-filter");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.src_port = Some(PortSpec::Range("1024-65535".into()));
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("udp sport 1024-65535"), "{s}");
+    }
+
+    #[test]
+    fn render_range_normalizes_whitespace() {
+        // Operator typed "22 - 80" with stray spaces; nft wants
+        // "22-80". render_port_fragment re-parses + re-emits.
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("t");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Range("22 - 80".into()));
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("tcp dport 22-80"), "{s}");
+        assert!(!s.contains("22 - 80"), "stray whitespace leaked: {s}");
+    }
+
+    #[test]
+    fn render_proto_only_tcp_accept() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("allow-tcp");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        // No dest_port — proto-only rule.
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("meta l4proto tcp"), "{s}");
+        assert!(s.contains(" accept"), "{s}");
+    }
+
+    #[test]
+    fn render_proto_only_udp_drop() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("block-all-udp");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.action = oxwrt_api::config::Action::Drop;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("meta l4proto udp"), "{s}");
+        assert!(s.contains(" drop"), "{s}");
+    }
+
+    #[test]
+    fn render_proto_only_both_accept() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("allow-l4");
+        r.proto = Some(oxwrt_api::config::Proto::Both);
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("meta l4proto { tcp, udp }"), "{s}");
+    }
+
+    #[test]
+    fn port_spec_range_serde() {
+        // TOML round-trip: a string "22-80" must land as Range.
+        let cfg_toml = r#"
+hostname = "t"
+[[networks]]
+name = "lan"
+type = "lan"
+bridge = "br-lan"
+address = "192.168.1.1"
+prefix = 24
+[[firewall.rules]]
+name = "r"
+proto = "tcp"
+dest_port = "22-80"
+action = "accept"
+[control]
+listen = ["[::1]:51820"]
+authorized_keys = "/x"
+"#;
+        let cfg: Config = toml::from_str(cfg_toml).unwrap();
+        let dp = cfg.firewall.rules[0].dest_port.as_ref().unwrap();
+        match dp {
+            PortSpec::Range(s) => assert_eq!(s, "22-80"),
+            other => panic!("expected Range, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn port_spec_parse_range_roundtrip() {
+        use oxwrt_api::config::PortSpec as Ps;
+        assert_eq!(Ps::parse_range("22-80"), Ok((22, 80)));
+        assert_eq!(Ps::parse_range("1-65535"), Ok((1, 65535)));
+        // Whitespace tolerant.
+        assert_eq!(Ps::parse_range(" 100 - 200 "), Ok((100, 200)));
+        // start == end is legal (equivalent to Single, but not an
+        // error — operators use it for "range syntax with one port"
+        // when building templated configs).
+        assert_eq!(Ps::parse_range("53-53"), Ok((53, 53)));
+    }
+
+    #[test]
+    fn port_spec_parse_range_rejects_bad_inputs() {
+        use oxwrt_api::config::PortSpec as Ps;
+        assert!(Ps::parse_range("").is_err());
+        assert!(Ps::parse_range("22").is_err(), "missing dash");
+        assert!(Ps::parse_range("22--80").is_err(), "double dash");
+        assert!(Ps::parse_range("abc-80").is_err(), "bad start");
+        assert!(Ps::parse_range("22-abc").is_err(), "bad end");
+        assert!(Ps::parse_range("80-22").is_err(), "start > end");
+        assert!(Ps::parse_range("22-99999").is_err(), "end overflows u16");
     }
 
     // ── find_dest_zone_for_ipv6 ────────────────────────────────────

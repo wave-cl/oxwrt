@@ -486,6 +486,22 @@ action = "accept"
 # dest_port = 22
 # action = "accept"
 #
+# Port matches accept three shapes:
+#   dest_port = 22              # single port
+#   dest_port = [22, 53, 80]    # list (anonymous nft set)
+#   dest_port = "3000-3010"     # inclusive range (nft native syntax)
+# Ranges render as `tcp dport 3000-3010`; same shape for src_port.
+#
+# Proto-only rules (no dest_port) are valid — `proto = "tcp"` with
+# no port matches any TCP packet. Useful for coarse zone filters:
+#
+# [[firewall.rules]]
+# name = "block-all-udp-to-wan"
+# src = "iot"
+# dest = "wan"
+# proto = "udp"                 # no dest_port → matches all UDP
+# action = "drop"
+#
 # [[firewall.rules]]
 # name = "block-known-bad"
 # src = "wan"
