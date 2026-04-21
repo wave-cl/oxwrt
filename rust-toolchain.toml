@@ -14,9 +14,23 @@
 # catch those pre-push.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
-# aarch64-unknown-linux-musl is required for `cargo zigbuild` cross-
-# compiling oxwrtd for the router (MT6000). Listed here so a fresh
-# clone + first `cargo` invocation auto-installs the target std lib
-# via rustup — otherwise the QEMU CI job fails with E0463 "can't
-# find crate for std".
-targets = ["aarch64-unknown-linux-musl"]
+# Targets whose std-lib must be pre-installed for the pinned
+# channel. rustup auto-installs these on first `cargo` in the
+# workspace; omitting one breaks cross-compiles with E0463
+# "can't find crate for std/core". Adding a target via
+# `rustup target add` outside this file attaches it to whatever
+# channel was last defaulted — NOT the pinned channel — so cargo
+# inside the workspace won't see it.
+#
+# Members:
+#   aarch64-unknown-linux-musl — oxwrtd + oxctl for the router
+#                                (MT6000). Primary cross-compile.
+#   x86_64-apple-darwin        — oxctl for Intel Macs; attached
+#                                to the GitHub release.
+#   aarch64-apple-darwin       — oxctl for Apple Silicon Macs;
+#                                attached to the GitHub release.
+targets = [
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
