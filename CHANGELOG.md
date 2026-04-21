@@ -35,3 +35,464 @@ Pre-tag history lives in `git log`. The first `release.sh` run
 will land every commit since the beginning of the repo as the
 inaugural CHANGELOG entry; subsequent runs only cover the range
 since the previous tag.
+
+## [0.2.0] — 2026-04-21
+
+### release.sh
+- BSD-awk-compatible CHANGELOG prepend (f9bc755)
+
+### security
+- prune firewall deferred-items list to genuine non-goals (3b6eda7)
+- live-audit findings for debug-ssh + upnpd (2a80c61)
+- drop NET_ADMIN from corerad, document why hostapd keeps it (4885cec)
+- debug-ssh bold warning + host-netns SECURITY entry + veth validator (a18b0c9)
+
+### firewall
+- absolute-date schedule windows (c6e0c72)
+- NOTRACK — rule-level conntrack bypass (42bb346)
+- QoS primitives — set_mark + set_dscp (5632f4f)
+- CT helpers (FTP, SIP, TFTP, PPTP, H.323, IRC) (f68bee1)
+- fw4-parity pass 2 — mtu_fix, forwardings, synflood, rule-level counter/burst/reject_with/device (df186bf)
+- port ranges + proto-only rule support (edab449)
+- IPv6 port-forwards + declarative ipsets (fw4-parity) (3660afc)
+- baseline defaults + config examples + SECURITY.md (0e633e4)
+- port-forward reflection (hairpin NAT) + IPv6 masquerade (22ccb09)
+- rule primitives (ip/mac/port/icmp-type/limit/log/enabled) + zone output policy (0d13f3e)
+- schedule field for time-based rules via meta day / meta hour (83b3a6d)
+- [[firewall.raw_nft]] escape hatch for unusual rules (c60ee84)
+- tighten rule validator — dnat consistency + icmp/port + empty name (7b149fe)
+- replace boolean shortcuts with zone + rule model (7da5acb)
+
+### validate
+- preserve 'invalid internal IP' error wording (053b7c9)
+
+### ci
+- tag-triggered release workflow (f001dc1)
+- rust-toolchain.toml pin + make ci-check mirror target (8e5fd63)
+- more clippy-1.95 sites in oxwrtd + raise QEMU test caps (a64ac49)
+- clippy 1.95 lints in linux-only code + serialise metrics tests (24ba8b5)
+- fix clippy (1.95 doc-lazy / large-enum) + QEMU config path (7bcb1c8)
+- scripts/release.sh + CHANGELOG.md bootstrap (a1d9829)
+- QEMU harness already exists; add rollback + dry-run assertions (26f3e03)
+- scope fmt check to oxwrt workspace packages only (672c3e4)
+- fix missing squic checkout in fmt + missing fields in net.rs test (1ef50cd)
+- expand workflow with fmt + clippy + test jobs; cargo fmt pass (8b0625c)
+- install ipxe-qemu for efi-virtio.rom (b5a9391)
+- check out wave-cl/squic-rust as sibling dir for path-dep (d74e9ac)
+- run QEMU integration test on every push/PR (cce6b9b)
+
+### release
+- RELEASING.md runbook + release.sh polish (94100d5)
+
+### imagebuilder
+- bake provisioning/oxwrt.secrets.toml into images (0237f0f)
+- bake provisioning/key.ed25519 into /etc/oxwrt/ (5bc6d81)
+
+### docs+scripts
+- scrub stale /etc/oxwrt.toml path references (c49d350)
+
+### hooks
+- opt-in pre-push runs `make ci-check` (7507b5e)
+
+### svc_resolv
+- DNS for isolated-netns services — resolv.conf + gateway DNAT (26a22aa)
+
+### container/reload
+- fix veth pair teardown race on service respawn (f6cf72f)
+
+### reload
+- document that spec changes auto-respawn the service (3d1a925)
+- cleanup stale exemptions BEFORE coordinator respawn (not after) (347ea91)
+- also cleanup proto-155 exemptions after coordinator respawn (2ae7996)
+- zero-thrash reconcile for services and VLAN ifaces (c396f80)
+- call net.bring_up so VLAN sub-ifaces created via CRUD take effect (8e9a630)
+
+### diag
+- ship drill + ss binaries + transitive libs (b931efe)
+- sysctl accepts a specific key (b102437)
+- ping + traceroute accept IPv6 targets (5dbad51)
+- devices — parse /proc/net/arp for a LAN-side device view (b31d5c2)
+- wol — send Wake-on-LAN magic packet via LAN broadcast (5945cad)
+- ping-many + vpn-auto-switch --via-router (ace932d)
+- add nft-summary op for condensed firewall state dump (daae449)
+- add `stall <secs>` op, verifying watchdog fires on hang (a4803e8)
+- add `diag resolv` RPC (994e017)
+- add nft / conntrack / sysctl ops (3117279)
+
+### upnpd
+- from-source miniupnpd 2.3.7 with nftables backend + correct option names (ee7ce82)
+
+### crud
+- deep-merge security on service update — close the partial-patch footgun (a5e4c25)
+
+### services
+- default pid_namespace = true on every shipped service (a210150)
+- fixes discovered during first PID-1-style live run (50bb43d)
+- fix coredhcp config + straighten rootfs layout for packages (b65780d)
+
+### container
+- pid_namespace opt-in, decoupled from user_namespace (ec2558c)
+
+### rust-toolchain
+- include aarch64-unknown-linux-musl target (ed01022)
+
+### chore
+- cargo fmt --all (matches CI rustfmt) (3633de5)
+- drop hw-dump/ + three resolved-bug diagnostic blocks (cd81d97)
+- silence dead-code warnings + auto-applied clippy suggestions (ce65208)
+
+### config
+- example covers max_connections / max_rpcs_per_sec / include_secrets (18efaa4)
+- drop legacy /etc/oxwrt.toml fallback + fix backup path (12e50ef)
+- comment out debug-ssh service by default (4d0e8df)
+- promote corerad RA timers to per-network optional overrides (c27cacf)
+- render ntpd-rs ntp.toml from a new [ntp] section (4b566e8)
+- render coredhcp.yml from a new [dhcp] section (ba1d6e2)
+- render hickory-dns named.toml from a new [dns] section (3e8b58c)
+- absorb authorized_keys + SSH known_hosts into the TOML (e91c80c)
+- strip inline secrets from example + ship secrets.toml.example (7f0dc03)
+- one-shot migration shim + oxctl dump-config + backup knob (56143d4)
+- split secrets into oxwrt.secrets.toml on every writer path (d04ef7a)
+- merge secrets-overlay file + env vars at load time (7915ec6)
+- refresh vpn_client + metrics sections for v2 features (ff3070b)
+- refresh upnp index entry — scaffolding complete (b98bf03)
+- refresh example with mwan3 + routes6 + metrics breadth (13d25c1)
+- migrate persisted path to /etc/oxwrt/oxwrt.toml + forensics (783a741)
+- expand oxwrt.toml so every schema field has an example (5ae93be)
+- move LAN from 192.168.1.0/24 to 192.168.50.0/24 (c37c13a)
+- fix coredhcp leases bind-mount source path (12f0204)
+- unify wan/lan/networks into [[networks]] tagged enum (e62924b)
+- separate network topology from firewall policy (730bb9f)
+
+### preinit
+- demote expected mount-race logs on MT6000 (3fac246)
+- override correct failsafe file + drop uci from urandom_seed (7829e7a)
+- kill failsafe prompts, stub uci, use monotonic-uptime log timer (6e4aa86)
+- use usleep for fractional-second poll (BusyBox compat) (a5b93f1)
+- wait for eth0 before failsafe announces (a51799f)
+
+### clock
+- retry sntp bootstrap on ENETUNREACH startup race (91539b1)
+
+### control
+- per-connection RPC rate limit + release-pubkey bake (8293e22)
+- max_connections cap on sQUIC listener (1bc1bb1)
+
+### sysupgrade
+- ed25519 release-signature verification on FwUpdate (b6306c4)
+- write rootfs before kernel via two-pass tar extraction (356f920)
+- preflight uses independent fd (not try_clone) (da43b23)
+- plain tar (not gzipped) + pre-flight validation (d0d06ea)
+- pre-open all files before pivot_root (f6edd4f)
+- fix fwtool trailer layout (16-byte BE, not 12-byte LE) (dbe14f1)
+- native eMMC flash for mediatek/filogic (no ubus) (a8ba365)
+
+### oxctl
+- diff — unified-line diff of local TOML vs live config (36bcbf1)
+- watch subcommand for live-updating RPC display (854afdd)
+- wizard — interactive first-flash starter config generator (f1d20de)
+- vpn-auto-switch — ping-race picks the fastest Mullvad relay (580d7c2)
+- mullvad-relays + vpn-switch-relay — Mullvad API integration (e56b1ef)
+
+### docs
+- README.md — landing doc for the project (c28d184)
+- SECURITY.md threat model + regression guard on example config (acdca5b)
+- document identity-vs-config split + wizard emits [dns]/[dhcp]/[ntp] (9539b9c)
+
+### init
+- extract the three *_main tokio bodies into init/main_loop.rs (08998a2)
+- write /etc/resolv.conf pointing at the LAN IP (c77474b)
+- split the 2144-line init.rs into topic submodules (b31ac72)
+- reset coredhcp lease DB on LAN subnet change (8738478)
+- fallback /dev to tmpfs + mknod when kernel lacks devtmpfs (cdf0d8b)
+- more verbose early_mounts + /dev + /proc/mounts diagnostics (cbd766b)
+- EROFS-tolerant early_mounts + early_console + panic hook (d8ab804)
+- mount_root hot path (Stage 4a) (c6f9f35)
+- rename_netdevs_from_dts (Stage 3 of procd-init takeover) (b9b09d2)
+- mount_root coexist detection (Stage 2, detect-only) (4d021b3)
+- load_modules (Stage 1 of procd-init takeover) (a2a0864)
+- quiet the boot logs (b430a39)
+- tolerate ENODEV on early_mounts (not just EBUSY) (0b818ff)
+
+### rollback
+- promote single snapshot to a ring of 5 (7698442)
+- oxctl reload --dry-run preflight validation (9aca683)
+- auto-restore on failed reload (one-shot, non-recursive) (aa27e7d)
+- .last-good snapshot + oxctl rollback subcommand (d971397)
+
+### net
+- split install_firewall + helpers into net/firewall.rs (35b9a02)
+- per-zone WAN routing for multi-WAN source-based split (f64c751)
+- VLAN-aware bridging (802.1Q vlan_filtering + per-port VIDs) (d74501f)
+
+### wan
+- optional mac_address override on [[networks]] type="wan" (68d75b9)
+- send DHCPv4 hostname (opt 12) and vendor-class-id (opt 60) (3782511)
+- ICMP probes (mwan3 v2) + per-WAN Status breakdown (3949268)
+- multi-WAN failover coordinator (v1 — lease-state health) (4453283)
+- retry initial DHCP acquire + firewall input rule for OFFER (741eca9)
+
+### backup_sftp
+- scheduled off-router config snapshots via SSH (0941bed)
+
+### wifi_rotate
+- scheduled passphrase regeneration + QR sidecar (83294ba)
+
+### ddns
+- add Namecheap, dynv6, and Hurricane Electric providers (fc6df20)
+- CRUD RPC + live reload (b32fa17)
+- dynamic-DNS updater with duckdns + cloudflare providers (519d637)
+
+### metrics
+- per-service cgroup v2 stats (memory, CPU, pids) (b89f014)
+- reconcile listener on reload (idempotent apply) (ac2d16b)
+- real counters — DHCP acquire, reload, blocklist fetches (2b909f3)
+- add Prometheus-format /metrics endpoint (ee0f733)
+
+### main
+- disable /dev/kmsg rate limit for oxwrtd's tracing writer (9e51809)
+- don't match -h as --help (5751750)
+- combine three heuristics for "init invoked us" (f09bdad)
+- suppress usage print when stderr isn't a tty (a0333ed)
+
+### contrib/grafana
+- ship-ready Grafana dashboard for oxwrt metrics (49d1e18)
+
+### vpn_client
+- persistent endpoint-exemption cleanup across reboots (95bf4f4)
+- bypass_destinations_v6 — IPv6 counterpart to task #1 (6115a9e)
+- IPv6 full-tunnel — ::/0 egresses through the active profile (73c90c1)
+- bypass_destinations — dest CIDRs that skip the tunnel (b661440)
+- oxctl vpn-profile import <name> <conf> (929a045)
+- v1 polish — backup skip, exemption cleanup, iif rule cleanup (c3c85da)
+- VpnKeyUpload RPC for provisioning private keys (9a29e74)
+- Status RPC + Prometheus metrics (commit 5/5) (e62f327)
+- coordinator + probes + MTU clamp + reload respawn (commit 4/5) (d47a612)
+- killswitch + DNS redirection + iif-based routing (commit 3/5) (b148bee)
+- policy routing + fwmark + endpoint exemption (commit 2/5) (9e3c51f)
+- schema + iface bring-up (commit 1/5) (d0c665b)
+
+### upnp
+- scaffold miniupnpd cross-build + UUID persistence (c27957f)
+- schema + miniupnpd.conf generator (41585d2)
+
+### wan_failover
+- respawn probes on reload when probe_target changes (82ad076)
+- publish static WANs into WanLeases so coordinator manages them (efa5978)
+
+### wan_dhcp
+- stop racing the failover coordinator on default-route install (badc88e)
+- wait for stable carrier + retransmit DISCOVER per RFC 2131 (924c432)
+- watch carrier, re-acquire on link-down→up edge (22cfd7b)
+
+### oxwrtd
+- mark overlay READY so libfstools stops wiping it every boot (8852314)
+
+### wg-enroll
+- --qr renders the .conf as a terminal QR code (9d3be57)
+
+### watchdog
+- reboot on tokio stall, not just on process crash (96d3dbe)
+- reuse inherited fd from procd-init (acee74d)
+
+### routes6
+- static IPv6 routes with matching reconcile (86cf6f2)
+
+### boot
+- trim ~1s by tuning dep grace + parallelizing setup (8e6dedd)
+
+### reboot
+- graceful system-reboot RPC with seed save + clean shutdown (d513c80)
+
+### urandom_seed
+- persistent CRNG seed across reboots (ed1376b)
+
+### log-hygiene
+- silence SQM tear-down noise, drop attach-netns OK, debug-log idle-close (94403de)
+
+### tracing
+- emit to /dev/kmsg so oxwrtd logs interleave with dmesg (15bd168)
+
+### qemu
+- assertions for routes, blocklists, upnp, and runtime VLAN (df953d1)
+
+### tests
+- broaden coverage on the four new features (fe09a97)
+
+### blocklists
+- [[blocklists]] with nftables named sets + refresh task (b0cfb1e)
+
+### networks
+- 802.1Q VLAN sub-ifaces on Simple networks (1b84a18)
+
+### routes
+- static [[routes]] with reload reconcile (feab5da)
+
+### status
+- surface WireGuard peer state per iface (2e26196)
+- expose per-AP iface state; warn if AP stays Down past 90s (8248912)
+
+### sqm
+- CAKE shaping on WAN (egress + IFB-mirrored ingress) (af1eb29)
+
+### fmt
+- collapse single-arg tracing::info! line in write_self_resolv_conf (781b3fe)
+
+### dns
+- DoQ investigation notes + revert to DoH (c798a92)
+- enable both https-ring + quic-ring features; stay on DoH for now (f185798)
+- switch hickory-dns upstreams from plain UDP to DoH (6cfe768)
+
+### wan_dhcp6
+- also solicit IA_NA for a WAN-side v6 address (2ac38a0)
+- fix subnet_host_address_56 test assertion (ae2ae32)
+- persist DUID + IAID at /etc/oxwrt/dhcp6-duid (8cf6939)
+- T1 Renew, T2 Rebind, full re-Solicit on expiry (9df3964)
+
+### ipv6
+- DHCPv6-PD client with delegated-prefix slicing (52ba04a)
+- static per-LAN v6 + auto-generated corerad config (0ddc3a4)
+
+### clippy
+- clean all workspace warnings; enforce -D warnings in CI (dc56b36)
+
+### wireguard
+- auto-open listen_port on WAN in firewall install (5f31d38)
+- wg-enroll RPC — server-gen keypair, return client .conf (27fa1a4)
+- [[wireguard]] schema + wg-peer CRUD + boot bring-up (5c45015)
+
+### backup
+- /etc/oxwrt.toml + /etc/oxwrt/ round-trip RPC (05f5f5d)
+
+### port-forwards
+- first-class [[port_forwards]] section + CRUD RPC (7e4f784)
+
+### test
+- fix poll-loop wall time; use cortex-a72 for TCG speed (887276c)
+- drop --platform linux/arm64 from overlay-inject container (6fd583f)
+- add QEMU integration harness — real kernel, 30 RPC assertions (0436866)
+
+### build
+- make zig-ar wrapper portable (Linux CI + macOS) (1f3f58c)
+
+### wifi
+- default 5G to 80 MHz non-DFS (channel 36, U-NII-1) (0032532)
+- run phy1 at full 160 MHz (VHT160/HE160) (a2857cd)
+- multi-BSS (multiple SSIDs per radio) + full schema examples in oxwrt.toml (c63f307)
+- expand [[radios]]/[[wifi]] schema to cover all hostapd options (879466d)
+- CRUD-driven hostapd config generation (8aac988)
+- dual-radio (phy0 2.4 GHz + phy1 5 GHz) hostapd + plumbing fixes (7609bab)
+- hostapd on phy1 (5 GHz) + iw-based AP interface creation (a4063f3)
+
+### server
+- split the 2917-line control/server.rs into topic submodules (f01bd25)
+
+### rename-daemon
+- oxwrtctl → oxwrtd (f3c0bbd)
+
+### workspace
+- extract oxwrt-linux crate (container/net/dhcp/wifi/sysupgrade/logd) (da5fb75)
+- extract oxwrtctl-cli crate (lib oxwrtctl_cli + bin oxctl) (2e8c438)
+- extract oxwrt-proto crate (framing + RPC parse/format) (b7541a5)
+- extract oxwrt-api crate (config + rpc types) (dcc4470)
+
+### load_modules
+- fall back to .modinfo depends scan (OpenWrt has no modules.dep) (96b09e3)
+- dep resolution via modules.dep (Stage 4b) (edd3725)
+- pre-check /sys/module, quiet dep-issue warns (6a3b29a)
+
+### corerad
+- IPv6 RA daemon for SLAAC on br-lan (01e0974)
+
+### mount_root
+- drop bogus /rom/tmp move, mount fresh tmpfs instead (81699ea)
+- treat all-zeros overlay region as fresh flash (f41db29)
+- recognize gzip magic at overlay_off as unformatted (0e7dc2b)
+
+### debug-ssh
+- fix PTY allocation (ptmxmode=666 + /dev/ptmx symlink) (2c131b8)
+- bundle static dropbear, drop dropbear package (8486b1f)
+- generate hostkeys with dropbearkey, not copy from stock (cbdd61b)
+
+### Cargo.lock
+- pick up flate2 + tar + tempfile deps added in Stage 4 (cde76e6)
+
+### Makefile
+- trim 17 OpenWrt packages (Stage 5) (9b579d0)
+- imagebuilder-stage-pid1-standalone (Stage 4c) (7a86cb7)
+- add imagebuilder-stage-pid1 for PID-1 takeover (e47e70b)
+- bisect targets for image boot-hang investigation (4e5141a)
+- bookworm-slim needs more imagebuilder prereqs (3d56c4b)
+- add bzip2 + gawk to imagebuilder container (a3e01ba)
+- imagebuilder-stage + imagebuilder-image targets for PID-1 flash (5799367)
+
+### misc
+- persist server key across sysupgrade + SNTP bootstrap after WAN DHCP (fec1d24)
+- add imagebuilder overlay for Flint 2 side-binary deployment (4d93cab)
+- fix atomic write on bind-mounted config files (e64fe68)
+- add integration test + fix PID 1 dispatch order (4ca8b2a)
+- add config-dump and config-push RPCs (413eda6)
+- add CRUD RPC for all config collections (30663be)
+- add firmware update RPC tests (33b9c36)
+
+### control-server
+- log server pubkey at startup (b29cb6a)
+
+### build.rs
+- don't override cargo's default rerun heuristic (671ce9e)
+
+### oxwrtctl
+- pet the hardware watchdog + fix PREINIT heuristic (8e8e5b8)
+- bootstrap system clock from binary build time (da0564e)
+- two fixes for PID-1 takeover (f32371a)
+- --services-only mode for staged supervisor bring-up (b9b1ec8)
+- split CRUD validators into platform-agnostic module + tests (fbc06b3)
+- close Set/Get asymmetry (lan.prefix, wan.prefix, wan.username) (038a093)
+- cross-reference validation for CRUD (fd40390)
+- add service CRUD to the Collection RPC (7340554)
+- --control-only mode + reload guard + control.* get exposure (cfbfa18)
+
+### imagebuilder-stage
+- don't clobber /var symlink — ROOT CAUSE of boot hang (e63113b)
+
+### set-hostname-RPC
+- apply to live kernel via sethostname(2) immediately (f27243f)
+
+### scripts
+- uart-capture.sh — ready for when the UART adapter arrives (f0dde57)
+- qemu-openwrt-boot.sh — full OpenWrt + overlay in QEMU (7a3fd68)
+
+### qemu-boot.sh
+- fix platform + TOML config schema (b2e308e)
+
+### net.rs
+- unit tests for pure firewall-wiring helpers (2cd66ef)
+
+### integration-test
+- sync container clock before RPC tests (f5e227e)
+- skip flaky docker ps check, add retry for key derivation (75a9d60)
+
+### regression-tests
+- guard shipped service configs against known breakers (e8935a3)
+
+### status-RPC
+- surface the most recent log line per service (97f03a5)
+
+### debug-ssh-provisioner
+- don't set -e on missing dropbear host keys (82f3151)
+
+### image
+- don't strip stock packages + better NAT error logging (a15f6f6)
+
+### init.d/oxwrtctl
+- mode-switchable via /etc/oxwrt/mode (2c30527)
+
+### oxwrt
+- debug-ssh service + rootfs provisioner for PID-1 bring-up (4e74529)
+- initial commit — Rust PID-1 router firmware for GL-MT6000 (59f2f9e)
+
+### imagebuilder-overlay
+- auto-provision diag rootfs on first boot (60e5cf7)
+
+### hw-dump-+-config
+- map Flint 2 interfaces and IP (d68238e)

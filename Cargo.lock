@@ -1286,7 +1286,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "oxwrt-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "oxwrt-linux"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "caps",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "oxwrt-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "hex",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "oxwrtctl-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "oxwrtd"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bytes",
