@@ -200,9 +200,25 @@ if [ -f CHANGELOG.md ]; then
     # "## " heading (an existing release entry). If no such
     # heading exists yet — typical on the first post-bootstrap
     # run — append at the end after any preamble instructions.
-    awk -v s="$SECTION" '
+    #
+    # Why the temp file + `getline`: BSD awk (macOS) rejects
+    # embedded newlines in `-v var="..."`, so the previous
+    # `-v s="$SECTION"` shape worked on GNU awk but failed on
+    # macOS with `awk: newline in string`. Writing $SECTION to a
+    # tempfile and slurping it via `getline` sidesteps the
+    # BSD-vs-GNU awk difference entirely.
+    SECTION_TMP=$(mktemp -t oxwrt-changelog-section.XXXXXX)
+    trap 'rm -f "$SECTION_TMP"' EXIT
+    printf "%s\n" "$SECTION" > "$SECTION_TMP"
+    awk -v section_path="$SECTION_TMP" '
+        function slurp_section() {
+            while ((getline line < section_path) > 0) {
+                print line
+            }
+            close(section_path)
+        }
         /^## / && !done {
-            print s
+            slurp_section()
             print ""
             done = 1
         }
@@ -210,11 +226,13 @@ if [ -f CHANGELOG.md ]; then
         END {
             if (!done) {
                 print ""
-                print s
+                slurp_section()
             }
         }
     ' CHANGELOG.md > CHANGELOG.md.new
     mv CHANGELOG.md.new CHANGELOG.md
+    rm -f "$SECTION_TMP"
+    trap - EXIT
 else
     printf "%s" "$CHANGELOG_PREAMBLE" > CHANGELOG.md
     printf "%s\n" "$SECTION" >> CHANGELOG.md
