@@ -74,6 +74,20 @@ jobs:
       - name: install cargo-zigbuild
         run: cargo install --locked cargo-zigbuild
 
+      # QEMU binfmt handlers for arm64 containers. The
+      # services-debug-ssh + services-dns + services-dhcp +
+      # services-ntp Makefile targets run `docker --platform
+      # linux/arm64 alpine:3.20` to stage aarch64 binaries into
+      # the image — without binfmt registered, the x86_64 runner
+      # fails with `exec /bin/sh: exec format error` (v0.2.0's
+      # first attempt died here). `setup-qemu-action` installs
+      # the tonistiigi/binfmt image and registers handlers via
+      # /proc/sys/fs/binfmt_misc. Takes ~3s on cache-warm runs.
+      - name: register qemu binfmt handlers (arm64)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       # ── caches ───────────────────────────────────────────────────
       - name: cache cargo + target
         uses: actions/cache@v4
