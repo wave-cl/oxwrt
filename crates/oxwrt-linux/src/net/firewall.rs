@@ -1346,6 +1346,10 @@ pub(crate) const CT_HELPERS: &[(&str, &str, &str)] = &[
     ("pptp", "pptp", "tcp"),
     ("h323", "H.323", "udp"),
     ("irc", "irc", "tcp"),
+    // RTSP ships in OpenWrt's `kmod-nf-nathelper-rtsp` (out-of-tree
+    // against mainline but packaged by OpenWrt). Bundled into the
+    // image by default.
+    ("rtsp", "rtsp", "tcp"),
 ];
 
 /// Look up a helper by name. Returns `(nft_type, l4proto)` or

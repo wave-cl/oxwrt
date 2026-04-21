@@ -640,8 +640,8 @@ action = "accept"
 # firewall — the data channel arrives on a random port and gets
 # dropped as an unsolicited connection.
 #
-# Supported helpers: "ftp", "sip", "tftp", "pptp", "h323", "irc".
-# Kernel modules (kmod-nf-conntrack-*) ship in every image —
+# Supported helpers: "ftp", "sip", "tftp", "pptp", "h323", "irc",
+# "rtsp". Kernel modules (kmod-nf-nathelper*) ship in every image —
 # the helper is lazy-loaded when an `nft ct helper` object with
 # the matching type is created. Rule MUST set `dest_port` so the
 # helper anchors to the control channel's well-known port; a

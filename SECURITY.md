@@ -308,9 +308,6 @@ The zone/rule abstraction now matches fw4 feature-for-feature on
 everything a home-router or small-fleet operator routinely
 touches. Two deliberate non-goals remain:
 
-- **RTSP conntrack helper.** Not in mainline `nf_conntrack` (only
-  in a handful of vendor trees); not shipped. FTP, SIP, TFTP,
-  PPTP, H.323, and IRC are all supported.
 - **Includes.** fw4 sources external rule files via `config
   include`. oxwrt's config is single-file by design (plus the
   secrets overlay); the raw_nft escape hatch covers the
@@ -326,7 +323,7 @@ zone `default_output`, zone `mtu_fix` (TCP MSS clamping), rule
 `src_ip`/`dest_ip`/`src_mac`/`src_port`/`icmp_type`/`family`/
 `limit`/`log`/`enabled`/`counter`/`limit_burst`/`reject_with`/
 `device`, rule `helper` (CT helpers — FTP, SIP, TFTP, PPTP,
-H.323, IRC; rendered as `ct helper` objects in `inet oxwrt` +
+H.323, IRC, RTSP; rendered as `ct helper` objects in `inet oxwrt` +
 companion rules in a priority-raw prerouting chain; kernel
 modules shipped in every image), **rule-level QoS mangle**
 (`set_mark` for netfilter fwmark, `set_dscp` for DiffServ code

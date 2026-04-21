@@ -325,7 +325,7 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         // List of supported helpers kept in sync with firewall.rs
         // CT_HELPERS (we can't import across the cfg-gate without
         // pulling oxwrt-linux into cross-platform validation).
-        const SUPPORTED: &[&str] = &["ftp", "sip", "tftp", "pptp", "h323", "irc"];
+        const SUPPORTED: &[&str] = &["ftp", "sip", "tftp", "pptp", "h323", "irc", "rtsp"];
         if !SUPPORTED.contains(&helper) {
             return Err(format!(
                 "rule {}: unknown helper {:?}; supported: {}",
@@ -340,7 +340,7 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
                 rule.name,
                 helper,
                 match helper {
-                    "ftp" | "pptp" | "irc" => "TCP",
+                    "ftp" | "pptp" | "irc" | "rtsp" => "TCP",
                     "sip" | "tftp" | "h323" => "UDP",
                     _ => "L4",
                 }
