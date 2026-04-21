@@ -1,25 +1,35 @@
 name: Release
 
-# Tag-triggered release pipeline. On `v*` tag push:
-#   1. Cross-build oxwrtd (aarch64-musl, target image) + oxctl
-#      (Linux-x86_64, Linux-aarch64-musl, darwin-aarch64) release
-#      binaries.
-#   2. Build the OpenWrt sysupgrade image via the Makefile's
-#      imagebuilder-image target (Docker sandbox for case-sensitive
-#      FS).
-#   3. Sign the .bin with the OXWRT_SIGNING_KEY repo secret using
-#      `oxctl --sign`.
-#   4. Create a GitHub Release at the tag with the .bin + .sig +
-#      all oxctl binaries attached, using the just-prepended
-#      CHANGELOG section as the release body.
+# Tag-triggered release pipeline. On `v*` tag push, three jobs
+# fan out then back in:
 #
-# Concurrency: one release run per tag. Cancel-in-progress is OFF
-# because a half-done release leaves artifacts in an ambiguous
-# state on the GitHub UI — we'd rather let it finish or fail
-# cleanly than get stuck at step 3 of 4.
+#   build-linux   — ubuntu-latest. Cross-builds oxwrtd + oxctl for
+#                   the router (aarch64-musl) and the Linux client
+#                   (x86_64 + aarch64-musl), runs `make imagebuilder-
+#                   image` in Docker, signs the .bin with
+#                   OXWRT_SIGNING_KEY, uploads the five artifacts
+#                   (.bin, .bin.sig, oxctl-linux-*) for the publish
+#                   job.
+#   build-darwin  — macos-latest. Native-builds oxctl for both
+#                   Apple Silicon (aarch64-apple-darwin) and Intel
+#                   (x86_64-apple-darwin). Has to live on a macOS
+#                   runner because the Apple SDK (Security.framework,
+#                   CoreFoundation.framework) isn't on ubuntu runners
+#                   and cargo-zigbuild can't substitute for it. Both
+#                   archs build via `rustup target add` + cargo —
+#                   macOS's Xcode ships the cross-SDK for both.
+#   publish       — ubuntu-latest, needs both build-* jobs. Pulls
+#                   every artifact from the upstream jobs, extracts
+#                   the CHANGELOG section for the tag, and invokes
+#                   softprops/action-gh-release to create the release
+#                   with six assets attached.
 #
-# Permissions: `contents: write` is required for softprops to
-# push the release. `GITHUB_TOKEN` is scoped to this repo only.
+# Concurrency: one release run per tag. Cancel-in-progress is OFF —
+# a half-done release leaves artifacts in an ambiguous state on the
+# GitHub UI; we'd rather let it finish or fail cleanly.
+#
+# Permissions: `contents: write` on the publish job for softprops.
+# GITHUB_TOKEN is scoped to this repo only.
 #
 # See RELEASING.md for the end-to-end operator runbook.
 
@@ -32,27 +42,23 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-publish:
-    name: Build, sign, publish ${{ github.ref_name }}
+  # ── Linux: oxwrtd + oxctl-linux-* + sysupgrade image + sign ─────
+  build-linux:
+    name: Build Linux + image (${{ github.ref_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
 
     steps:
-      # ── checkouts ────────────────────────────────────────────────
       - name: checkout oxwrt
         uses: actions/checkout@v4
         with:
           path: oxwrt
-          # Fetch depth 0 so the CHANGELOG-extraction step can
-          # read the commit history for context if needed.
-          fetch-depth: 0
 
       - name: checkout squic-rust sibling
         uses: actions/checkout@v4
@@ -60,11 +66,10 @@ jobs:
           repository: wave-cl/squic-rust
           path: squic-rust
 
-      # ── toolchains ───────────────────────────────────────────────
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl, x86_64-apple-darwin, aarch64-apple-darwin
+          targets: aarch64-unknown-linux-musl
 
       - name: install zig
         uses: goto-bus-stop/setup-zig@v2
@@ -74,21 +79,16 @@ jobs:
       - name: install cargo-zigbuild
         run: cargo install --locked cargo-zigbuild
 
-      # QEMU binfmt handlers for arm64 containers. The
-      # services-debug-ssh + services-dns + services-dhcp +
-      # services-ntp Makefile targets run `docker --platform
-      # linux/arm64 alpine:3.20` to stage aarch64 binaries into
-      # the image — without binfmt registered, the x86_64 runner
-      # fails with `exec /bin/sh: exec format error` (v0.2.0's
-      # first attempt died here). `setup-qemu-action` installs
-      # the tonistiigi/binfmt image and registers handlers via
-      # /proc/sys/fs/binfmt_misc. Takes ~3s on cache-warm runs.
+      # QEMU binfmt handlers for arm64 containers. The services-*
+      # Makefile targets run `docker --platform linux/arm64
+      # alpine:3.20` to stage aarch64 binaries into the image; without
+      # binfmt registered, the x86_64 runner fails with `exec /bin/sh:
+      # exec format error`.
       - name: register qemu binfmt handlers (arm64)
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      # ── caches ───────────────────────────────────────────────────
       - name: cache cargo + target
         uses: actions/cache@v4
         with:
@@ -107,7 +107,6 @@ jobs:
           path: oxwrt/imagebuilder
           key: openwrt-imagebuilder-25.12.2-mediatek-filogic
 
-      # ── binaries ─────────────────────────────────────────────────
       - name: cross-build oxwrtd (aarch64-musl)
         working-directory: oxwrt
         run: |
@@ -124,25 +123,6 @@ jobs:
           cargo zigbuild --release \
             --target aarch64-unknown-linux-musl -p oxwrtctl-cli
 
-      # Darwin variants via zig-cc. Both Intel (x86_64) and Apple
-      # Silicon (aarch64) Macs are common in the operator crowd;
-      # publishing prebuilt binaries saves anyone flashing the
-      # router from having to `cargo build -p oxwrtctl-cli` on a
-      # fresh Rust install. Zig provides the MachO linker so no
-      # Xcode-on-Linux shenanigans needed.
-      - name: cross-build oxctl (Darwin-x86_64)
-        working-directory: oxwrt
-        run: |
-          cargo zigbuild --release \
-            --target x86_64-apple-darwin -p oxwrtctl-cli
-
-      - name: cross-build oxctl (Darwin-aarch64)
-        working-directory: oxwrt
-        run: |
-          cargo zigbuild --release \
-            --target aarch64-apple-darwin -p oxwrtctl-cli
-
-      # ── openwrt imagebuilder tarball ─────────────────────────────
       - name: download openwrt imagebuilder
         working-directory: oxwrt
         run: |
@@ -156,16 +136,10 @@ jobs:
             rm imagebuilder.tar.zst
           fi
 
-      # ── bake release-signing pubkey into the image ──────────────
-      # Decodes the hex public-key repo variable to 32 raw bytes
-      # at provisioning/release-pubkey.ed25519 where the
-      # imagebuilder-stage target picks it up automatically
-      # (Makefile:916-927). Variable OXWRT_RELEASE_PUBKEY_HEX is a
-      # public repo variable, not a secret — it's intentionally
-      # visible and the same value gets baked into every released
-      # image. Set it once at
-      # https://github.com/wave-cl/oxwrt/settings/variables/actions
-      # to the output of `xxd -p provisioning/release-pubkey.ed25519`.
+      # Decode the public pubkey-hex repo variable into
+      # provisioning/release-pubkey.ed25519 where imagebuilder-stage
+      # (Makefile:916-927) picks it up. Public by design — every
+      # image bakes the same pubkey.
       - name: bake release pubkey
         if: vars.OXWRT_RELEASE_PUBKEY_HEX != ''
         working-directory: oxwrt
@@ -176,25 +150,13 @@ jobs:
           test "$(wc -c < provisioning/release-pubkey.ed25519)" = 32
           echo "baked release-pubkey.ed25519 (32 bytes)"
 
-      # ── build the sysupgrade image ───────────────────────────────
-      # make imagebuilder-image shells out to docker internally
-      # (Makefile:1082). GitHub-hosted runners have docker
-      # pre-installed; no setup needed.
       - name: build sysupgrade image
         working-directory: oxwrt
         run: make imagebuilder-image
 
-      # docker-on-Linux runs the container as root, so the
-      # imagebuilder's output (.bin, packages/, bin/, build_dir/)
-      # ends up owned by uid 0. The GHA runner's non-root user
-      # then can't create a sibling `.sig` file next to the bin,
-      # producing:
-      #   oxctl --sign: write …/sysupgrade.bin.sig:
-      #     Permission denied (os error 13)
-      # macOS Docker Desktop hides this because it remaps
-      # container-root to host-user; Linux doesn't. Chown the
-      # tree back to the runner before any step that writes
-      # into it.
+      # docker-on-Linux runs the container as root, so .bin +
+      # parent dir end up uid 0. Chown back to the runner before
+      # any step that writes a sibling file.
       - name: chown imagebuilder output back to runner
         working-directory: oxwrt
         run: sudo chown -R "$(id -u):$(id -g)" imagebuilder/
@@ -211,10 +173,8 @@ jobs:
           fi
           echo "path=$IMG" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$IMG")" >> "$GITHUB_OUTPUT"
-          echo "located: $IMG"
           ls -lh "$IMG"
 
-      # ── sign the image ───────────────────────────────────────────
       - name: sign sysupgrade image
         working-directory: oxwrt
         env:
@@ -222,14 +182,12 @@ jobs:
         run: |
           if [ -z "$OXWRT_SIGNING_KEY" ]; then
             echo "::warning::OXWRT_SIGNING_KEY repo secret not set — publishing unsigned image"
-            echo "  (see RELEASING.md for one-time signing-key setup)"
             exit 0
           fi
           ./target/release/oxctl --sign "${{ steps.image.outputs.path }}"
           ls -lh "${{ steps.image.outputs.path }}.sig"
 
-      # ── stage release binaries under predictable names ──────────
-      - name: stage release artifacts
+      - name: stage linux artifacts
         working-directory: oxwrt
         run: |
           mkdir -p release
@@ -240,16 +198,126 @@ jobs:
           cp target/release/oxctl release/oxctl-linux-x86_64
           cp target/aarch64-unknown-linux-musl/release/oxctl \
              release/oxctl-linux-aarch64-musl
-          cp target/x86_64-apple-darwin/release/oxctl \
-             release/oxctl-darwin-x86_64
-          cp target/aarch64-apple-darwin/release/oxctl \
-             release/oxctl-darwin-aarch64
           ls -lh release/
 
-      # ── extract this release's CHANGELOG section ────────────────
-      # The release-body section for vX.Y.Z is the first
-      # `## [X.Y.Z]` heading and everything up to the next `## `
-      # heading. `release.sh` writes exactly that shape.
+      - name: upload linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: oxwrt/release/
+          retention-days: 7
+
+  # ── Darwin: oxctl-darwin-x86_64 + oxctl-darwin-aarch64 ──────────
+  #
+  # Has to live on a macOS runner because the Apple SDK
+  # (Security.framework, CoreFoundation.framework) isn't present
+  # on ubuntu-latest and cargo-zigbuild can't substitute for it
+  # (prior attempt: `error: unable to find framework 'Security'`).
+  # Xcode on macos-latest ships both archs' SDKs, so rustup +
+  # cargo handle both targets natively without any cross-compile
+  # plumbing.
+  build-darwin:
+    name: Build Darwin oxctl (${{ github.ref_name }})
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: checkout oxwrt
+        uses: actions/checkout@v4
+        with:
+          path: oxwrt
+
+      - name: checkout squic-rust sibling
+        uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+
+      - name: cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            oxwrt/target
+          key: ${{ runner.os }}-darwin-cargo-${{ hashFiles('oxwrt/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-darwin-cargo-
+
+      # macos-latest runners are currently Apple Silicon (macos-14).
+      # Building x86_64-apple-darwin from there is a standard
+      # cross-compile — Xcode's SDK covers both archs, so cargo does
+      # it natively without any zigbuild / special linker shim.
+      - name: build oxctl (Darwin-aarch64)
+        working-directory: oxwrt
+        run: |
+          cargo build --release \
+            --target aarch64-apple-darwin -p oxwrtctl-cli
+
+      - name: build oxctl (Darwin-x86_64)
+        working-directory: oxwrt
+        run: |
+          cargo build --release \
+            --target x86_64-apple-darwin -p oxwrtctl-cli
+
+      - name: stage darwin artifacts
+        working-directory: oxwrt
+        run: |
+          mkdir -p release
+          cp target/aarch64-apple-darwin/release/oxctl \
+             release/oxctl-darwin-aarch64
+          cp target/x86_64-apple-darwin/release/oxctl \
+             release/oxctl-darwin-x86_64
+          ls -lh release/
+
+      - name: upload darwin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-release
+          path: oxwrt/release/
+          retention-days: 7
+
+  # ── Publish: pull both fan-in artifacts + create GitHub release ─
+  publish:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-darwin]
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: checkout oxwrt
+        uses: actions/checkout@v4
+        with:
+          path: oxwrt
+          fetch-depth: 0
+
+      - name: download linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: release/
+
+      - name: download darwin artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: darwin-release
+          path: release/
+
+      - name: list collected artifacts
+        run: ls -lh release/
+
+      # Extract the CHANGELOG section for this tag — the text
+      # `release.sh` prepends between `## [X.Y.Z]` and the next
+      # `## ` heading. Fallback to the tag message if CHANGELOG
+      # doesn't have a matching section.
       - name: extract release notes
         working-directory: oxwrt
         env:
@@ -266,10 +334,8 @@ jobs:
             git for-each-ref --format='%(contents)' \
               "refs/tags/$TAG_VERSION" > release-notes.md
           fi
-          echo "--- release notes preview ---"
           head -20 release-notes.md
 
-      # ── create the github release ────────────────────────────────
       - name: publish github release
         uses: softprops/action-gh-release@v2
         with:
@@ -279,13 +345,12 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           # Signing skipped when OXWRT_SIGNING_KEY is unset; the
-          # missing `.sig` shouldn't fail the release. The sign
-          # step logs a ::warning:: above in that case.
+          # missing `.sig` shouldn't fail the release.
           fail_on_unmatched_files: false
           files: |
-            oxwrt/release/${{ steps.image.outputs.name }}
-            oxwrt/release/${{ steps.image.outputs.name }}.sig
-            oxwrt/release/oxctl-linux-x86_64
-            oxwrt/release/oxctl-linux-aarch64-musl
-            oxwrt/release/oxctl-darwin-x86_64
-            oxwrt/release/oxctl-darwin-aarch64
+            release/${{ needs.build-linux.outputs.image_name }}
+            release/${{ needs.build-linux.outputs.image_name }}.sig
+            release/oxctl-linux-x86_64
+            release/oxctl-linux-aarch64-musl
+            release/oxctl-darwin-x86_64
+            release/oxctl-darwin-aarch64
