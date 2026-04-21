@@ -1,0 +1,238 @@
+name: Release
+
+# Tag-triggered release pipeline. On `v*` tag push:
+#   1. Cross-build oxwrtd (aarch64-musl, target image) + oxctl
+#      (Linux-x86_64, Linux-aarch64-musl, darwin-aarch64) release
+#      binaries.
+#   2. Build the OpenWrt sysupgrade image via the Makefile's
+#      imagebuilder-image target (Docker sandbox for case-sensitive
+#      FS).
+#   3. Sign the .bin with the OXWRT_SIGNING_KEY repo secret using
+#      `oxctl --sign`.
+#   4. Create a GitHub Release at the tag with the .bin + .sig +
+#      all oxctl binaries attached, using the just-prepended
+#      CHANGELOG section as the release body.
+#
+# Concurrency: one release run per tag. Cancel-in-progress is OFF
+# because a half-done release leaves artifacts in an ambiguous
+# state on the GitHub UI — we'd rather let it finish or fail
+# cleanly than get stuck at step 3 of 4.
+#
+# Permissions: `contents: write` is required for softprops to
+# push the release. `GITHUB_TOKEN` is scoped to this repo only.
+#
+# See RELEASING.md for the end-to-end operator runbook.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-publish:
+    name: Build, sign, publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      # ── checkouts ────────────────────────────────────────────────
+      - name: checkout oxwrt
+        uses: actions/checkout@v4
+        with:
+          path: oxwrt
+          # Fetch depth 0 so the CHANGELOG-extraction step can
+          # read the commit history for context if needed.
+          fetch-depth: 0
+
+      - name: checkout squic-rust sibling
+        uses: actions/checkout@v4
+        with:
+          repository: wave-cl/squic-rust
+          path: squic-rust
+
+      # ── toolchains ───────────────────────────────────────────────
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: install zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      # ── caches ───────────────────────────────────────────────────
+      - name: cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            oxwrt/target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('oxwrt/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-cargo-
+
+      - name: cache openwrt imagebuilder
+        uses: actions/cache@v4
+        with:
+          path: oxwrt/imagebuilder
+          key: openwrt-imagebuilder-25.12.2-mediatek-filogic
+
+      # ── binaries ─────────────────────────────────────────────────
+      - name: cross-build oxwrtd (aarch64-musl)
+        working-directory: oxwrt
+        run: |
+          cargo zigbuild --release \
+            --target aarch64-unknown-linux-musl -p oxwrtd
+
+      - name: build oxctl (host Linux-x86_64)
+        working-directory: oxwrt
+        run: cargo build --release -p oxwrtctl-cli
+
+      - name: cross-build oxctl (Linux-aarch64-musl)
+        working-directory: oxwrt
+        run: |
+          cargo zigbuild --release \
+            --target aarch64-unknown-linux-musl -p oxwrtctl-cli
+
+      # ── openwrt imagebuilder tarball ─────────────────────────────
+      - name: download openwrt imagebuilder
+        working-directory: oxwrt
+        run: |
+          if [ ! -d imagebuilder/openwrt-imagebuilder-25.12.2-mediatek-filogic.Linux-x86_64 ]; then
+            mkdir -p imagebuilder
+            cd imagebuilder
+            curl -fsSL \
+              https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/openwrt-imagebuilder-25.12.2-mediatek-filogic.Linux-x86_64.tar.zst \
+              -o imagebuilder.tar.zst
+            tar --zstd -xf imagebuilder.tar.zst
+            rm imagebuilder.tar.zst
+          fi
+
+      # ── bake release-signing pubkey into the image ──────────────
+      # Decodes the hex public-key repo variable to 32 raw bytes
+      # at provisioning/release-pubkey.ed25519 where the
+      # imagebuilder-stage target picks it up automatically
+      # (Makefile:916-927). Variable OXWRT_RELEASE_PUBKEY_HEX is a
+      # public repo variable, not a secret — it's intentionally
+      # visible and the same value gets baked into every released
+      # image. Set it once at
+      # https://github.com/wave-cl/oxwrt/settings/variables/actions
+      # to the output of `xxd -p provisioning/release-pubkey.ed25519`.
+      - name: bake release pubkey
+        if: vars.OXWRT_RELEASE_PUBKEY_HEX != ''
+        working-directory: oxwrt
+        run: |
+          mkdir -p provisioning
+          echo "${{ vars.OXWRT_RELEASE_PUBKEY_HEX }}" \
+            | xxd -r -p > provisioning/release-pubkey.ed25519
+          test "$(wc -c < provisioning/release-pubkey.ed25519)" = 32
+          echo "baked release-pubkey.ed25519 (32 bytes)"
+
+      # ── build the sysupgrade image ───────────────────────────────
+      # make imagebuilder-image shells out to docker internally
+      # (Makefile:1082). GitHub-hosted runners have docker
+      # pre-installed; no setup needed.
+      - name: build sysupgrade image
+        working-directory: oxwrt
+        run: make imagebuilder-image
+
+      - name: locate sysupgrade image
+        id: image
+        working-directory: oxwrt
+        run: |
+          IMG=$(find imagebuilder/*/bin -name '*-sysupgrade.bin' | head -1)
+          if [ -z "$IMG" ]; then
+            echo "No sysupgrade .bin found" >&2
+            find imagebuilder -name '*.bin' >&2 || true
+            exit 1
+          fi
+          echo "path=$IMG" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$IMG")" >> "$GITHUB_OUTPUT"
+          echo "located: $IMG"
+          ls -lh "$IMG"
+
+      # ── sign the image ───────────────────────────────────────────
+      - name: sign sysupgrade image
+        working-directory: oxwrt
+        env:
+          OXWRT_SIGNING_KEY: ${{ secrets.OXWRT_SIGNING_KEY }}
+        run: |
+          if [ -z "$OXWRT_SIGNING_KEY" ]; then
+            echo "::warning::OXWRT_SIGNING_KEY repo secret not set — publishing unsigned image"
+            echo "  (see RELEASING.md for one-time signing-key setup)"
+            exit 0
+          fi
+          ./target/release/oxctl --sign "${{ steps.image.outputs.path }}"
+          ls -lh "${{ steps.image.outputs.path }}.sig"
+
+      # ── stage release binaries under predictable names ──────────
+      - name: stage release artifacts
+        working-directory: oxwrt
+        run: |
+          mkdir -p release
+          cp "${{ steps.image.outputs.path }}" release/
+          if [ -f "${{ steps.image.outputs.path }}.sig" ]; then
+            cp "${{ steps.image.outputs.path }}.sig" release/
+          fi
+          cp target/release/oxctl release/oxctl-linux-x86_64
+          cp target/aarch64-unknown-linux-musl/release/oxctl \
+             release/oxctl-linux-aarch64-musl
+          ls -lh release/
+
+      # ── extract this release's CHANGELOG section ────────────────
+      # The release-body section for vX.Y.Z is the first
+      # `## [X.Y.Z]` heading and everything up to the next `## `
+      # heading. `release.sh` writes exactly that shape.
+      - name: extract release notes
+        working-directory: oxwrt
+        env:
+          TAG_VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_VERSION#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") { inside = 1; print; next }
+            inside && /^## / { inside = 0 }
+            inside { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG missing section for $TAG_VERSION — falling back to tag message"
+            git for-each-ref --format='%(contents)' \
+              "refs/tags/$TAG_VERSION" > release-notes.md
+          fi
+          echo "--- release notes preview ---"
+          head -20 release-notes.md
+
+      # ── create the github release ────────────────────────────────
+      - name: publish github release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: oxwrt ${{ github.ref_name }}
+          body_path: oxwrt/release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Signing skipped when OXWRT_SIGNING_KEY is unset; the
+          # missing `.sig` shouldn't fail the release. The sign
+          # step logs a ::warning:: above in that case.
+          fail_on_unmatched_files: false
+          files: |
+            oxwrt/release/${{ steps.image.outputs.name }}
+            oxwrt/release/${{ steps.image.outputs.name }}.sig
+            oxwrt/release/oxctl-linux-x86_64
+            oxwrt/release/oxctl-linux-aarch64-musl
