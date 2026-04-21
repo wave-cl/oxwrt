@@ -24,10 +24,13 @@
 #     bump-commit rolls in on top of unrelated edits.
 #   - Running from the repo root.
 #
-# Future hook: signed firmware (tracked in SECURITY.md) will add
-# an artifact-signing step after commit-and-tag. Leave the tag
-# creation at the end so that the signing step can trigger on
-# `git tag --verify vX.Y.Z`.
+# For production releases, CI workflow `release.yml` picks up the
+# tag push and does the build+sign+publish in one go. The local
+# signing block below is a fallback for operators cutting a
+# release entirely off-network.
+#
+# See RELEASING.md for the end-to-end runbook, signing-key setup,
+# and post-release verification steps.
 
 set -eu
 
@@ -232,20 +235,30 @@ git tag -a "$TAG" -m "oxwrt $TAG
 $(echo "$GROUPED")"
 
 # ── optional: sign firmware artifacts if present ──
-# After the tag lands, look for firmware images matching
-# `build/*.bin` or `build/*.img` and emit a detached .sig next
-# to each using `oxctl --sign`. Skipped silently when no image
-# is present (which is the case when the script is invoked
-# from a source-only release — image builds live in a separate
-# `make image` target and may or may not have run yet).
+# After the tag lands, walk for firmware images across both the
+# historical `build/*.{bin,img}` layout AND the imagebuilder's
+# actual output path `build/imagebuilder/bin/targets/**/*-sysupgrade.bin`
+# (where `make imagebuilder-image` drops artifacts). Emit a
+# detached .sig next to each via `oxctl --sign`. Skipped
+# silently when no image is present (source-only release, or
+# the CI workflow is doing the image build).
 #
-# Requires OXWRT_SIGNING_KEY_PATH or OXWRT_SIGNING_KEY env set;
-# otherwise emits a warning and skips. `oxctl --sign` is built
-# from this workspace so we know it exists.
-if ls build/*.bin build/*.img 2>/dev/null | grep -q .; then
+# For CI-driven releases, `.github/workflows/release.yml` builds
+# + signs with `OXWRT_SIGNING_KEY` from repo secrets. This local
+# block is the offline fallback — see RELEASING.md for setup.
+IMAGES=$(
+    { ls build/*.bin build/*.img 2>/dev/null || true; } \
+    | grep -v '\.sig$' || true
+)
+if [ -d build/imagebuilder/bin ]; then
+    FOUND_IB=$(find build/imagebuilder/bin -type f \
+        \( -name '*.bin' -o -name '*.img' \) ! -name '*.sig' 2>/dev/null || true)
+    IMAGES=$(printf "%s\n%s" "$IMAGES" "$FOUND_IB" | sed '/^$/d')
+fi
+if [ -n "$IMAGES" ]; then
     if [ -n "${OXWRT_SIGNING_KEY_PATH:-}${OXWRT_SIGNING_KEY:-}" ]; then
         if [ -x target/release/oxctl ]; then
-            for img in build/*.bin build/*.img; do
+            echo "$IMAGES" | while IFS= read -r img; do
                 [ -f "$img" ] || continue
                 echo "release.sh: signing $img ..."
                 target/release/oxctl --sign "$img"
@@ -256,8 +269,15 @@ if ls build/*.bin build/*.img 2>/dev/null | grep -q .; then
         fi
     else
         echo "release.sh: firmware images present but no signing key env set — skipping signatures" >&2
-        echo "  (set OXWRT_SIGNING_KEY_PATH=./release-signing.key or OXWRT_SIGNING_KEY=<hex>)" >&2
+        echo "  (see RELEASING.md → 'One-time setup: release-signing keypair')" >&2
     fi
+    # Summary so the operator sees exactly what to upload.
+    echo ""
+    echo "---- firmware artifacts ----"
+    echo "$IMAGES" | while IFS= read -r img; do
+        [ -f "$img" ] || continue
+        ls -lh "$img" "$img.sig" 2>/dev/null || ls -lh "$img"
+    done
 fi
 
 # ── finale: paste-ready release body ──
