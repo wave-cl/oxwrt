@@ -166,6 +166,21 @@ jobs:
         working-directory: oxwrt
         run: make imagebuilder-image
 
+      # docker-on-Linux runs the container as root, so the
+      # imagebuilder's output (.bin, packages/, bin/, build_dir/)
+      # ends up owned by uid 0. The GHA runner's non-root user
+      # then can't create a sibling `.sig` file next to the bin,
+      # producing:
+      #   oxctl --sign: write …/sysupgrade.bin.sig:
+      #     Permission denied (os error 13)
+      # macOS Docker Desktop hides this because it remaps
+      # container-root to host-user; Linux doesn't. Chown the
+      # tree back to the runner before any step that writes
+      # into it.
+      - name: chown imagebuilder output back to runner
+        working-directory: oxwrt
+        run: sudo chown -R "$(id -u):$(id -g)" imagebuilder/
+
       - name: locate sysupgrade image
         id: image
         working-directory: oxwrt
