@@ -683,6 +683,26 @@ action = "accept"
 # action = "accept"
 # set_dscp = "cs1"              # bulk/scavenger class
 #
+# NOTRACK: bypass conntrack for the matching flow. Use sparingly
+# — on a conntrack'd packet you get port-forwards, masquerade,
+# stateful filter, helpers. notrack'd packets skip all of that.
+# Appropriate for flows where per-packet conntrack cost is
+# measurable (multi-gigabit forwarding paths, bulk IPsec) and the
+# state isn't needed (the flow is already stateful at a higher
+# layer). Rule's filter verdict still fires; `notrack` adds a
+# separate priority-raw prerouting effect.
+#
+# Validator rejects `notrack = true` + `helper = "..."` together —
+# notrack disables conntrack, so the helper never attaches.
+#
+# [[firewall.rules]]
+# name = "notrack-mdns"
+# proto = "udp"
+# dest_port = 5353
+# action = "accept"
+# notrack = true                # mDNS is fire-and-forget multicast;
+#                               # nothing needs to track the return
+#
 # IPv6-only restriction. Without `family`, a rule with no
 # address carriers applies to both families. `family = "ipv6"`
 # emits `meta nfproto ipv6` on the way in.

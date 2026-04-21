@@ -301,6 +301,18 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         }
     }
 
+    // notrack + helper on the same rule: the helper won't fire
+    // because conntrack's disabled for the packet. Silently
+    // rendering both would confuse the operator when FTP still
+    // breaks. Reject the pairing.
+    if rule.notrack && rule.helper.is_some() {
+        return Err(format!(
+            "rule {}: notrack = true is incompatible with helper = {:?} \
+             (notrack bypasses conntrack so the helper never attaches)",
+            rule.name, rule.helper
+        ));
+    }
+
     // CT helper must name a known helper in the static registry.
     // Unknown names would render as `ct helper set "typo"` which
     // nft refuses to parse (the helper object isn't declared),
@@ -793,6 +805,7 @@ mod tests {
                     helper: None,
                     set_mark: None,
                     set_dscp: None,
+                    notrack: false,
                 }],
                 raw_nft: vec![],
                 defaults: Default::default(),
@@ -957,6 +970,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -991,6 +1005,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -1025,6 +1040,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -1061,6 +1077,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -1096,6 +1113,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -1131,6 +1149,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -1166,6 +1185,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -1200,6 +1220,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1238,6 +1259,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1276,6 +1298,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         }
     }
 
@@ -1390,6 +1413,31 @@ listen = ["[::1]:51820"]
 authorized_keys = "/x"
 "#;
         toml::from_str(toml).unwrap()
+    }
+
+    // ── NOTRACK ────────────────────────────────────────────────────
+
+    #[test]
+    fn rule_notrack_with_helper_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bad-pair");
+        r.notrack = true;
+        r.helper = Some("ftp".to_string());
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(oxwrt_api::config::PortSpec::Single(21));
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("notrack"), "got: {err}");
+        assert!(err.contains("helper"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_notrack_alone_ok() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bypass");
+        r.notrack = true;
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(oxwrt_api::config::PortSpec::Single(5353));
+        assert!(check_rule_zone_refs(&r, &cfg).is_ok());
     }
 
     // ── QoS mangle: set_mark + set_dscp ────────────────────────────

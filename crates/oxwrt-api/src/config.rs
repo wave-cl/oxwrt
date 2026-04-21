@@ -1381,6 +1381,23 @@ pub struct Rule {
     /// for the helpers listed above).
     #[serde(default)]
     pub helper: Option<String>,
+    /// Bypass conntrack for matching packets. Rendered as a
+    /// companion rule in a priority-raw prerouting chain that
+    /// emits `notrack`. Use for high-throughput flows where the
+    /// per-packet conntrack cost is measurable (multi-gigabit
+    /// forwarding, high-PPS DNS resolvers, IPsec bulk transport)
+    /// — the tradeoff is that stateful filtering, port forwards,
+    /// masquerade, and helpers all stop working on notracked
+    /// packets. Leave off unless you have a specific profiling
+    /// signal pointing at conntrack overhead.
+    ///
+    /// `notrack` runs at priority -301 (before the helper chain
+    /// at -300) so notrack'd packets skip helper attachment too;
+    /// combining `notrack = true` with `helper = "..."` on the
+    /// same rule is undefined (the helper won't fire) and the
+    /// validator rejects that pairing.
+    #[serde(default)]
+    pub notrack: bool,
 }
 
 /// Reference from a firewall rule to an `[[ipsets]]` entry.

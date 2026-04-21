@@ -317,8 +317,13 @@ the fw4-parity passes:
 - **RTSP helper.** RTSP isn't in mainline nf_conntrack (only in
   a handful of vendor trees); not offered. FTP, SIP, TFTP, PPTP,
   H.323, and IRC are all supported.
-- **`target = "NOTRACK"` / CT zones.** Absent. Rare (high-
-  throughput forwarding paths or CGNAT-facing ISP setups).
+<!-- NOTRACK landed as rule-level `notrack = true`. Companion rule
+     in a priority-(-301) prerouting chain that emits `notrack`
+     before the helper chain (so notrack'd packets skip helper
+     attachment too). Validator rejects `notrack + helper` as
+     incompatible. CT zones per se aren't in scope — individual
+     rules can opt out, which covers the same use case. -->
+
 - **Absolute-date schedules.** Current `schedule` field covers
   day-of-week + hour-of-day recurring windows. Absolute ranges
   (`start_date`/`stop_date` for "block until 2026-06-01") would
@@ -344,8 +349,12 @@ modules shipped in every image), **rule-level QoS mangle**
 point — nft class names cs0..cs7 / af11..af43 / ef / be / va /
 le or a raw 0..63 integer; both emitted into a dedicated
 priority-mangle chain, dual-family rules auto-emit one rule
-per family gated by `meta nfproto`), port-forward `reflection`,
-IPv6 MASQUERADE66,
+per family gated by `meta nfproto`), rule `notrack`
+(conntrack bypass for high-throughput flows — companion rule in
+a priority-(-301) prerouting chain that emits nft's `notrack`
+before the filter hook runs; validator rejects notrack+helper as
+incompatible since notrack disables the conntrack the helper
+needs to attach to), port-forward `reflection`, IPv6 MASQUERADE66,
 **IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
 (installed into a dedicated `oxwrt-dnat6` nftables table with
 reflection + hairpin SNAT in `oxwrt-nat6`), **declarative

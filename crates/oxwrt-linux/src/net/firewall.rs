@@ -1177,6 +1177,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     let forwardings_script = build_forwardings_script(cfg);
     let ct_helpers_script = build_ct_helpers_script(cfg);
     let mangle_script = build_mangle_script(cfg);
+    let notrack_script = build_notrack_script(cfg);
 
     // Baseline defaults: ct state, ICMPv6 NDP/MLD, ICMP echo —
     // these are unconditional and emitted in text (rustables has
@@ -1199,7 +1200,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
     let combined = format!(
-        "{ipsets_prologue}{ct_helpers_script}{mangle_script}\
+        "{ipsets_prologue}{notrack_script}{ct_helpers_script}{mangle_script}\
          {baseline_script}{forwardings_script}{scheduled_script}"
     );
     if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
@@ -1457,6 +1458,75 @@ pub(crate) fn build_ct_helpers_script(cfg: &Config) -> String {
         out.push_str(&format!(
             "add rule inet oxwrt helper_prerouting {iif_frag}{l4proto} dport {port_frag} \
              ct helper set \"{helper}\"\n"
+        ));
+    }
+    out
+}
+
+/// Render notrack rules into a priority-raw prerouting chain.
+/// Emitted only when at least one enabled rule has
+/// `notrack = true`. The chain lives at priority -301 (one step
+/// earlier than helper_prerouting's -300) so notrack'd packets
+/// skip helper attachment too — otherwise the helper would run
+/// on a packet whose conntrack was just disabled and produce
+/// nothing useful.
+///
+/// Match prefix mirrors the mangle chain's: iif + oif + proto +
+/// dport. Other primitives (src_ip, limit, log, ct_state)
+/// belong to the filter-chain rule, not the raw-chain rule.
+pub(crate) fn build_notrack_script(cfg: &Config) -> String {
+    let any = cfg.firewall.rules.iter().any(|r| r.enabled && r.notrack);
+    if !any {
+        return String::new();
+    }
+    let mut out = String::new();
+    // Numeric priority -301 places this one step earlier than
+    // priority raw (-300), which is where helper_prerouting
+    // lives. Chain name is separate from helper_prerouting to
+    // keep `nft list chain` output scannable per-feature.
+    out.push_str(
+        "add chain inet oxwrt notrack_prerouting \
+         { type filter hook prerouting priority -301; policy accept; }\n",
+    );
+
+    for rule in &cfg.firewall.rules {
+        if !rule.enabled || !rule.notrack {
+            continue;
+        }
+        let mut prefix = String::new();
+        if let Some(dev) = rule.device.as_deref() {
+            prefix.push_str(&format!("iifname \"{dev}\" "));
+        } else if let Some(src) = rule.src.as_deref() {
+            let ifaces = zone_ifaces(cfg, src);
+            if !ifaces.is_empty() {
+                prefix.push_str(&fmt_iifname(&ifaces, /*oif=*/ false));
+                prefix.push(' ');
+            }
+        }
+        if let Some(proto) = rule.proto {
+            let proto_s = match proto {
+                Proto::Tcp => "tcp",
+                Proto::Udp => "udp",
+                Proto::Icmp => "icmp",
+                Proto::Both => "meta-both",
+            };
+            if proto_s == "meta-both" {
+                if let Some(port) = &rule.dest_port {
+                    prefix.push_str(&format!(
+                        "meta l4proto {{ tcp, udp }} th dport {} ",
+                        render_port_fragment(port)
+                    ));
+                } else {
+                    prefix.push_str("meta l4proto { tcp, udp } ");
+                }
+            } else if let Some(port) = &rule.dest_port {
+                prefix.push_str(&format!("{proto_s} dport {} ", render_port_fragment(port)));
+            } else if proto != Proto::Icmp {
+                prefix.push_str(&format!("meta l4proto {proto_s} "));
+            }
+        }
+        out.push_str(&format!(
+            "add rule inet oxwrt notrack_prerouting {prefix}notrack\n"
         ));
     }
     out
@@ -2520,6 +2590,7 @@ mod tests {
             helper: None,
             set_mark: None,
             set_dscp: None,
+            notrack: false,
         }
     }
 
@@ -3237,6 +3308,45 @@ authorized_keys = "/x"
             !s.contains("maxseg size set rt mtu"),
             "MSS clamp leaked when mtu_fix is off: {s}"
         );
+    }
+
+    // ── NOTRACK ────────────────────────────────────────────────────
+
+    #[test]
+    fn notrack_script_empty_when_no_rules_notrack() {
+        let cfg = minimal_config();
+        assert!(build_notrack_script(&cfg).is_empty());
+    }
+
+    #[test]
+    fn notrack_script_emits_chain_and_rule() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("bypass-mc");
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(PortSpec::Single(5353));
+        r.notrack = true;
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_notrack_script(&cfg);
+        assert!(s.contains("notrack_prerouting"), "{s}");
+        // Numeric priority -301 (one step earlier than raw/-300)
+        // so notrack runs before helper attachment.
+        assert!(s.contains("priority -301"), "{s}");
+        assert!(s.contains("udp dport 5353 notrack"), "{s}");
+    }
+
+    #[test]
+    fn notrack_forces_text_path_unneeded() {
+        // notrack is a separate chain, so the main rule with just
+        // `notrack = true` + proto + dport can still be rendered
+        // by the rustables path for the filter verdict. Confirm
+        // we don't accidentally require the text path for the
+        // filter rule itself.
+        let mut r = basic_rule("simple");
+        r.notrack = true;
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(80));
+        assert!(!rule_needs_text_path(&r));
     }
 
     // ── QoS: set_mark + set_dscp mangle chain ──────────────────────
