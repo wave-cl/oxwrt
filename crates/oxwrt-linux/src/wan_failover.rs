@@ -459,6 +459,8 @@ mod tests {
                 zones: vec![],
                 rules: vec![],
                 raw_nft: vec![],
+                defaults: Default::default(),
+                forwardings: vec![],
             },
             radios: vec![],
             wifi: vec![],

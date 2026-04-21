@@ -998,6 +998,78 @@ pub struct Firewall {
     /// oxwrt-managed set.
     #[serde(default)]
     pub raw_nft: Vec<RawNft>,
+    /// Global firewall defaults: synflood protection, invalid-ct
+    /// drop toggle. See `FirewallDefaults`.
+    #[serde(default)]
+    pub defaults: FirewallDefaults,
+    /// Declarative zone-to-zone accept shortcuts. Each entry
+    /// expands at install time into a FORWARD accept rule for
+    /// iifname=src_zone + oifname=dest_zone. Equivalent to
+    /// writing a `[[firewall.rules]]` with src + dest + action =
+    /// "accept", but shorter and matches fw4's `config forwarding`
+    /// shape for operators migrating off UCI. See `Forwarding`.
+    #[serde(default)]
+    pub forwardings: Vec<Forwarding>,
+}
+
+/// Global firewall defaults. Every field is opt-out (sane default
+/// ON) — these are the knobs where "off" is a deliberate
+/// performance trade-off, not a common config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FirewallDefaults {
+    /// Rate-limit SYN packets on the INPUT chain to 25/second with
+    /// burst of 50. Overflow drops. Matches fw4's
+    /// `synflood_protect = 1` default. Guards the router's own
+    /// listening sockets (sQUIC control plane, DNS forwarder,
+    /// etc.) from a SYN-flood DoS on a WAN-reachable IP. Off only
+    /// if you're already rate-limiting upstream or have a
+    /// specific reason (e.g. benchmarking).
+    #[serde(default = "default_true")]
+    pub synflood_protect: bool,
+    /// Drop packets whose conntrack state is `invalid` on INPUT
+    /// and FORWARD. Matches fw4's `drop_invalid = 1`. Invalid =
+    /// TCP out-of-window, post-RST stragglers, unexpected ACKs —
+    /// nothing legitimate matches. Off trades this belt for
+    /// diagnostic-visibility (tcpdump sees the junk instead of it
+    /// being dropped silently).
+    #[serde(default = "default_true")]
+    pub drop_invalid: bool,
+}
+
+impl Default for FirewallDefaults {
+    fn default() -> Self {
+        Self {
+            synflood_protect: true,
+            drop_invalid: true,
+        }
+    }
+}
+
+/// Zone-to-zone forward permission shortcut. Operators who want
+/// "LAN can forward to WAN" without writing a rule block use:
+///
+/// ```toml
+/// [[firewall.forwardings]]
+/// src = "lan"
+/// dest = "wan"
+/// ```
+///
+/// Equivalent to a `[[firewall.rules]]` with `src="lan"`,
+/// `dest="wan"`, `action="accept"` — but shorter, and if multiple
+/// zone pairs accept each other, the forwardings block stays
+/// scannable where N rule blocks wouldn't.
+///
+/// `family` restricts to v4 / v6 when set (default `any` covers
+/// both via the inet table).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Forwarding {
+    /// Source zone name. Must exist in `firewall.zones`.
+    pub src: String,
+    /// Destination zone name. Must exist in `firewall.zones`.
+    pub dest: String,
+    /// Address family restriction. Default `any`.
+    #[serde(default)]
+    pub family: Family,
 }
 
 /// One operator-supplied raw nft rule. `table` + `chain` name
@@ -1069,6 +1141,21 @@ pub struct Zone {
     /// behavior: zone uses whichever WAN the coordinator picked.
     #[serde(default)]
     pub wan: Option<String>,
+    /// TCP MSS clamping (`mtu_fix` in fw4). When true, forwarded
+    /// SYN packets crossing this zone's member ifaces have their
+    /// TCP MSS option rewritten to `min(original, path MTU - 40)`.
+    /// Mandatory on PPPoE WAN zones (1492 MTU) and on zones whose
+    /// member iface is a WireGuard / OpenVPN tunnel (1420 typical),
+    /// otherwise large packets silently fragment or drop and
+    /// operators see "some websites just hang." Off by default;
+    /// leave off for plain-Ethernet WAN with 1500 MTU.
+    ///
+    /// Rendered as `tcp flags syn tcp option maxseg size set rt mtu`
+    /// in the `inet oxwrt` forward chain, matched on both `iifname`
+    /// and `oifname` of the zone's ifaces so traffic in either
+    /// direction gets clamped.
+    #[serde(default)]
+    pub mtu_fix: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1209,6 +1296,48 @@ pub struct Rule {
     /// nft-text path (rustables' builder has no `@set` sugar).
     #[serde(default)]
     pub match_set: Option<MatchSet>,
+    /// Emit an nft `counter` statement in the rule. The kernel
+    /// tracks packet + byte counts hitting the rule, visible via
+    /// `nft list ruleset` or `oxctl diag firewall` once that
+    /// surfaces counters. Cheap (a few bytes of per-rule state),
+    /// useful for "is my block rule actually firing?" debugging.
+    /// Off by default — operators turn on per-rule during
+    /// diagnostics.
+    #[serde(default)]
+    pub counter: bool,
+    /// Optional burst allowance paired with `limit`. nft's rate
+    /// limiter tracks a token bucket; `limit` sets the refill
+    /// rate (e.g. `"10/second"`), `limit_burst` sets the bucket
+    /// size in packets (default 5 in nft when unset). Raise for
+    /// clients that need sudden short bursts above the rate.
+    /// Ignored unless `limit` is also set.
+    #[serde(default)]
+    pub limit_burst: Option<u32>,
+    /// Optional REJECT reason for `action = "reject"`. Accepted
+    /// values (passed verbatim to nft):
+    ///   `"tcp reset"` — close TCP connection cleanly (clients
+    ///     see "connection refused" immediately; lighter than a
+    ///     drop for SSH brute-force where you want the scanner
+    ///     to move on instead of waiting for a timeout).
+    ///   `"icmp type port-unreachable"` — UDP equivalent.
+    ///   `"icmpx type admin-prohibited"` — dual-family "no,
+    ///     policy says no" signal.
+    ///   `"icmp6 type admin-prohibited"` — v6-specific.
+    ///
+    /// Silent drop stays the default (both for privacy and to
+    /// not broadcast the existence of the rule). Set explicitly
+    /// when the client behavior matters.
+    #[serde(default)]
+    pub reject_with: Option<String>,
+    /// Match traffic by raw interface name, bypassing the zone
+    /// abstraction. Accepts a single iface string (e.g.
+    /// `"wg0"`, `"eth1.100"`). When set, `src` zone is ignored
+    /// for ingress matching — useful for rules scoped to a
+    /// specific iface that doesn't fit an existing zone (a
+    /// newly-created wg tunnel, a diag-only debug iface).
+    /// Forces the text path.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 /// Reference from a firewall rule to an `[[ipsets]]` entry.

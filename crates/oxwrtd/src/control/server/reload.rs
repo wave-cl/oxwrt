@@ -67,6 +67,13 @@ pub fn handle_reload_dry_run() -> Response {
             };
         }
     }
+    for fwd in &cfg.firewall.forwardings {
+        if let Err(e) = crate::control::validate::check_forwarding(fwd, &cfg) {
+            return Response::Err {
+                message: format!("reload-dry-run: {e}"),
+            };
+        }
+    }
     for wifi in &cfg.wifi {
         if let Err(e) = crate::control::validate::check_wifi_refs(wifi, &cfg) {
             return Response::Err {

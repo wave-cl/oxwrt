@@ -56,6 +56,8 @@
 #                  failover via priority/probe_target
 #   firewall       zones + explicit rules (no magic booleans) +
 #                  optional `schedule` field for time-based rules +
+#                  declarative `forwardings` zone-pair shortcuts +
+#                  `defaults` block (synflood_protect, drop_invalid) +
 #                  raw_nft escape hatch for unusual rule shapes
 #   ddns           DuckDNS + Cloudflare + Namecheap + dynv6 + HE.net
 #   port_forwards  external WAN port → internal host:port
@@ -310,6 +312,42 @@ networks = ["wan"]
 default_input = "drop"
 default_forward = "drop"
 masquerade = true
+# TCP MSS clamping (aka `mtu_fix`). Essential for:
+#   - PPPoE WAN (1492 MTU instead of 1500)
+#   - WireGuard / OpenVPN tunnels used as WAN (1420-ish)
+#   - Any WAN where path MTU discovery is unreliable
+# Rewrites SYN-packet MSS to `min(declared, path MTU - 40)` so
+# downstream fragmentation / "some websites just hang" problems
+# stop. Off by default for plain 1500-MTU Ethernet; uncomment on
+# any tunnel-based WAN.
+# mtu_fix = true
+
+# ── Global firewall defaults ──
+# Both flags default true (matches OpenWrt fw4). Override here
+# only if you have a specific reason: synflood_protect off to
+# avoid burst-limiting during a load test, drop_invalid off to
+# see the junk in tcpdump.
+#
+# [firewall.defaults]
+# synflood_protect = true       # rate-limits SYNs to 25/s + burst 50
+# drop_invalid = true           # drops ct state=invalid on INPUT/FORWARD
+
+# ── Declarative zone-to-zone forward shortcuts ──
+# Instead of writing a per-rule accept for each "zone A can forward
+# to zone B", declare `[[firewall.forwardings]]`. Equivalent to a
+# rule with src + dest + action="accept" but shorter. Leaves room
+# for per-rule drops afterwards — forwardings land first in the
+# FORWARD chain, rules later override narrowly. Uncomment for a
+# compact config; leave commented if you prefer explicit per-rule
+# declarations (matching what's below).
+#
+# [[firewall.forwardings]]
+# src = "lan"
+# dest = "wan"
+#
+# [[firewall.forwardings]]
+# src = "guest"
+# dest = "wan"
 
 # Established/related is installed as a baseline default now (no
 # operator rule required) along with `ct state invalid drop`,
@@ -555,14 +593,37 @@ action = "accept"
 # proto = "tcp"
 # dest_port = 22
 # limit = "3/minute"
+# limit_burst = 10               # allow a brief burst above rate
 # log = "ssh-slow "
+# counter = true                 # kernel packet+byte counters for diag
 # action = "accept"
 # [[firewall.rules]]
 # name = "ssh-brute-drop"
 # src = "wan"
 # proto = "tcp"
 # dest_port = 22
-# action = "drop"
+# action = "reject"
+# reject_with = "tcp reset"      # close the connection immediately
+#                                # (scanner moves on, no timeout wait)
+#
+# REJECT reason strings (passed verbatim to nft's `reject with`):
+#   "tcp reset"                         — TCP RST
+#   "icmp type port-unreachable"        — IPv4 UDP close
+#   "icmp6 type port-unreachable"       — IPv6 UDP close
+#   "icmpx type admin-prohibited"       — dual-family policy-block signal
+# Leaving reject_with unset uses the platform default
+# (icmp-port-unreachable for v4, icmpv6-port-unreachable for v6).
+#
+# Raw-iface match, bypassing the zone abstraction. Use when a rule
+# targets a single interface that doesn't fit any zone (a fresh
+# WireGuard tunnel, a diagnostic iface).
+#
+# [[firewall.rules]]
+# name = "wg0-accept"
+# device = "wg0"
+# proto = "udp"
+# dest_port = 51820
+# action = "accept"
 #
 # IPv6-only restriction. Without `family`, a rule with no
 # address carriers applies to both families. `family = "ipv6"`

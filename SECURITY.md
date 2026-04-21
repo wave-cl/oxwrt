@@ -306,25 +306,49 @@ where it's feasible.
 
 The zone/rule abstraction covers the common deployments but
 doesn't match fw4 feature-for-feature. Gaps that remain after
-the fw4-parity pass:
+the fw4-parity passes:
 
+- **QoS primitives: `set_mark`, `set_dscp`.** Netfilter marks
+  + DSCP rewriting for downstream policy routing / tc shaping.
+  Not implemented. Operators needing QoS write raw_nft against
+  a custom mangle chain.
 - **Connection-tracking helpers (SIP ALG, FTP active mode, PPTP
   GRE, RTSP).** Not auto-loaded. Operators who need these load
-  the modules manually and express them via raw_nft.
+  the modules manually and express them via raw_nft. Requires
+  kernel-module-coordination work beyond firewall rules.
 - **`target = "NOTRACK"` / CT zones.** Absent. Rare (high-
   throughput forwarding paths or CGNAT-facing ISP setups).
+- **Absolute-date schedules.** Current `schedule` field covers
+  day-of-week + hour-of-day recurring windows. Absolute ranges
+  (`start_date`/`stop_date` for "block until 2026-06-01") would
+  need a separate parser pass.
+- **Includes.** fw4 sources external rule files via `config
+  include`. oxwrt's config is single-file by design (plus the
+  secrets overlay); the raw_nft escape hatch covers the
+  "insert arbitrary rules" use case.
+- **Hardware flow offloading.** fw4 exposes `flow_offloading`
+  + `flow_offloading_hw` toggles. Not safe to enable by default
+  (benchmarking needed on each target); omitted until a
+  dedicated perf pass.
 
-Everything else from the mainstream fw4 surface landed in the
-parity passes: zone `default_output`, rule `src_ip`/`dest_ip`/
-`src_mac`/`src_port`/`icmp_type`/`family`/`limit`/`log`/
-`enabled`, port-forward `reflection`, IPv6 MASQUERADE66,
+Everything else from the mainstream fw4 surface is implemented:
+zone `default_output`, zone `mtu_fix` (TCP MSS clamping), rule
+`src_ip`/`dest_ip`/`src_mac`/`src_port`/`icmp_type`/`family`/
+`limit`/`log`/`enabled`/`counter`/`limit_burst`/`reject_with`/
+`device`, port-forward `reflection`, IPv6 MASQUERADE66,
 **IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
 (installed into a dedicated `oxwrt-dnat6` nftables table with
-reflection + hairpin SNAT in `oxwrt-nat6`), and **declarative
+reflection + hairpin SNAT in `oxwrt-nat6`), **declarative
 ipsets** (`[[ipsets]]` at top level + `match_set = { name,
 direction, negate }` on rules — sets live in the `inet oxwrt`
 table, CIDR entries auto-enable `flags interval`, per-element
-`timeout` supported).
+`timeout` supported), **port ranges** via `"START-END"` string
+syntax on `dest_port`/`src_port`, **proto-only rules** (TCP/UDP
+accept/drop without a port match), **declarative forwardings**
+(`[[firewall.forwardings]] { src, dest, family }` as a
+zone-to-zone accept shortcut), and **global defaults**
+(`[firewall.defaults]` with `synflood_protect` and
+`drop_invalid` — both default-on, matching fw4).
 
 ### Known — no passphrase strength enforcement
 

@@ -53,6 +53,14 @@ pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
         || dport_is_range
         || sport_is_range
         || proto_only
+        // fw4-parity rule primitives added in v0.2 pass 2. All
+        // four are native nft syntax with no rustables builder
+        // (counter, limit burst suffix, reject-with-reason, raw
+        // iface match), so they route via the text path.
+        || r.counter
+        || r.limit_burst.is_some()
+        || r.reject_with.is_some()
+        || r.device.is_some()
 }
 
 use super::Error;
@@ -213,6 +221,48 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                 .map_err(|e| Error::Firewall(e.to_string()))?;
             r = r.dport(wg.listen_port, rustables::Protocol::UDP);
             r.accept().add_to_batch(&mut batch);
+        }
+    }
+
+    // Declarative zone-to-zone forwardings (fw4 `config forwarding`).
+    // Each entry expands into a FORWARD accept keyed on
+    // iifname(src) + oifname(dest). Family restriction optionally
+    // narrows to v4 or v6 via a meta-nfproto match added by the
+    // text path — if set, we defer to the text path by synthesizing
+    // a rule; otherwise rustables handles the straight accept.
+    //
+    // Emitted BEFORE operator rules so forwardings land as the
+    // early "allow this direction by default" while rules can
+    // still override with a narrower drop afterwards.
+    use oxwrt_api::config::Family;
+    for fwd in &cfg.firewall.forwardings {
+        let src_ifaces = zone_ifaces(cfg, &fwd.src);
+        let dest_ifaces = zone_ifaces(cfg, &fwd.dest);
+        if src_ifaces.is_empty() || dest_ifaces.is_empty() {
+            tracing::warn!(
+                src = %fwd.src,
+                dest = %fwd.dest,
+                "forwarding: zone has no resolvable ifaces; skipping"
+            );
+            continue;
+        }
+        // Family=Any: rustables fast path. Family=Ipv4/Ipv6:
+        // the nfproto match lives on the text path; skip here
+        // and let a generated text rule handle it.
+        if fwd.family != Family::Any {
+            continue; // handled by build_forwardings_script
+        }
+        for src_if in &src_ifaces {
+            for dest_if in &dest_ifaces {
+                Rule::new(&forward)
+                    .map_err(|e| Error::Firewall(e.to_string()))?
+                    .iiface(src_if)
+                    .map_err(|e| Error::Firewall(e.to_string()))?
+                    .oiface(dest_if)
+                    .map_err(|e| Error::Firewall(e.to_string()))?
+                    .accept()
+                    .add_to_batch(&mut batch);
+            }
         }
     }
 
@@ -1119,12 +1169,13 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // no userspace timer, the kernel flips the rule in/out
     // naturally.
     let scheduled_script = build_scheduled_rules_script(cfg);
+    let forwardings_script = build_forwardings_script(cfg);
 
     // Baseline defaults: ct state, ICMPv6 NDP/MLD, ICMP echo —
     // these are unconditional and emitted in text (rustables has
     // no clean builder for ct-state or icmpv6 type). Prepended
     // so they land before operator rules in the chain order.
-    let baseline_script = build_baseline_defaults_script();
+    let baseline_script = build_baseline_defaults_script(cfg);
 
     // IP sets: declare every `[[ipsets]]` entry as an nftables
     // named set inside `inet oxwrt`, then populate it. Emitted
@@ -1140,7 +1191,8 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // parse — we log and continue, because a bad raw-rule line
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
-    let combined = format!("{ipsets_prologue}{baseline_script}{scheduled_script}");
+    let combined =
+        format!("{ipsets_prologue}{baseline_script}{forwardings_script}{scheduled_script}");
     if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
         apply_nft_text(&cfg.firewall.raw_nft, &combined);
     }
@@ -1148,13 +1200,18 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// Baseline nft rules every oxwrt firewall installs, regardless
-/// of config. Rendered as text because ct-state and icmpv6-type
-/// matches have no clean rustables builder. Emitted BEFORE the
-/// operator's text rules so they land first in each chain —
-/// nft evaluates top-down and first verdict wins.
-pub(crate) fn build_baseline_defaults_script() -> String {
+/// Baseline nft rules every oxwrt firewall installs. Rendered as
+/// text because most primitives here (ct-state, icmpv6 type,
+/// TCP-flags, MSS clamping) have no clean rustables builder.
+/// Emitted BEFORE the operator's text rules so they land first in
+/// each chain — nft evaluates top-down and first verdict wins.
+///
+/// Takes `cfg` so per-config knobs can gate: `synflood_protect`,
+/// `drop_invalid` (both in `firewall.defaults`), and per-zone
+/// `mtu_fix` (TCP MSS clamping).
+pub(crate) fn build_baseline_defaults_script(cfg: &Config) -> String {
     let mut s = String::new();
+    let defaults = &cfg.firewall.defaults;
     // ct state established,related → accept. fw4-equivalent of
     // "option input ACCEPT but only for return traffic".
     for chain in ["input", "forward", "output"] {
@@ -1164,10 +1221,29 @@ pub(crate) fn build_baseline_defaults_script() -> String {
     }
     // ct state invalid → drop. TCP out-of-window, post-RST
     // noise, unexpected ACKs — nothing legitimate matches.
-    for chain in ["input", "forward"] {
-        s.push_str(&format!(
-            "add rule inet oxwrt {chain} ct state invalid drop\n"
-        ));
+    // Gated on `defaults.drop_invalid` (default true; on matches
+    // fw4 behaviour). Off trades the belt for tcpdump-visibility.
+    if defaults.drop_invalid {
+        for chain in ["input", "forward"] {
+            s.push_str(&format!(
+                "add rule inet oxwrt {chain} ct state invalid drop\n"
+            ));
+        }
+    }
+    // SYN flood protection: rate-limit new-state TCP SYNs on
+    // INPUT to 25/second with burst 50. Overflow drops. Matches
+    // fw4's `synflood_protect = 1` default. Guards the router's
+    // own listeners (sQUIC control plane, in-router DNS) — the
+    // FORWARD chain doesn't need this because forwarded SYN
+    // floods are an end-host problem.
+    //
+    // Expression: SYN-only flag mask, so the rule matches only
+    // the initial SYN (not SYN-ACK return traffic).
+    if defaults.synflood_protect {
+        s.push_str(
+            "add rule inet oxwrt input tcp flags syn ct state new \
+             limit rate over 25/second burst 50 packets drop\n",
+        );
     }
     // ICMPv6 NDP: neighbour + router discovery. Without these,
     // v6 neighbor resolution breaks and nothing works.
@@ -1202,7 +1278,71 @@ pub(crate) fn build_baseline_defaults_script() -> String {
     // with higher-priority iifname=wan drop ahead of this.
     s.push_str("add rule inet oxwrt input icmp type echo-request accept\n");
     s.push_str("add rule inet oxwrt input icmpv6 type echo-request accept\n");
+    // TCP MSS clamping per zone with `mtu_fix = true`. Rewrites
+    // the SYN packet's MSS option to the path MTU minus 40 so
+    // downstream fragmentation / path-MTU-black-hole problems
+    // stop on arrival. Emitted in the FORWARD chain matched on
+    // both iifname and oifname of each zone member iface — zone
+    // traffic in either direction gets clamped.
+    //
+    // `size set rt mtu` is nft's native "use the routing decision's
+    // MTU" helper, equivalent to iptables TCPMSS --clamp-mss-to-pmtu.
+    // Needs the `rt` module at kernel level; present in any
+    // reasonably-recent mainline kernel (5.x+).
+    for zone in &cfg.firewall.zones {
+        if !zone.mtu_fix {
+            continue;
+        }
+        for iface in zone_ifaces(cfg, &zone.name) {
+            s.push_str(&format!(
+                "add rule inet oxwrt forward iifname \"{iface}\" tcp flags syn \
+                 tcp option maxseg size set rt mtu\n"
+            ));
+            s.push_str(&format!(
+                "add rule inet oxwrt forward oifname \"{iface}\" tcp flags syn \
+                 tcp option maxseg size set rt mtu\n"
+            ));
+        }
+    }
     s
+}
+
+/// Render family-restricted `[[firewall.forwardings]]` entries as
+/// nft text. Family=Any forwardings went through the rustables
+/// batch above; v4-/v6-pinned ones need the `meta nfproto` match
+/// which rustables doesn't expose cleanly, so they land here.
+///
+/// Each entry becomes one `add rule inet oxwrt forward iifname
+/// "<src>" oifname "<dest>" meta nfproto ipv4 accept` per
+/// (src-iface, dest-iface) pair. Zones with multiple ifaces
+/// expand the cartesian product.
+pub(crate) fn build_forwardings_script(cfg: &Config) -> String {
+    use oxwrt_api::config::Family;
+    let mut out = String::new();
+    for fwd in &cfg.firewall.forwardings {
+        if fwd.family == Family::Any {
+            continue; // handled by the rustables path
+        }
+        let family_str = match fwd.family {
+            Family::Ipv4 => "ipv4",
+            Family::Ipv6 => "ipv6",
+            Family::Any => unreachable!(),
+        };
+        let src_ifaces = zone_ifaces(cfg, &fwd.src);
+        let dest_ifaces = zone_ifaces(cfg, &fwd.dest);
+        if src_ifaces.is_empty() || dest_ifaces.is_empty() {
+            continue;
+        }
+        for src_if in &src_ifaces {
+            for dest_if in &dest_ifaces {
+                out.push_str(&format!(
+                    "add rule inet oxwrt forward iifname \"{src_if}\" oifname \"{dest_if}\" \
+                     meta nfproto {family_str} accept\n"
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Render every `[[ipsets]]` entry as an nft `add set …` + `add
@@ -1357,9 +1497,14 @@ pub(crate) fn build_scheduled_rules_script(cfg: &Config) -> String {
 /// l4proto+ports → icmp type → limit → log → verdict.
 fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Config) {
     use oxwrt_api::config::{Action, Family};
-    // iifname / oifname from zone → first matching iface. Multi-
-    // iface zones emit an "iifname { a, b, c }" set.
-    if let Some(src) = rule.src.as_deref() {
+    // Raw `device` match wins over the zone lookup. Used when a
+    // rule targets a single iface not captured by any zone (a
+    // fresh wg tunnel, a debug iface). When both `device` and
+    // `src` are set, device's iif match takes precedence; src is
+    // silently ignored — the validator warns on the overlap.
+    if let Some(dev) = rule.device.as_deref() {
+        out.push_str(&format!("iifname \"{dev}\" "));
+    } else if let Some(src) = rule.src.as_deref() {
         let ifaces = zone_ifaces(cfg, src);
         if !ifaces.is_empty() {
             out.push_str(&fmt_iifname(&ifaces, /*oif=*/ false));
@@ -1445,9 +1590,12 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
     if let Some(limit_str) = rule.limit.as_deref() {
         // nft accepts the same "N/second" etc. syntax literally,
         // so we pass through verbatim (stripped of whitespace).
-        // `limit rate 10/second` becomes `limit rate 10/second ` here.
+        // Optional burst suffix: `burst N packets` after the rate.
         let clean = limit_str.trim();
-        out.push_str(&format!("limit rate {clean} "));
+        match rule.limit_burst {
+            Some(n) => out.push_str(&format!("limit rate {clean} burst {n} packets ")),
+            None => out.push_str(&format!("limit rate {clean} ")),
+        }
     }
     if let Some(log_prefix) = rule.log.as_deref() {
         // Cap prefix at 128 chars — nft silently truncates, but
@@ -1462,10 +1610,27 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
         };
         out.push_str(&format!("log {p}"));
     }
+    // Per-rule counter. nft's `counter` keyword goes before the
+    // verdict; tracked by the kernel and surfaced via `nft list
+    // ruleset` / future `oxctl diag firewall`.
+    if rule.counter {
+        out.push_str("counter ");
+    }
     match rule.action {
         Action::Accept => out.push_str("accept"),
         Action::Drop => out.push_str("drop"),
-        Action::Reject => out.push_str("reject"),
+        Action::Reject => {
+            // Optional reject reason: `reject with tcp reset`,
+            // `reject with icmp type port-unreachable`, etc. nft
+            // accepts the string after `with` verbatim, so the
+            // config passes through. Bare `reject` when unset
+            // uses the platform default (icmp-port-unreachable
+            // for IPv4, icmpv6-port-unreachable for IPv6).
+            match rule.reject_with.as_deref() {
+                Some(reason) => out.push_str(&format!("reject with {}", reason.trim())),
+                None => out.push_str("reject"),
+            }
+        }
         Action::Dnat => out.push_str("# dnat via text path unsupported — use [[port_forwards]]"),
     }
 }
@@ -2071,6 +2236,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         }
     }
 
@@ -2225,9 +2394,12 @@ mod tests {
                     masquerade: false,
                     via_vpn: false,
                     wan: None,
+                    mtu_fix: false,
                 }],
                 rules: vec![],
                 raw_nft: vec![],
+                defaults: Default::default(),
+                forwardings: vec![],
             },
             radios: vec![],
             wifi: vec![],
@@ -2611,6 +2783,180 @@ authorized_keys = "/x"
         assert!(Ps::parse_range("22-abc").is_err(), "bad end");
         assert!(Ps::parse_range("80-22").is_err(), "start > end");
         assert!(Ps::parse_range("22-99999").is_err(), "end overflows u16");
+    }
+
+    // ── fw4-parity pass 2: counter, limit_burst, reject_with, device ──
+
+    #[test]
+    fn counter_and_limit_burst_and_reject_with_force_text_path() {
+        let mut r = basic_rule("t");
+        assert!(!rule_needs_text_path(&r));
+        r.counter = true;
+        assert!(rule_needs_text_path(&r));
+
+        let mut r = basic_rule("t");
+        r.limit = Some("10/second".into());
+        r.limit_burst = Some(20);
+        assert!(rule_needs_text_path(&r));
+
+        let mut r = basic_rule("t");
+        r.reject_with = Some("tcp reset".into());
+        r.action = oxwrt_api::config::Action::Reject;
+        assert!(rule_needs_text_path(&r));
+
+        let mut r = basic_rule("t");
+        r.device = Some("wg0".into());
+        assert!(rule_needs_text_path(&r));
+    }
+
+    #[test]
+    fn render_rule_with_counter() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("log-ssh-hits");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(22));
+        r.counter = true;
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        // counter goes immediately before the verdict.
+        assert!(s.contains("counter accept"), "{s}");
+    }
+
+    #[test]
+    fn render_rule_with_limit_burst() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("rate-http");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(80));
+        r.limit = Some("100/second".into());
+        r.limit_burst = Some(200);
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("limit rate 100/second burst 200 packets"), "{s}");
+    }
+
+    #[test]
+    fn render_rule_reject_with_tcp_reset() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("reject-ssh");
+        r.proto = Some(oxwrt_api::config::Proto::Tcp);
+        r.dest_port = Some(PortSpec::Single(22));
+        r.action = oxwrt_api::config::Action::Reject;
+        r.reject_with = Some("tcp reset".into());
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("reject with tcp reset"), "{s}");
+        // Plain `reject` must NOT also appear in the same rule.
+        let rule_line = s.lines().find(|l| l.contains("dport 22")).unwrap();
+        assert_eq!(rule_line.matches("reject").count(), 1);
+    }
+
+    #[test]
+    fn render_rule_device_bypasses_zone() {
+        let mut cfg = minimal_config();
+        let mut r = basic_rule("wg-accept");
+        r.device = Some("wg0".into());
+        r.proto = Some(oxwrt_api::config::Proto::Udp);
+        r.dest_port = Some(PortSpec::Single(51820));
+        r.action = oxwrt_api::config::Action::Accept;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains(r#"iifname "wg0""#), "{s}");
+    }
+
+    // ── forwardings ────────────────────────────────────────────────
+
+    #[test]
+    fn build_forwardings_script_family_any_skipped() {
+        use oxwrt_api::config::{Family, Forwarding};
+        let mut cfg = minimal_config();
+        cfg.firewall.forwardings.push(Forwarding {
+            src: "trusted".into(),
+            dest: "trusted".into(), // same zone for minimal setup
+            family: Family::Any,
+        });
+        // Family=Any is handled in the rustables path; text path
+        // produces nothing for it.
+        assert!(build_forwardings_script(&cfg).is_empty());
+    }
+
+    #[test]
+    fn build_forwardings_script_family_v4_emits_nfproto() {
+        use oxwrt_api::config::{Family, Forwarding};
+        let mut cfg = minimal_config();
+        // Add a second zone so we can forward trusted→elsewhere.
+        cfg.firewall.zones.push(oxwrt_api::config::Zone {
+            name: "elsewhere".into(),
+            networks: vec!["guest".into()],
+            default_input: oxwrt_api::config::ChainPolicy::Drop,
+            default_forward: oxwrt_api::config::ChainPolicy::Drop,
+            default_output: oxwrt_api::config::ChainPolicy::Accept,
+            masquerade: false,
+            via_vpn: false,
+            wan: None,
+            mtu_fix: false,
+        });
+        cfg.firewall.forwardings.push(Forwarding {
+            src: "trusted".into(),
+            dest: "elsewhere".into(),
+            family: Family::Ipv4,
+        });
+        let s = build_forwardings_script(&cfg);
+        assert!(s.contains("meta nfproto ipv4 accept"), "{s}");
+    }
+
+    // ── baseline defaults: synflood + drop_invalid + mtu_fix ─────
+
+    #[test]
+    fn baseline_emits_synflood_by_default() {
+        let cfg = minimal_config();
+        let s = build_baseline_defaults_script(&cfg);
+        assert!(s.contains("tcp flags syn"), "{s}");
+        assert!(s.contains("limit rate over 25/second"), "{s}");
+        assert!(s.contains("burst 50 packets drop"), "{s}");
+    }
+
+    #[test]
+    fn baseline_synflood_can_be_disabled() {
+        let mut cfg = minimal_config();
+        cfg.firewall.defaults.synflood_protect = false;
+        let s = build_baseline_defaults_script(&cfg);
+        assert!(!s.contains("tcp flags syn"), "synflood leaked: {s}");
+    }
+
+    #[test]
+    fn baseline_drop_invalid_can_be_disabled() {
+        let mut cfg = minimal_config();
+        cfg.firewall.defaults.drop_invalid = false;
+        let s = build_baseline_defaults_script(&cfg);
+        assert!(!s.contains("ct state invalid drop"), "{s}");
+    }
+
+    #[test]
+    fn baseline_mtu_fix_emits_mss_clamp() {
+        let mut cfg = minimal_config();
+        cfg.firewall.zones[0].mtu_fix = true; // the "trusted" zone
+        let s = build_baseline_defaults_script(&cfg);
+        // Matches on both iifname and oifname of the zone's ifaces.
+        // The "trusted" zone covers lan (br-lan) + guest (br-guest).
+        assert!(
+            s.contains("tcp option maxseg size set rt mtu"),
+            "MSS clamp not emitted: {s}"
+        );
+        assert!(s.contains(r#"iifname "br-lan""#), "{s}");
+        assert!(s.contains(r#"oifname "br-lan""#), "{s}");
+    }
+
+    #[test]
+    fn baseline_mtu_fix_off_by_default() {
+        let cfg = minimal_config();
+        let s = build_baseline_defaults_script(&cfg);
+        assert!(
+            !s.contains("maxseg size set rt mtu"),
+            "MSS clamp leaked when mtu_fix is off: {s}"
+        );
     }
 
     // ── find_dest_zone_for_ipv6 ────────────────────────────────────

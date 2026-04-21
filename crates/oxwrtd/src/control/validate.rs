@@ -242,6 +242,32 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
             .map_err(|e| format!("rule {}: schedule: {e}", rule.name))?;
     }
 
+    // reject_with only makes sense with action=reject. On any
+    // other action it's either a paste bug or a confused
+    // operator; reject cleanly instead of silently ignoring.
+    if rule.reject_with.is_some() && rule.action != Action::Reject {
+        return Err(format!(
+            "rule {}: reject_with is only valid with action=reject (got action={:?})",
+            rule.name, rule.action
+        ));
+    }
+    // limit_burst without limit is nft-syntactically valid (it
+    // would default the rate, which isn't what the operator
+    // meant to say). Treat as operator error.
+    if rule.limit_burst.is_some() && rule.limit.is_none() {
+        return Err(format!(
+            "rule {}: limit_burst requires `limit` to also be set",
+            rule.name
+        ));
+    }
+    // device must be non-empty when present. Empty renders as
+    // `iifname ""` which nft rejects.
+    if let Some(dev) = rule.device.as_deref() {
+        if dev.trim().is_empty() {
+            return Err(format!("rule {}: device must not be empty", rule.name));
+        }
+    }
+
     // match_set must name an existing [[ipsets]] entry. Family
     // mismatches would surface as an nft parse error at install
     // time ("type ipv4_addr can't match ip6 saddr") — catching them
@@ -269,6 +295,35 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+/// Validate a `[[firewall.forwardings]]` entry: both zones must
+/// exist, they must differ (self-forward is a no-op and usually
+/// a typo — reject so the operator notices), and the src/dest
+/// zones must have at least one resolvable iface each (otherwise
+/// the install-time loop silently drops the forwarding with a
+/// warn and the operator doesn't understand why LAN→WAN stopped
+/// working).
+pub fn check_forwarding(fwd: &oxwrt_api::config::Forwarding, cfg: &Config) -> Result<(), String> {
+    if !cfg.firewall.zones.iter().any(|z| z.name == fwd.src) {
+        return Err(format!(
+            "forwarding {}→{}: unknown src zone",
+            fwd.src, fwd.dest
+        ));
+    }
+    if !cfg.firewall.zones.iter().any(|z| z.name == fwd.dest) {
+        return Err(format!(
+            "forwarding {}→{}: unknown dest zone",
+            fwd.src, fwd.dest
+        ));
+    }
+    if fwd.src == fwd.dest {
+        return Err(format!(
+            "forwarding {}→{}: src and dest are the same (self-forward is a no-op)",
+            fwd.src, fwd.dest
+        ));
+    }
     Ok(())
 }
 
@@ -607,6 +662,7 @@ mod tests {
                         masquerade: false,
                         via_vpn: false,
                         wan: None,
+                        mtu_fix: false,
                     },
                     Zone {
                         name: "wan".to_string(),
@@ -617,6 +673,7 @@ mod tests {
                         masquerade: true,
                         via_vpn: false,
                         wan: None,
+                        mtu_fix: false,
                     },
                 ],
                 rules: vec![Rule {
@@ -639,8 +696,14 @@ mod tests {
                     dnat_target: None,
                     schedule: None,
                     match_set: None,
+                    counter: false,
+                    limit_burst: None,
+                    reject_with: None,
+                    device: None,
                 }],
                 raw_nft: vec![],
+                defaults: Default::default(),
+                forwardings: vec![],
             },
             radios: vec![Radio {
                 phy: "phy0".to_string(),
@@ -724,6 +787,7 @@ mod tests {
             masquerade: false,
             via_vpn: false,
             wan: None,
+            mtu_fix: false,
         };
         assert!(check_zone_network_refs(&zone, &cfg).is_ok());
     }
@@ -740,6 +804,7 @@ mod tests {
             masquerade: false,
             via_vpn: false,
             wan: None,
+            mtu_fix: false,
         };
         let err = check_zone_network_refs(&zone, &cfg).unwrap_err();
         assert!(err.contains("dmz"), "error should name the zone: {err}");
@@ -762,6 +827,7 @@ mod tests {
             masquerade: false,
             via_vpn: false,
             wan: None,
+            mtu_fix: false,
         };
         assert!(check_zone_network_refs(&zone, &cfg).is_err());
     }
@@ -791,6 +857,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -818,6 +888,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -845,6 +919,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -874,6 +952,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -902,6 +984,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -930,6 +1016,10 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -958,6 +1048,10 @@ mod tests {
             dnat_target: Some("not-an-ip-port".to_string()),
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -985,6 +1079,10 @@ mod tests {
             dnat_target: Some("10.0.0.1:80".to_string()),
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -1016,12 +1114,131 @@ mod tests {
             dnat_target: None,
             schedule: None,
             match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
             err.contains("icmp") && err.contains("dest_port"),
             "got: {err}"
         );
+    }
+
+    // ── fw4-parity: new primitive coupling checks ──────────────────
+
+    fn build_basic_rule_for_test(name: &str) -> Rule {
+        Rule {
+            name: name.to_string(),
+            enabled: true,
+            family: oxwrt_api::config::Family::Any,
+            src_ip: vec![],
+            dest_ip: vec![],
+            src_mac: vec![],
+            src_port: None,
+            icmp_type: None,
+            limit: None,
+            log: None,
+            src: None,
+            dest: None,
+            proto: None,
+            dest_port: None,
+            ct_state: vec![],
+            action: Action::Accept,
+            dnat_target: None,
+            schedule: None,
+            match_set: None,
+            counter: false,
+            limit_burst: None,
+            reject_with: None,
+            device: None,
+        }
+    }
+
+    #[test]
+    fn rule_reject_with_on_non_reject_action_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("bad-reject");
+        r.action = Action::Accept;
+        r.reject_with = Some("tcp reset".to_string());
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("reject_with"), "got: {err}");
+        assert!(err.contains("action=reject"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_reject_with_on_reject_action_ok() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("ok-reject");
+        r.action = Action::Reject;
+        r.reject_with = Some("icmpx type admin-prohibited".to_string());
+        assert!(check_rule_zone_refs(&r, &cfg).is_ok());
+    }
+
+    #[test]
+    fn rule_limit_burst_without_limit_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("no-base-rate");
+        r.limit_burst = Some(50);
+        // limit left None
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("limit_burst"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_limit_burst_with_limit_ok() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("rate-burst");
+        r.limit = Some("10/second".to_string());
+        r.limit_burst = Some(50);
+        assert!(check_rule_zone_refs(&r, &cfg).is_ok());
+    }
+
+    #[test]
+    fn rule_empty_device_rejected() {
+        let cfg = make_test_config();
+        let mut r = build_basic_rule_for_test("empty-dev");
+        r.device = Some("   ".to_string());
+        let err = check_rule_zone_refs(&r, &cfg).unwrap_err();
+        assert!(err.contains("device"), "got: {err}");
+    }
+
+    // ── check_forwarding ───────────────────────────────────────────
+
+    #[test]
+    fn forwarding_known_zones_ok() {
+        let cfg = make_test_config();
+        let fwd = oxwrt_api::config::Forwarding {
+            src: "lan".to_string(),
+            dest: "wan".to_string(),
+            family: oxwrt_api::config::Family::Any,
+        };
+        assert!(check_forwarding(&fwd, &cfg).is_ok());
+    }
+
+    #[test]
+    fn forwarding_unknown_src_rejected() {
+        let cfg = make_test_config();
+        let fwd = oxwrt_api::config::Forwarding {
+            src: "nowhere".to_string(),
+            dest: "wan".to_string(),
+            family: oxwrt_api::config::Family::Any,
+        };
+        let err = check_forwarding(&fwd, &cfg).unwrap_err();
+        assert!(err.contains("src zone"), "got: {err}");
+    }
+
+    #[test]
+    fn forwarding_self_rejected() {
+        let cfg = make_test_config();
+        let fwd = oxwrt_api::config::Forwarding {
+            src: "lan".to_string(),
+            dest: "lan".to_string(),
+            family: oxwrt_api::config::Family::Any,
+        };
+        let err = check_forwarding(&fwd, &cfg).unwrap_err();
+        assert!(err.contains("same"), "got: {err}");
     }
 
     // ── check_wifi_refs ────────────────────────────────────────────
