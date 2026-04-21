@@ -64,7 +64,7 @@ jobs:
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl
+          targets: aarch64-unknown-linux-musl, x86_64-apple-darwin, aarch64-apple-darwin
 
       - name: install zig
         uses: goto-bus-stop/setup-zig@v2
@@ -123,6 +123,24 @@ jobs:
         run: |
           cargo zigbuild --release \
             --target aarch64-unknown-linux-musl -p oxwrtctl-cli
+
+      # Darwin variants via zig-cc. Both Intel (x86_64) and Apple
+      # Silicon (aarch64) Macs are common in the operator crowd;
+      # publishing prebuilt binaries saves anyone flashing the
+      # router from having to `cargo build -p oxwrtctl-cli` on a
+      # fresh Rust install. Zig provides the MachO linker so no
+      # Xcode-on-Linux shenanigans needed.
+      - name: cross-build oxctl (Darwin-x86_64)
+        working-directory: oxwrt
+        run: |
+          cargo zigbuild --release \
+            --target x86_64-apple-darwin -p oxwrtctl-cli
+
+      - name: cross-build oxctl (Darwin-aarch64)
+        working-directory: oxwrt
+        run: |
+          cargo zigbuild --release \
+            --target aarch64-apple-darwin -p oxwrtctl-cli
 
       # ── openwrt imagebuilder tarball ─────────────────────────────
       - name: download openwrt imagebuilder
@@ -222,6 +240,10 @@ jobs:
           cp target/release/oxctl release/oxctl-linux-x86_64
           cp target/aarch64-unknown-linux-musl/release/oxctl \
              release/oxctl-linux-aarch64-musl
+          cp target/x86_64-apple-darwin/release/oxctl \
+             release/oxctl-darwin-x86_64
+          cp target/aarch64-apple-darwin/release/oxctl \
+             release/oxctl-darwin-aarch64
           ls -lh release/
 
       # ── extract this release's CHANGELOG section ────────────────
@@ -265,3 +287,5 @@ jobs:
             oxwrt/release/${{ steps.image.outputs.name }}.sig
             oxwrt/release/oxctl-linux-x86_64
             oxwrt/release/oxctl-linux-aarch64-musl
+            oxwrt/release/oxctl-darwin-x86_64
+            oxwrt/release/oxctl-darwin-aarch64
