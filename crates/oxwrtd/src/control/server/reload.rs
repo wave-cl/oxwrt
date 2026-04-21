@@ -41,6 +41,11 @@ pub fn handle_reload_dry_run() -> Response {
             message: format!("reload-dry-run: {e}"),
         };
     }
+    if let Err(e) = crate::control::validate::check_ipsets(&cfg) {
+        return Response::Err {
+            message: format!("reload-dry-run: {e}"),
+        };
+    }
     for zone in &cfg.firewall.zones {
         if let Err(e) = crate::control::validate::check_zone_network_refs(zone, &cfg) {
             return Response::Err {
@@ -197,6 +202,11 @@ async fn handle_reload_inner(state: &std::sync::Arc<ControlState>) -> Response {
     // per-item check_*_refs pattern. Reject early before touching
     // live state.
     if let Err(e) = crate::control::validate::check_vlan_consistency(&new_cfg) {
+        return Response::Err {
+            message: format!("reload: {e}"),
+        };
+    }
+    if let Err(e) = crate::control::validate::check_ipsets(&new_cfg) {
         return Response::Err {
             message: format!("reload: {e}"),
         };

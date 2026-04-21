@@ -156,6 +156,7 @@ mod tests {
             routes: vec![],
             routes6: vec![],
             blocklists: vec![],
+            ipsets: vec![],
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,

@@ -68,6 +68,78 @@ pub fn check_vlan_consistency(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate every `[[ipsets]]` entry. Catches:
+/// - duplicate names (nft would fail the whole batch on the second
+///   `add set` with a "File exists" error)
+/// - `family = "any"` (nft sets are single-family; no `any` option)
+/// - malformed entries (wrong family, unparseable CIDR/address)
+/// - CIDR prefix > address width
+///
+/// Called once per reload, not per CRUD op on sets (we don't have
+/// per-entry CRUD for ipsets yet — they're edited via `Set` RPC on
+/// the full config). The list is expected to be short (dozens at
+/// most), so O(n²) dup-check is fine.
+pub fn check_ipsets(cfg: &Config) -> Result<(), String> {
+    use oxwrt_api::config::Family;
+    let mut seen = std::collections::HashSet::new();
+    for set in &cfg.ipsets {
+        if set.name.trim().is_empty() {
+            return Err("ipset: name must not be empty".to_string());
+        }
+        if !seen.insert(&set.name) {
+            return Err(format!("ipset {}: duplicate name", set.name));
+        }
+        if set.family == Family::Any {
+            return Err(format!(
+                "ipset {}: family must be ipv4 or ipv6 (got any)",
+                set.name
+            ));
+        }
+        for entry in &set.entries {
+            let (addr_str, prefix_str) = match entry.split_once('/') {
+                Some((a, p)) => (a, Some(p)),
+                None => (entry.as_str(), None),
+            };
+            match set.family {
+                Family::Ipv4 => {
+                    let _: std::net::Ipv4Addr = addr_str.parse().map_err(|_| {
+                        format!("ipset {}: invalid ipv4 entry {:?}", set.name, entry)
+                    })?;
+                    if let Some(p) = prefix_str {
+                        let p: u8 = p.parse().map_err(|_| {
+                            format!("ipset {}: invalid prefix in {:?}", set.name, entry)
+                        })?;
+                        if p > 32 {
+                            return Err(format!(
+                                "ipset {}: prefix {p} out of range for ipv4 in {:?}",
+                                set.name, entry
+                            ));
+                        }
+                    }
+                }
+                Family::Ipv6 => {
+                    let _: std::net::Ipv6Addr = addr_str.parse().map_err(|_| {
+                        format!("ipset {}: invalid ipv6 entry {:?}", set.name, entry)
+                    })?;
+                    if let Some(p) = prefix_str {
+                        let p: u8 = p.parse().map_err(|_| {
+                            format!("ipset {}: invalid prefix in {:?}", set.name, entry)
+                        })?;
+                        if p > 128 {
+                            return Err(format!(
+                                "ipset {}: prefix {p} out of range for ipv6 in {:?}",
+                                set.name, entry
+                            ));
+                        }
+                    }
+                }
+                Family::Any => unreachable!(),
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check_zone_network_refs(zone: &Zone, cfg: &Config) -> Result<(), String> {
     for net in &zone.networks {
         if !cfg.networks.iter().any(|n| n.name() == net) {
@@ -158,6 +230,33 @@ pub fn check_rule_zone_refs(rule: &Rule, cfg: &Config) -> Result<(), String> {
             .map_err(|e| format!("rule {}: schedule: {e}", rule.name))?;
     }
 
+    // match_set must name an existing [[ipsets]] entry. Family
+    // mismatches would surface as an nft parse error at install
+    // time ("type ipv4_addr can't match ip6 saddr") — catching them
+    // here keeps the reload transaction honest.
+    if let Some(ms) = rule.match_set.as_ref() {
+        use oxwrt_api::config::Family;
+        let Some(set) = cfg.ipsets.iter().find(|s| s.name == ms.name) else {
+            return Err(format!(
+                "rule {}: match_set references unknown ipset: {}",
+                rule.name, ms.name
+            ));
+        };
+        if set.family == Family::Any {
+            return Err(format!(
+                "rule {}: match_set target ipset {} has family=any (must be ipv4 or ipv6)",
+                rule.name, ms.name
+            ));
+        }
+        // If the rule pins a family, it must match the set's family.
+        if rule.family != Family::Any && rule.family != set.family {
+            return Err(format!(
+                "rule {}: family={:?} conflicts with ipset {} (family={:?})",
+                rule.name, rule.family, ms.name, set.family
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -180,49 +279,77 @@ pub fn check_port_forward(pf: &crate::config::PortForward, cfg: &Config) -> Resu
             ));
         }
     }
-    // Internal target must parse as IP:port.
-    let (ip_part, port_part) = pf.internal.split_once(':').ok_or_else(|| {
+    // Internal target must parse as `ip:port` or `[v6]:port`.
+    // We defer to `SocketAddr::from_str` which accepts both shapes
+    // — same parser the installer uses, so validation can't drift
+    // from install.
+    let sa: std::net::SocketAddr = pf.internal.parse().map_err(|_| {
         format!(
-            "port-forward {}: internal must be 'ip:port' (got {:?})",
+            "port-forward {}: internal must be 'ip:port' or '[ipv6]:port' (got {:?})",
             pf.name, pf.internal
-        )
-    })?;
-    let ip: std::net::Ipv4Addr = ip_part.parse().map_err(|_| {
-        format!(
-            "port-forward {}: invalid internal IP {:?}",
-            pf.name, ip_part
-        )
-    })?;
-    let _port: u16 = port_part.parse().map_err(|_| {
-        format!(
-            "port-forward {}: invalid internal port {:?}",
-            pf.name, port_part
         )
     })?;
     // If dest zone is auto-detected (not provided), a LAN/Simple
     // network must contain the internal IP — otherwise install
-    // can't emit the companion FORWARD rule.
+    // can't emit the companion FORWARD rule. Same rule applies to
+    // both families; we branch only on which subnet predicate to
+    // use (v4 prefix vs v6 prefix).
     if pf.dest.is_none() {
-        let hit = cfg.networks.iter().any(|n| {
-            use crate::config::Network;
-            match n {
-                Network::Lan {
-                    address, prefix, ..
+        let hit = match sa.ip() {
+            std::net::IpAddr::V4(v4) => cfg.networks.iter().any(|n| {
+                use crate::config::Network;
+                match n {
+                    Network::Lan {
+                        address, prefix, ..
+                    }
+                    | Network::Simple {
+                        address, prefix, ..
+                    } => ipv4_in_subnet(v4, *address, *prefix),
+                    Network::Wan { .. } => false,
                 }
-                | Network::Simple {
-                    address, prefix, ..
-                } => ipv4_in_subnet(ip, *address, *prefix),
-                Network::Wan { .. } => false,
-            }
-        });
+            }),
+            std::net::IpAddr::V6(v6) => cfg.networks.iter().any(|n| {
+                use crate::config::Network;
+                match n {
+                    Network::Lan {
+                        ipv6_address,
+                        ipv6_prefix,
+                        ..
+                    }
+                    | Network::Simple {
+                        ipv6_address,
+                        ipv6_prefix,
+                        ..
+                    } => match ipv6_address {
+                        Some(addr) => ipv6_in_subnet(v6, *addr, ipv6_prefix.unwrap_or(64)),
+                        None => false,
+                    },
+                    Network::Wan { .. } => false,
+                }
+            }),
+        };
         if !hit {
             return Err(format!(
-                "port-forward {}: internal IP {ip} is not in any LAN/Simple subnet; set `dest` explicitly",
-                pf.name
+                "port-forward {}: internal IP {} is not in any LAN/Simple subnet; set `dest` explicitly",
+                pf.name,
+                sa.ip(),
             ));
         }
     }
     Ok(())
+}
+
+fn ipv6_in_subnet(ip: std::net::Ipv6Addr, subnet: std::net::Ipv6Addr, prefix: u8) -> bool {
+    if prefix > 128 {
+        return false;
+    }
+    if prefix == 0 {
+        return true;
+    }
+    let ip_bits = u128::from(ip);
+    let sn_bits = u128::from(subnet);
+    let mask: u128 = u128::MAX.checked_shl(128 - prefix as u32).unwrap_or(0);
+    (ip_bits & mask) == (sn_bits & mask)
 }
 
 fn ipv4_in_subnet(ip: std::net::Ipv4Addr, subnet: std::net::Ipv4Addr, prefix: u8) -> bool {
@@ -499,6 +626,7 @@ mod tests {
                     action: Action::Accept,
                     dnat_target: None,
                     schedule: None,
+                    match_set: None,
                 }],
                 raw_nft: vec![],
             },
@@ -553,6 +681,7 @@ mod tests {
             routes: vec![],
             routes6: vec![],
             blocklists: vec![],
+            ipsets: vec![],
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,
@@ -649,6 +778,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -675,6 +805,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_ok());
     }
@@ -701,6 +832,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("src"), "error should flag src: {err}");
@@ -729,6 +861,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dest"), "error should flag dest: {err}");
@@ -756,6 +889,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("name"), "empty-name error: {err}");
@@ -783,6 +917,7 @@ mod tests {
             action: Action::Dnat,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(err.contains("dnat_target"), "got: {err}");
@@ -810,6 +945,7 @@ mod tests {
             action: Action::Dnat,
             dnat_target: Some("not-an-ip-port".to_string()),
             schedule: None,
+            match_set: None,
         };
         assert!(check_rule_zone_refs(&rule, &cfg).is_err());
     }
@@ -836,6 +972,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: Some("10.0.0.1:80".to_string()),
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(
@@ -866,6 +1003,7 @@ mod tests {
             action: Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         };
         let err = check_rule_zone_refs(&rule, &cfg).unwrap_err();
         assert!(

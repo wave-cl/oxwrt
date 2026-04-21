@@ -14,7 +14,7 @@
 // Types referenced outside of per-function `use` blocks live here.
 // The in-body `use rustables::...` statements (kept as-is from the
 // pre-split shape) handle rustables imports to minimise churn.
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use oxwrt_api::config::{
     Action, ChainPolicy, Config, Network, PortSpec, Proto, Service, WanConfig,
@@ -36,6 +36,7 @@ pub(crate) fn rule_needs_text_path(r: &oxwrt_api::config::Rule) -> bool {
         || r.log.is_some()
         || r.schedule.is_some()
         || r.family != Family::Any
+        || r.match_set.is_some()
 }
 
 use super::Error;
@@ -522,10 +523,16 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // the internal target forces that detour. Collected here so the
     // NAT table is installed if we need it even when no zone has
     // masquerade=true.
-    let need_reflection = cfg
-        .port_forwards
-        .iter()
-        .any(|pf| pf.reflection && parse_dnat_target(&pf.internal).is_some());
+    let need_reflection = cfg.port_forwards.iter().any(|pf| {
+        pf.reflection
+            && parse_dnat_target_any(&pf.internal)
+                .is_some_and(|(ip, _)| matches!(ip, IpAddr::V4(_)))
+    });
+    let need_reflection6 = cfg.port_forwards.iter().any(|pf| {
+        pf.reflection
+            && parse_dnat_target_any(&pf.internal)
+                .is_some_and(|(ip, _)| matches!(ip, IpAddr::V6(_)))
+    });
     if has_masq || need_reflection {
         let nat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-nat");
         let mut nat_batch = Batch::new();
@@ -556,7 +563,9 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
                 if !pf.reflection {
                     continue;
                 }
-                let Some((target_ip, target_port)) = parse_dnat_target(&pf.internal) else {
+                let Some((IpAddr::V4(target_ip), target_port)) =
+                    parse_dnat_target_any(&pf.internal)
+                else {
                     continue;
                 };
                 let dest_zone_name = pf
@@ -610,7 +619,7 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         }
         _ => false,
     });
-    if has_masq && any_v6_net {
+    if (has_masq && any_v6_net) || need_reflection6 {
         let nat6 = Table::new(ProtocolFamily::Ipv6).with_name("oxwrt-nat6");
         let mut nat6_batch = Batch::new();
         nat6_batch.add(&nat6, MsgType::Add);
@@ -622,15 +631,64 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
             .with_type(ChainType::Nat)
             .with_policy(NfChainPolicy::Accept)
             .add_to_batch(&mut nat6_batch);
-        Rule::new(&postrouting6)
-            .map_err(|e| Error::Firewall(e.to_string()))?
-            .with_expr(Masquerade::default())
-            .add_to_batch(&mut nat6_batch);
+        if has_masq && any_v6_net {
+            Rule::new(&postrouting6)
+                .map_err(|e| Error::Firewall(e.to_string()))?
+                .with_expr(Masquerade::default())
+                .add_to_batch(&mut nat6_batch);
+        }
+        // Hairpin SNAT for v6 port-forwards with reflection=true.
+        // Mirror of the v4 path immediately above: match oiface +
+        // daddr + proto + dport so the SNAT only fires on the
+        // packet heading back to the internal v6 target, not on
+        // unrelated traffic egressing the dest zone.
+        if need_reflection6 {
+            for pf in &cfg.port_forwards {
+                if !pf.reflection {
+                    continue;
+                }
+                let Some((IpAddr::V6(target_ip), target_port)) =
+                    parse_dnat_target_any(&pf.internal)
+                else {
+                    continue;
+                };
+                let dest_zone_name = pf
+                    .dest
+                    .clone()
+                    .or_else(|| find_dest_zone_for_ipv6(cfg, target_ip));
+                let Some(dest_zone_name) = dest_zone_name else {
+                    continue;
+                };
+                let dest_ifaces = zone_ifaces(cfg, &dest_zone_name);
+                let protos = proto_to_nf_list(Some(pf.proto));
+                for &proto in &protos {
+                    for oif in &dest_ifaces {
+                        let mut r = Rule::new(&postrouting6)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .oiface(oif)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .daddr(IpAddr::V6(target_ip));
+                        r = r.dport(target_port, proto);
+                        r.with_expr(Masquerade::default())
+                            .add_to_batch(&mut nat6_batch);
+                    }
+                }
+            }
+        }
         nat6_batch.send().map_err(|e| {
             tracing::error!(error = %e, "nftables NAT6 MASQUERADE batch send failed");
             Error::Firewall(e.to_string())
         })?;
-        tracing::info!("nftables NAT6 MASQUERADE installed");
+        tracing::info!(
+            reflection6_forwards = cfg
+                .port_forwards
+                .iter()
+                .filter(|p| p.reflection
+                    && parse_dnat_target_any(&p.internal)
+                        .is_some_and(|(ip, _)| matches!(ip, IpAddr::V6(_))))
+                .count(),
+            "nftables NAT6 MASQUERADE installed"
+        );
     }
 
     // ── 3. ip oxwrt-dnat: DNAT rules ────────────────────────────────
@@ -662,9 +720,22 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     let need_via_vpn_dns =
         via_vpn_dns_target.is_some() && cfg.firewall.zones.iter().any(|z| z.via_vpn);
 
-    // Build the DNAT table if EITHER legacy DNAT rules or port-forwards
-    // or via_vpn-DNS redirection need it. Three sources, one table.
-    if !dnat_rules.is_empty() || !cfg.port_forwards.is_empty() || need_via_vpn_dns {
+    // Partition port forwards by target family. v4 targets land in
+    // the v4 `oxwrt-dnat` table; v6 targets get their own
+    // `oxwrt-dnat6` table below. Cheap-enough to compute twice (the
+    // parse is pure, low-hundreds-of-ns) rather than thread a
+    // typed collection through the rustables batch code.
+    let any_v4_pf = cfg.port_forwards.iter().any(|pf| {
+        parse_dnat_target_any(&pf.internal).is_some_and(|(ip, _)| matches!(ip, IpAddr::V4(_)))
+    });
+    let any_v6_pf = cfg.port_forwards.iter().any(|pf| {
+        parse_dnat_target_any(&pf.internal).is_some_and(|(ip, _)| matches!(ip, IpAddr::V6(_)))
+    });
+
+    // Build the DNAT table if EITHER legacy DNAT rules or v4 port-
+    // forwards or via_vpn-DNS redirection need it. Three sources,
+    // one table. v6 port-forwards go through the v6 section below.
+    if !dnat_rules.is_empty() || any_v4_pf || need_via_vpn_dns {
         let dnat_table = Table::new(ProtocolFamily::Ipv4).with_name("oxwrt-dnat");
         let mut dnat_batch = Batch::new();
         dnat_batch.add(&dnat_table, MsgType::Add);
@@ -756,8 +827,13 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         // source zone's iface on `external_port` and rewrites dest
         // to `internal`. Typical: WAN eth1 → LAN 192.168.50.50:80.
         for pf in &cfg.port_forwards {
-            let Some((target_ip, target_port)) = parse_dnat_target(&pf.internal) else {
+            let Some((target_any, target_port)) = parse_dnat_target_any(&pf.internal) else {
                 tracing::warn!(pf = %pf.name, internal = %pf.internal, "invalid port-forward target; skipping");
+                continue;
+            };
+            // v6 targets are rendered in the `oxwrt-dnat6` section
+            // below; skip them here.
+            let IpAddr::V4(target_ip) = target_any else {
                 continue;
             };
             let src_ifaces = zone_ifaces(cfg, &pf.src);
@@ -888,6 +964,138 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
         );
     }
 
+    // ── 3b. ip6 oxwrt-dnat6: v6 port-forward DNAT ────────────────────
+    //
+    // Mirror of the v4 oxwrt-dnat table above, scoped to IPv6 targets.
+    // Operators who hand out GUA addresses to LAN hosts and want a
+    // single port exposed (e.g. a public-facing HTTP service on
+    // `[fd00:…::50]:80`) declare `[[port_forwards]]` with a bracketed
+    // IPv6 internal; this table handles them. Reflection for v6 works
+    // the same as v4: output-chain DNAT covers router-originated
+    // traffic, and per-listen-addr prerouting DNAT handles LAN clients
+    // that resolve DDNS → router v6 and send to the router MAC.
+    if any_v6_pf {
+        let dnat6_table = Table::new(ProtocolFamily::Ipv6).with_name("oxwrt-dnat6");
+        let mut dnat6_batch = Batch::new();
+        dnat6_batch.add(&dnat6_table, MsgType::Add);
+        dnat6_batch.add(&dnat6_table, MsgType::Del);
+        dnat6_batch.add(&dnat6_table, MsgType::Add);
+
+        let prerouting6 = Chain::new(&dnat6_table)
+            .with_name("prerouting")
+            .with_hook(Hook::new(HookClass::PreRouting, -100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut dnat6_batch);
+        let dnat6_output = Chain::new(&dnat6_table)
+            .with_name("output")
+            .with_hook(Hook::new(HookClass::Out, -100))
+            .with_type(ChainType::Nat)
+            .with_policy(NfChainPolicy::Accept)
+            .add_to_batch(&mut dnat6_batch);
+
+        // v6 listen addresses: every LAN/Simple network that carries
+        // an ipv6_address. Isolated-service veth IPs are v4-only
+        // today (see `svc_resolv`), so no need to extend the set
+        // with those here.
+        let mut listen_addrs6: Vec<Ipv6Addr> = Vec::new();
+        for net in &cfg.networks {
+            match net {
+                Network::Lan { ipv6_address, .. } | Network::Simple { ipv6_address, .. } => {
+                    if let Some(a) = ipv6_address {
+                        listen_addrs6.push(*a);
+                    }
+                }
+                Network::Wan { .. } => {}
+            }
+        }
+
+        for pf in &cfg.port_forwards {
+            let Some((target_any, target_port)) = parse_dnat_target_any(&pf.internal) else {
+                continue;
+            };
+            let IpAddr::V6(target_ip) = target_any else {
+                continue;
+            };
+            let src_ifaces = zone_ifaces(cfg, &pf.src);
+            if src_ifaces.is_empty() {
+                tracing::warn!(pf = %pf.name, src = %pf.src, "v6 port-forward src zone has no ifaces; skipping DNAT");
+                continue;
+            }
+            let protos = proto_to_nf_list(Some(pf.proto));
+            let ip_bytes = target_ip.octets().to_vec();
+            let port_bytes = target_port.to_be_bytes().to_vec();
+
+            for &proto in &protos {
+                for src_if in &src_ifaces {
+                    let nat_expr = Nat::default()
+                        .with_nat_type(NatType::DNat)
+                        .with_family(ProtocolFamily::Ipv6)
+                        .with_ip_register(Register::Reg1)
+                        .with_port_register(Register::Reg2);
+                    let mut r = Rule::new(&prerouting6)
+                        .map_err(|e| Error::Firewall(e.to_string()))?
+                        .iiface(src_if)
+                        .map_err(|e| Error::Firewall(e.to_string()))?;
+                    r = r.dport(pf.external_port, proto);
+                    r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                        .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
+                        .with_expr(nat_expr)
+                        .add_to_batch(&mut dnat6_batch);
+                }
+            }
+
+            if pf.reflection {
+                for &proto in &protos {
+                    // (a) output chain — router → router's v6 addr:external
+                    let nat_expr = Nat::default()
+                        .with_nat_type(NatType::DNat)
+                        .with_family(ProtocolFamily::Ipv6)
+                        .with_ip_register(Register::Reg1)
+                        .with_port_register(Register::Reg2);
+                    let mut r =
+                        Rule::new(&dnat6_output).map_err(|e| Error::Firewall(e.to_string()))?;
+                    r = r.dport(pf.external_port, proto);
+                    r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                        .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
+                        .with_expr(nat_expr)
+                        .add_to_batch(&mut dnat6_batch);
+                    // (b) prerouting, daddr = listen_addrs6
+                    for &laddr in &listen_addrs6 {
+                        let nat_expr = Nat::default()
+                            .with_nat_type(NatType::DNat)
+                            .with_family(ProtocolFamily::Ipv6)
+                            .with_ip_register(Register::Reg1)
+                            .with_port_register(Register::Reg2);
+                        let mut r = Rule::new(&prerouting6)
+                            .map_err(|e| Error::Firewall(e.to_string()))?
+                            .daddr(IpAddr::V6(laddr));
+                        r = r.dport(pf.external_port, proto);
+                        r.with_expr(Immediate::new_data(ip_bytes.clone(), Register::Reg1))
+                            .with_expr(Immediate::new_data(port_bytes.clone(), Register::Reg2))
+                            .with_expr(nat_expr)
+                            .add_to_batch(&mut dnat6_batch);
+                    }
+                }
+            }
+            tracing::info!(pf = %pf.name, external = pf.external_port, target = %pf.internal, reflection = pf.reflection, "v6 port-forward DNAT emitted");
+        }
+
+        dnat6_batch.send().map_err(|e| {
+            tracing::error!(error = %e, "nftables DNAT6 batch send failed");
+            Error::Firewall(e.to_string())
+        })?;
+        tracing::info!(
+            v6_port_forwards = cfg
+                .port_forwards
+                .iter()
+                .filter(|p| parse_dnat_target_any(&p.internal)
+                    .is_some_and(|(ip, _)| matches!(ip, IpAddr::V6(_))))
+                .count(),
+            "nftables DNAT6 installed"
+        );
+    }
+
     // Scheduled firewall rules: each [[firewall.rules]] with a
     // `schedule` field bypasses the rustables path and renders as
     // nft text, piped through `nft -f -` alongside raw_nft. nft's
@@ -902,13 +1110,21 @@ pub fn install_firewall(cfg: &Config) -> Result<(), Error> {
     // so they land before operator rules in the chain order.
     let baseline_script = build_baseline_defaults_script();
 
+    // IP sets: declare every `[[ipsets]]` entry as an nftables
+    // named set inside `inet oxwrt`, then populate it. Emitted
+    // BEFORE any rule that might reference `@<setname>` via a
+    // `match_set = { … }` predicate — `nft -f -` processes its
+    // input top-to-bottom and a forward reference to an unknown
+    // set would reject the whole script.
+    let ipsets_prologue = build_ipsets_prologue(cfg);
+
     // Raw-nft escape hatch: pipe every [[firewall.raw_nft]] entry
     // through `nft -f -` once the structured batches have all
     // landed. Non-fatal if nft is missing or a rule fails to
     // parse — we log and continue, because a bad raw-rule line
     // shouldn't prevent the rest of the firewall from coming up.
     // The operator's fix is an oxwrt.toml edit + reload.
-    let combined = format!("{baseline_script}{scheduled_script}");
+    let combined = format!("{ipsets_prologue}{baseline_script}{scheduled_script}");
     if !cfg.firewall.raw_nft.is_empty() || !combined.is_empty() {
         apply_nft_text(&cfg.firewall.raw_nft, &combined);
     }
@@ -971,6 +1187,69 @@ pub(crate) fn build_baseline_defaults_script() -> String {
     s.push_str("add rule inet oxwrt input icmp type echo-request accept\n");
     s.push_str("add rule inet oxwrt input icmpv6 type echo-request accept\n");
     s
+}
+
+/// Render every `[[ipsets]]` entry as an nft `add set …` + `add
+/// element …` pair inside the existing `inet oxwrt` table. Sets are
+/// idempotent under `nft -f -`: the prior `Del`/`Add` of the inet
+/// table in the rustables batch wipes any leftover set definition
+/// before we reach this script, so there's no "set already exists"
+/// race.
+///
+/// Format notes:
+/// - `type ipv4_addr` / `type ipv6_addr` depending on `family`.
+/// - `flags interval` auto-enabled when any entry contains `/` (CIDR).
+///   nft refuses prefix matches on non-interval sets; auto-detecting
+///   avoids a `set must have flag interval to add CIDR` footgun that
+///   would otherwise only surface at reload time.
+/// - `timeout` applies to the SET (default expiry); elements inherit
+///   unless they specify their own. Config keeps it simple: one
+///   timeout per set, every element expires the same way.
+///
+/// Empty `entries` is legal — the set is still declared so rules
+/// referencing it parse cleanly; they just never match until an
+/// element arrives (future `oxctl ipset add` RPC).
+pub(crate) fn build_ipsets_prologue(cfg: &Config) -> String {
+    use oxwrt_api::config::Family;
+    let mut out = String::new();
+    for set in &cfg.ipsets {
+        let type_str = match set.family {
+            Family::Ipv4 => "ipv4_addr",
+            Family::Ipv6 => "ipv6_addr",
+            // `any` isn't a valid nft set family. The validator
+            // rejects this at reload; we defensively skip here so
+            // a misconfigured entry doesn't emit garbage nft.
+            Family::Any => {
+                tracing::warn!(set = %set.name, "ipset family=any is invalid; skipping");
+                continue;
+            }
+        };
+        let needs_interval = set.entries.iter().any(|e| e.contains('/'));
+        let mut flags: Vec<&str> = Vec::new();
+        if needs_interval {
+            flags.push("interval");
+        }
+        let mut spec = format!("type {type_str}; ");
+        if !flags.is_empty() {
+            spec.push_str(&format!("flags {}; ", flags.join(",")));
+        }
+        if let Some(to) = set.timeout.as_deref() {
+            spec.push_str(&format!("timeout {}; ", to.trim()));
+        }
+        out.push_str(&format!(
+            "add set inet oxwrt {} {{ {} }}\n",
+            set.name,
+            spec.trim_end()
+        ));
+        if !set.entries.is_empty() {
+            let elements = set.entries.join(", ");
+            out.push_str(&format!(
+                "add element inet oxwrt {} {{ {} }}\n",
+                set.name, elements
+            ));
+        }
+    }
+    out
 }
 
 /// Build the `nft -f -` script for every rule that carries a
@@ -1085,6 +1364,16 @@ fn render_rule_body(out: &mut String, rule: &oxwrt_api::config::Rule, cfg: &Conf
     // family=ipv4) is caught by the validator.
     emit_addr_match(out, &rule.src_ip, /*is_src=*/ true, rule.family);
     emit_addr_match(out, &rule.dest_ip, /*is_src=*/ false, rule.family);
+    // Named ipset match — render as `ip saddr @set` / `ip6 daddr
+    // != @set` etc. The set's family (looked up on cfg.ipsets) drives
+    // the `ip` vs `ip6` prefix; direction drives saddr/daddr; `negate`
+    // inserts `!=`. Unknown set names were supposed to be caught by
+    // the validator — if we reach this branch with an unresolvable
+    // name, log and skip (emitting `@unknown` would produce an nft
+    // parse error that rejects the whole script).
+    if let Some(ms) = rule.match_set.as_ref() {
+        emit_match_set(out, ms, cfg);
+    }
     if !rule.src_mac.is_empty() {
         if rule.src_mac.len() == 1 {
             out.push_str(&format!("ether saddr {} ", rule.src_mac[0]));
@@ -1209,6 +1498,32 @@ fn emit_addr_match(
             out.push_str(&format!("ip6 {dir} {{ {list} }} "));
         }
     }
+}
+
+/// Emit `ip saddr @set`, `ip6 daddr != @set`, etc. for a named ipset
+/// reference. Family comes from the set definition, not the rule —
+/// the rule's `family` restriction is enforced separately via the
+/// address-family `meta nfproto` prefix upstream.
+fn emit_match_set(out: &mut String, ms: &oxwrt_api::config::MatchSet, cfg: &Config) {
+    use oxwrt_api::config::{Family, MatchSetDir};
+    let Some(set) = cfg.ipsets.iter().find(|s| s.name == ms.name) else {
+        tracing::warn!(set = %ms.name, "rule references unknown ipset; skipping match");
+        return;
+    };
+    let prefix = match set.family {
+        Family::Ipv4 => "ip",
+        Family::Ipv6 => "ip6",
+        Family::Any => {
+            tracing::warn!(set = %ms.name, "ipset family=any is invalid; skipping match");
+            return;
+        }
+    };
+    let dir = match ms.direction {
+        MatchSetDir::Src => "saddr",
+        MatchSetDir::Dst => "daddr",
+    };
+    let op = if ms.negate { "!= " } else { "" };
+    out.push_str(&format!("{prefix} {dir} {op}@{} ", ms.name));
 }
 
 /// Render just the `<proto> dport <port>` (or Both / ICMP) fragment.
@@ -1535,6 +1850,58 @@ fn find_dest_zone_for_ip(cfg: &Config, ip: Ipv4Addr) -> Option<String> {
     None
 }
 
+/// IPv6 analogue of `find_dest_zone_for_ip`. Matches the target v6
+/// address against every LAN/Simple network's `(ipv6_address,
+/// ipv6_prefix)` pair; returns the first firewall zone whose
+/// `networks` list references a matching network. Used by v6 port-
+/// forward hairpin SNAT to discover the dest zone when the operator
+/// hasn't pinned `dest` explicitly.
+fn find_dest_zone_for_ipv6(cfg: &Config, ip: Ipv6Addr) -> Option<String> {
+    for net in &cfg.networks {
+        let (net_name, subnet_ip, prefix) = match net {
+            Network::Lan {
+                name,
+                ipv6_address,
+                ipv6_prefix,
+                ..
+            }
+            | Network::Simple {
+                name,
+                ipv6_address,
+                ipv6_prefix,
+                ..
+            } => {
+                let Some(addr) = ipv6_address else { continue };
+                let prefix = ipv6_prefix.unwrap_or(64);
+                (name.as_str(), *addr, prefix)
+            }
+            Network::Wan { .. } => continue,
+        };
+        if !ipv6_in_subnet(ip, subnet_ip, prefix) {
+            continue;
+        }
+        for z in &cfg.firewall.zones {
+            if z.networks.iter().any(|n| n == net_name) {
+                return Some(z.name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn ipv6_in_subnet(ip: Ipv6Addr, subnet: Ipv6Addr, prefix: u8) -> bool {
+    if prefix > 128 {
+        return false;
+    }
+    if prefix == 0 {
+        return true;
+    }
+    let ip_bits = u128::from(ip);
+    let sn_bits = u128::from(subnet);
+    let mask: u128 = u128::MAX.checked_shl(128 - prefix as u32).unwrap_or(0);
+    (ip_bits & mask) == (sn_bits & mask)
+}
+
 fn ipv4_in_subnet(ip: Ipv4Addr, subnet: Ipv4Addr, prefix: u8) -> bool {
     if prefix > 32 {
         return false;
@@ -1589,12 +1956,31 @@ fn port_spec_to_list(spec: &Option<PortSpec>) -> Vec<u16> {
     }
 }
 
-/// Parse a DNAT target string "ip:port" into (Ipv4Addr, u16).
+/// Parse a DNAT target string "ip:port" into (Ipv4Addr, u16). Used
+/// only by legacy `[[firewall.rules]] action="dnat"` entries, which
+/// are v4-only by design (operators wanting v6 port-forwards use
+/// `[[port_forwards]]` with bracketed syntax). Kept distinct from
+/// `parse_dnat_target_any` so the legacy path can't accidentally
+/// accept a v6 literal and try to install it into the v4 table.
 fn parse_dnat_target(s: &str) -> Option<(Ipv4Addr, u16)> {
     let (ip_str, port_str) = s.rsplit_once(':')?;
     let ip = ip_str.parse::<Ipv4Addr>().ok()?;
     let port = port_str.parse::<u16>().ok()?;
     Some((ip, port))
+}
+
+/// Parse a port-forward `internal` string into (IpAddr, u16). Accepts
+/// both forms:
+/// - `1.2.3.4:80` → IPv4
+/// - `[fd00:dead:beef::5]:80` → IPv6 (brackets required for unambiguous
+///   port separation)
+///
+/// Implementation leans on `SocketAddr::from_str`, which handles both
+/// shapes natively. Returns None for any parse failure (malformed
+/// address, missing port, out-of-range port, unbracketed v6).
+pub(crate) fn parse_dnat_target_any(s: &str) -> Option<(IpAddr, u16)> {
+    let sa: std::net::SocketAddr = s.parse().ok()?;
+    Some((sa.ip(), sa.port()))
 }
 
 /// Convention for the host-side end of a service's veth pair, defined
@@ -1652,6 +2038,7 @@ mod tests {
             action: oxwrt_api::config::Action::Accept,
             dnat_target: None,
             schedule: None,
+            match_set: None,
         }
     }
 
@@ -1820,6 +2207,7 @@ mod tests {
             routes: vec![],
             routes6: vec![],
             blocklists: vec![],
+            ipsets: vec![],
             upnp: None,
             vpn_client: vec![],
             backup_sftp: None,
@@ -1869,6 +2257,179 @@ mod tests {
         // which doesn't yield a valid v4. Document intent.
         assert_eq!(parse_dnat_target("[::1]:53"), None);
         assert_eq!(parse_dnat_target("fe80::1:53"), None);
+    }
+
+    // ── parse_dnat_target_any: supports both v4 and bracketed v6 ──
+
+    #[test]
+    fn parse_dnat_target_any_accepts_v4() {
+        let (ip, port) = parse_dnat_target_any("10.0.0.5:8080").unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn parse_dnat_target_any_accepts_bracketed_v6() {
+        let (ip, port) = parse_dnat_target_any("[fd00::50]:80").unwrap();
+        assert_eq!(ip, IpAddr::V6("fd00::50".parse::<Ipv6Addr>().unwrap()));
+        assert_eq!(port, 80);
+        // Link-local with scope would be rejected by SocketAddr; we
+        // don't support scoped v6 port-forwards (they wouldn't make
+        // sense through a WAN-facing DNAT anyway).
+        assert!(parse_dnat_target_any("[::1]:53").is_some());
+    }
+
+    #[test]
+    fn parse_dnat_target_any_rejects_unbracketed_v6() {
+        // Without brackets, `rsplit_once(':')` can't disambiguate
+        // host-vs-port; SocketAddr's parser rejects it cleanly.
+        assert!(parse_dnat_target_any("fd00::1:80").is_none());
+    }
+
+    // ── ipsets prologue ────────────────────────────────────────────
+
+    #[test]
+    fn ipsets_prologue_empty_when_no_sets() {
+        let cfg = minimal_config();
+        assert!(build_ipsets_prologue(&cfg).is_empty());
+    }
+
+    #[test]
+    fn ipsets_prologue_renders_v4_bare_addresses() {
+        use oxwrt_api::config::{Family, IpSet};
+        let mut cfg = minimal_config();
+        cfg.ipsets.push(IpSet {
+            name: "allow".into(),
+            family: Family::Ipv4,
+            entries: vec!["1.2.3.4".into(), "5.6.7.8".into()],
+            timeout: None,
+        });
+        let s = build_ipsets_prologue(&cfg);
+        // No interval flag (no slash in entries).
+        assert!(
+            s.contains("add set inet oxwrt allow { type ipv4_addr; }"),
+            "{s}"
+        );
+        assert!(
+            s.contains("add element inet oxwrt allow { 1.2.3.4, 5.6.7.8 }"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn ipsets_prologue_auto_enables_interval_on_cidr() {
+        use oxwrt_api::config::{Family, IpSet};
+        let mut cfg = minimal_config();
+        cfg.ipsets.push(IpSet {
+            name: "blocklist".into(),
+            family: Family::Ipv4,
+            entries: vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
+            timeout: None,
+        });
+        let s = build_ipsets_prologue(&cfg);
+        assert!(s.contains("flags interval"), "{s}");
+    }
+
+    #[test]
+    fn ipsets_prologue_renders_v6_with_timeout() {
+        use oxwrt_api::config::{Family, IpSet};
+        let mut cfg = minimal_config();
+        cfg.ipsets.push(IpSet {
+            name: "tempban6".into(),
+            family: Family::Ipv6,
+            entries: vec!["fd00::/8".into()],
+            timeout: Some("1h".into()),
+        });
+        let s = build_ipsets_prologue(&cfg);
+        assert!(s.contains("type ipv6_addr"), "{s}");
+        assert!(s.contains("flags interval"), "{s}");
+        assert!(s.contains("timeout 1h"), "{s}");
+    }
+
+    // ── match_set rendering ────────────────────────────────────────
+
+    #[test]
+    fn render_match_set_src_v4() {
+        use oxwrt_api::config::{Family, IpSet, MatchSet, MatchSetDir};
+        let mut cfg = minimal_config();
+        cfg.ipsets.push(IpSet {
+            name: "bad".into(),
+            family: Family::Ipv4,
+            entries: vec!["1.2.3.0/24".into()],
+            timeout: None,
+        });
+        let mut r = basic_rule("drop-bad");
+        r.match_set = Some(MatchSet {
+            name: "bad".into(),
+            direction: MatchSetDir::Src,
+            negate: false,
+        });
+        r.action = oxwrt_api::config::Action::Drop;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("ip saddr @bad"), "{s}");
+        assert!(s.contains(" drop"), "{s}");
+    }
+
+    #[test]
+    fn render_match_set_negated_v6_dst() {
+        use oxwrt_api::config::{Family, IpSet, MatchSet, MatchSetDir};
+        let mut cfg = minimal_config();
+        cfg.ipsets.push(IpSet {
+            name: "trusted6".into(),
+            family: Family::Ipv6,
+            entries: vec!["fd00::/8".into()],
+            timeout: None,
+        });
+        let mut r = basic_rule("drop-untrusted");
+        r.match_set = Some(MatchSet {
+            name: "trusted6".into(),
+            direction: MatchSetDir::Dst,
+            negate: true,
+        });
+        r.action = oxwrt_api::config::Action::Drop;
+        cfg.firewall.rules.push(r);
+        let s = build_scheduled_rules_script(&cfg);
+        assert!(s.contains("ip6 daddr != @trusted6"), "{s}");
+    }
+
+    #[test]
+    fn match_set_forces_text_path() {
+        use oxwrt_api::config::{MatchSet, MatchSetDir};
+        let mut r = basic_rule("t");
+        assert!(!rule_needs_text_path(&r));
+        r.match_set = Some(MatchSet {
+            name: "x".into(),
+            direction: MatchSetDir::Src,
+            negate: false,
+        });
+        assert!(rule_needs_text_path(&r));
+    }
+
+    // ── find_dest_zone_for_ipv6 ────────────────────────────────────
+
+    #[test]
+    fn find_dest_zone_for_ipv6_matches_lan_prefix() {
+        let mut cfg = minimal_config();
+        // Swap in a v6 address on the lan network.
+        if let Network::Lan {
+            ipv6_address,
+            ipv6_prefix,
+            ..
+        } = &mut cfg.networks[0]
+        {
+            *ipv6_address = Some("fd00:1::1".parse().unwrap());
+            *ipv6_prefix = Some(64);
+        }
+        assert_eq!(
+            find_dest_zone_for_ipv6(&cfg, "fd00:1::50".parse().unwrap()),
+            Some("trusted".to_string())
+        );
+        // Outside the /64.
+        assert_eq!(
+            find_dest_zone_for_ipv6(&cfg, "fd00:2::1".parse().unwrap()),
+            None
+        );
     }
 
     // ── port_spec_to_list ──────────────────────────────────────────

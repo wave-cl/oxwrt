@@ -308,15 +308,6 @@ The zone/rule abstraction covers the common deployments but
 doesn't match fw4 feature-for-feature. Gaps that remain after
 the fw4-parity pass:
 
-- **IPv6 DNAT / port-forwards to v6 targets.** `oxwrt-nat6`
-  (MASQUERADE66) is installed when dual-stack zones have
-  `masquerade = true`, but `PortForward.internal` still parses
-  only IPv4 `ip:port`. Operators exposing a v6 service hand-roll
-  via `[[firewall.raw_nft]]` against `ip6 filter` / `ip6
-  oxwrt-nat6` until the schema grows a v6 target variant.
-- **IPsets.** No `[[firewall.ipsets]]` with `match_set` in
-  rules. Country-block / threat-intel workflows need raw_nft
-  sets + manual member management.
 - **Connection-tracking helpers (SIP ALG, FTP active mode, PPTP
   GRE, RTSP).** Not auto-loaded. Operators who need these load
   the modules manually and express them via raw_nft.
@@ -324,9 +315,16 @@ the fw4-parity pass:
   throughput forwarding paths or CGNAT-facing ISP setups).
 
 Everything else from the mainstream fw4 surface landed in the
-parity pass: zone `default_output`, rule `src_ip`/`dest_ip`/
+parity passes: zone `default_output`, rule `src_ip`/`dest_ip`/
 `src_mac`/`src_port`/`icmp_type`/`family`/`limit`/`log`/
-`enabled`, port-forward `reflection`, IPv6 MASQUERADE66.
+`enabled`, port-forward `reflection`, IPv6 MASQUERADE66,
+**IPv6 port-forwards** via bracketed `[ipv6]:port` syntax
+(installed into a dedicated `oxwrt-dnat6` nftables table with
+reflection + hairpin SNAT in `oxwrt-nat6`), and **declarative
+ipsets** (`[[ipsets]]` at top level + `match_set = { name,
+direction, negate }` on rules — sets live in the `inet oxwrt`
+table, CIDR entries auto-enable `flags interval`, per-element
+`timeout` supported).
 
 ### Known — no passphrase strength enforcement
 

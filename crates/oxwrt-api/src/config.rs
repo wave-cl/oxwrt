@@ -104,6 +104,17 @@ pub struct Config {
     /// table, refreshed at `refresh_seconds` cadence.
     #[serde(default)]
     pub blocklists: Vec<Blocklist>,
+    /// Named IP sets. Each entry declares an nftables set (v4 or v6,
+    /// optionally with a per-element timeout), populated from the
+    /// `entries` list at install time. Rules reference a set by name
+    /// via `match_set` — cheaper than emitting the same anonymous set
+    /// on every rule, and the one place to edit when the list
+    /// changes. Typical uses: static allowlists ("office IPs"),
+    /// curated denylists, country-specific blocks from a static feed.
+    /// For dynamically-refreshed feeds use `[[blocklists]]` instead
+    /// — `[[ipsets]]` is declarative, not fetched.
+    #[serde(default)]
+    pub ipsets: Vec<IpSet>,
     /// Optional UPnP / NAT-PMP / PCP port-mapping daemon. When set,
     /// a miniupnpd service is configured (config file generated
     /// from this block) and — assuming the binary is present in
@@ -1189,6 +1200,80 @@ pub struct Rule {
     /// strings reject the config.
     #[serde(default)]
     pub schedule: Option<String>,
+    /// Match against a named `[[ipsets]]` entry. The referenced set's
+    /// family (ipv4 / ipv6) drives which nft prefix is emitted:
+    /// `ip saddr @setname` vs `ip6 daddr @setname`. `direction` picks
+    /// source vs destination; `negate = true` emits `!=` (match when
+    /// NOT in the set). The set must exist in `cfg.ipsets` — checked
+    /// at reload time. Using `match_set` forces the rule through the
+    /// nft-text path (rustables' builder has no `@set` sugar).
+    #[serde(default)]
+    pub match_set: Option<MatchSet>,
+}
+
+/// Reference from a firewall rule to an `[[ipsets]]` entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatchSet {
+    /// Name of the set declared in `[[ipsets]]`.
+    pub name: String,
+    /// Which address to match against the set.
+    #[serde(default)]
+    pub direction: MatchSetDir,
+    /// When true, match packets whose address is NOT in the set
+    /// (renders `ip saddr != @name`). Default false.
+    #[serde(default)]
+    pub negate: bool,
+}
+
+/// Direction for `MatchSet` — source or destination address.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchSetDir {
+    #[default]
+    Src,
+    Dst,
+}
+
+/// A named nftables set, populated from a static `entries` list at
+/// install time and referenced from firewall rules via
+/// `match_set = { name = "…", direction = "src" }`.
+///
+/// Sets live in the existing `inet oxwrt` table. `family` picks
+/// between `type ipv4_addr` and `type ipv6_addr` — nft sets are
+/// single-family (an `inet` table can host both kinds, but a single
+/// set has one type). CIDR entries (any entry containing `/`)
+/// auto-enable `flags interval`, which nft requires for prefix
+/// matches. Bare-address sets (no slashes) skip the flag for a
+/// smaller kernel footprint.
+///
+/// When `timeout` is set, every element is inserted with the given
+/// expiry — useful for "blocklist auto-expires after an hour" even
+/// though the static config doesn't change. `timeout` accepts nft's
+/// own syntax: `30s`, `5m`, `1h`, `1d`, or compound `1h30m`.
+///
+/// For dynamically-refreshed feeds (banIP-style periodic fetch) use
+/// `[[blocklists]]` instead — `[[ipsets]]` is evaluated once per
+/// reload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IpSet {
+    pub name: String,
+    /// Address family — must be `ipv4` or `ipv6`. `any` is rejected
+    /// because nft sets are single-family.
+    pub family: Family,
+    /// List of addresses or CIDRs. Mixing bare addresses and CIDRs is
+    /// fine — nft's interval flag covers both. Empty list is legal
+    /// (the set still gets declared, rules referencing it just never
+    /// match) — useful for operator-populated sets whose entries
+    /// arrive via a later runtime RPC / reload.
+    #[serde(default)]
+    pub entries: Vec<String>,
+    /// Optional per-element timeout. Accepts nft syntax (`30s`,
+    /// `5m`, `1h`, `1d`, compound `1h30m`). When set, every element
+    /// is declared with `elements = { … timeout T }` — the kernel
+    /// GCs the element after T with no rule reload needed. Leave
+    /// unset for permanent entries.
+    #[serde(default)]
+    pub timeout: Option<String>,
 }
 
 /// A single WAN-side port forward. Expanded at install time into

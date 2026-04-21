@@ -62,6 +62,8 @@
 #   routes         static IPv4 routes
 #   routes6        static IPv6 routes
 #   blocklists     banip-style periodic CIDR drop sets
+#   ipsets         declarative named nft sets (referenced from rules
+#                  via `match_set = { name, direction }`)
 #   wireguard      roadwarrior + site-to-site tunnels (server side)
 #   vpn_client     outbound WG tunnels to commercial VPN providers
 #                  (full-tunnel v4+v6, killswitch, multi-profile
@@ -637,16 +639,24 @@ action = "accept"
 # accept, so a port-forward can't be half-configured (the failure mode
 # that made loose `[[firewall.rules]]` action="dnat" rules a footgun).
 #
+# Both IPv4 and IPv6 targets are supported. The `internal` string
+# uses the standard SocketAddr syntax: `ip:port` for v4,
+# `[ipv6]:port` (brackets) for v6. v4 and v6 entries coexist freely —
+# each goes into its own nftables table (`oxwrt-dnat` / `oxwrt-dnat6`).
+#
 # ── Required ──
 #   name           unique identifier
 #   proto          "tcp" | "udp" | "both"
 #   external_port  u16, port on the source zone's iface
-#   internal       "ip:port", destination host and port
+#   internal       "ip:port" (v4) or "[ipv6]:port" (v6)
 #
 # ── Optional ──
 #   src            source zone, default "wan"
 #   dest           dest zone, default auto-detected by matching the
 #                  internal IP against LAN/Simple network subnets
+#   reflection     default true — hairpin NAT so a LAN client
+#                  resolving DDNS → WAN IP still reaches the internal
+#                  target
 #
 # Example (commented — uncomment + edit to enable):
 #
@@ -657,11 +667,22 @@ action = "accept"
 # internal = "192.168.50.50:25565"
 # src = "wan"                      # default "wan"
 # dest = "lan"                     # default auto-detected from internal IP
-# reflection = true                # default true — hairpin NAT so a LAN
-#                                  # client resolving DDNS → WAN IP still
-#                                  # reaches the internal target. Set to
-#                                  # false only if double-NAT causes
-#                                  # trouble on the same broadcast domain.
+# reflection = true                # default true — set false only if
+#                                  # double-NAT causes trouble on the
+#                                  # same broadcast domain.
+#
+# IPv6 port-forward example — brackets around the v6 literal are
+# REQUIRED (without them, `rsplit(':')` on host:port can't tell
+# where the address ends and the port begins). Reflection for v6
+# works the same as v4: a companion DNAT on the `output` chain
+# plus hairpin MASQUERADE in `oxwrt-nat6` postrouting.
+#
+# [[port_forwards]]
+# name = "http6"
+# proto = "tcp"
+# external_port = 80
+# internal = "[fd00:dead:beef::50]:80"
+# # src defaults to "wan"; dest auto-detected against LAN v6 prefix.
 
 # ---------------- Static routes ----------------
 #
@@ -712,6 +733,78 @@ action = "accept"
 # url = "https://iplists.firehol.org/files/firehol_level1.netset"
 # refresh_seconds = 86400
 # zones = []                     # empty = router-wide drop
+
+# ---------------- Named IP sets ----------------
+#
+# Declarative nftables sets — one `add set` + bulk `add element` per
+# entry at firewall-install time. Rules reference a set by name via
+# `match_set = { name = "…", direction = "src" }`, rendering as
+# `ip saddr @name` in the text path. Much cheaper than inlining the
+# same anonymous `{ a, b, c }` on every rule, and the one place to
+# edit when the list changes.
+#
+# For dynamically-refreshed feeds (banIP-style periodic fetch) use
+# `[[blocklists]]` instead — `[[ipsets]]` is evaluated once per
+# reload, from a static `entries` list.
+#
+# ── Required ──
+#   name     unique identifier, referenced from rules via match_set.name
+#   family   "ipv4" or "ipv6" (nft sets are single-family)
+#
+# ── Optional ──
+#   entries  list of addresses or CIDRs (mixing is fine — CIDRs auto-
+#            enable `flags interval`). Default [].
+#   timeout  per-element expiry in nft syntax ("30s", "5m", "1h",
+#            "1d", compound "1h30m"). When set, every element expires
+#            after T without a reload.
+#
+# Example (commented):
+#
+# [[ipsets]]
+# name = "office_ips"
+# family = "ipv4"
+# entries = [
+#   "203.0.113.10",
+#   "203.0.113.11",
+#   "198.51.100.0/24",
+# ]
+#
+# [[ipsets]]
+# name = "manual_bans"
+# family = "ipv4"
+# timeout = "1h"                 # each element self-expires
+# entries = [
+#   "1.2.3.4",
+# ]
+#
+# Then reference from a rule:
+#
+# [[firewall.rules]]
+# name = "allow-ssh-office-only"
+# src = "wan"
+# proto = "tcp"
+# dest_port = 22
+# match_set = { name = "office_ips", direction = "src" }
+# action = "accept"
+#
+# [[firewall.rules]]
+# name = "drop-banned"
+# src = "wan"
+# match_set = { name = "manual_bans", direction = "src" }
+# action = "drop"
+#
+# ── Negation ──
+#
+# `negate = true` inverts the match (fire when the packet is NOT in
+# the set). Useful for whitelists:
+#
+# [[firewall.rules]]
+# name = "drop-untrusted-admin"
+# src = "wan"
+# proto = "tcp"
+# dest_port = 51820
+# match_set = { name = "office_ips", direction = "src", negate = true }
+# action = "drop"
 
 # ---------------- WireGuard ----------------
 #
