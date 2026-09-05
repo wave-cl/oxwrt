@@ -53,17 +53,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # `cargo fmt --all` walks into the sibling squic-rust
-       # path-dep and fails on its formatting style (not ours to
-      # police). Enumerate our workspace packages explicitly.
+      # `cargo fmt --all` walks into the sibling squic-rust path-dep and
+      # fails on its formatting style (not ours to police). Enumerate our
+      # workspace packages instead.
       - run: |
-          cargo fmt \
-            -p oxwrt-api \
-            -p oxwrt-linux \
-            -p oxwrt-proto \
-            -p oxwrtctl-cli \
-            -p oxwrtd \
-            -- --check
+          # Derived from cargo, not written out. A hand-kept list goes
+          # silently stale: add a crate, forget this line, and it is never
+          # checked while the job stays green. `--no-deps` is exactly our
+          # workspace members and never the squic path dep, which is the
+          # set wanted. Echoed so a green run shows what it covered.
+          args=()
+          while read -r n; do args+=(-p "$n"); done \
+            < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          test ${#args[@]} -gt 0
+          echo "checking: ${args[*]}"
+          cargo fmt "${args[@]}" -- --check
 
   # ── clippy ─────────────────────────────────────────────────────────
   # Gated on `-D warnings` for our five workspace packages. squic has
@@ -99,13 +103,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-clippy-
       - run: |
-          cargo clippy \
-            -p oxwrt-api \
-            -p oxwrt-linux \
-            -p oxwrt-proto \
-            -p oxwrtctl-cli \
-            -p oxwrtd \
-            --all-targets -- -D warnings
+          # Derived from cargo, not written out. A hand-kept list goes
+          # silently stale: add a crate, forget this line, and it is never
+          # checked while the job stays green. `--no-deps` is exactly our
+          # workspace members and never the squic path dep, which is the
+          # set wanted. Echoed so a green run shows what it covered.
+          args=()
+          while read -r n; do args+=(-p "$n"); done \
+            < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          test ${#args[@]} -gt 0
+          echo "checking: ${args[*]}"
+          cargo clippy "${args[@]}" --all-targets -- -D warnings
 
   # ── test ───────────────────────────────────────────────────────────
   # Host-target only (x86_64-unknown-linux-gnu on the runner). The
