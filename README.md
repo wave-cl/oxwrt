@@ -112,6 +112,9 @@ oxctl 192.168.50.1:51820 rollback --confirm --to 2   # deeper rewind
 
 ## First-flash workflow
 
+See [`docs/FLASHING.md`](docs/FLASHING.md) for the full build → flash → bring-up → recovery checklist, including the GL-MT6000 U-Boot recovery path. The short version:
+
+
 1. **Build the image** (image-builder + overlay). The project's
    openwrt-packages/imagebuilder-overlay/ contains the preinit
    hooks, sQUIC seed provisioning, and Cargo-built binaries. See
